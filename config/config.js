@@ -30,6 +30,20 @@ module.exports = {
   webBaseUrl: process.env.TELEBIRR_WEB_BASE_URL || "https://telebirr.com/payment/checkout",
   
   // Private key for signing (path to your private key file)
-  //privateKeyPath: process.env.TELEBIRR_PRIVATE_KEY_PATH || "./config/telebirr_private_key.pem",
-  privateKey: process.env.TELEBIRR_PRIVATE_KEY || fs.readFileSync(path.join(__dirname, 'telebirr_private_key.pem'), 'utf8'),
+  // Only load from file if TELEBIRR_PRIVATE_KEY env var is not set
+  get privateKey() {
+    if (process.env.TELEBIRR_PRIVATE_KEY) {
+      return process.env.TELEBIRR_PRIVATE_KEY;
+    }
+    // Try to load from file only if file exists (for local development)
+    const keyPath = path.join(__dirname, 'telebirr_private_key.pem');
+    if (fs.existsSync(keyPath)) {
+      return fs.readFileSync(keyPath, 'utf8');
+    }
+    // Return empty string if mock mode is enabled
+    if (process.env.USE_MOCK_TELEBIRR === 'true') {
+      return 'mock_private_key';
+    }
+    throw new Error('TELEBIRR_PRIVATE_KEY not configured');
+  }
 };
