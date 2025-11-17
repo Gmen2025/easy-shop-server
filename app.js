@@ -85,14 +85,16 @@ const telebirrRouter = require('./routers/telebirr');
 //Middleware
 app.use(express.json());
 app.use(morgan('tiny'));
+app.use(express.urlencoded({ extended: true }));
+
+//Swagger Documentation Route (MUST be before authJwt middleware)
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
+
+// Apply JWT authentication (after Swagger route)
 app.use(authJwt());
 app.use('/public/uploads', express.static(__dirname + '/public/uploads'));;
 app.use(errorHandler);
-app.use(express.urlencoded({ extended: true }));
 
-
-//Swagger Documentation Route (public - no auth required)
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
 
 //Routers
 app.use(`${api}/products`, productsRouter);
@@ -150,4 +152,6 @@ mongoose.connect(process.env.CONNECTION_STRING, {
 //   console.log("Express is working on port " + port);
 // });
 
+//API Base URL: https://easy-shop-server-wldr.onrender.com/api/v1
+//Documentation: https://easy-shop-server-wldr.onrender.com/api-docs
 
