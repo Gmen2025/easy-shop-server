@@ -60,6 +60,34 @@ router.post(`/`, async (req, res) => {
   res.send(use);
 });
 
+/**
+ * @swagger
+ * /api/v1/users/login:
+ *   post:
+ *     summary: User login
+ *     tags: [Users]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *               - password
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 example: user@example.com
+ *               password:
+ *                 type: string
+ *                 example: password123
+ *     responses:
+ *       200:
+ *         description: Login successful, returns JWT token
+ *       400:
+ *         description: Invalid credentials or email not verified
+ */
 // Modified login to check email verification
 router.post("/login", async (req, res) => {
   const user = await User.findOne({ email: req.body.email });

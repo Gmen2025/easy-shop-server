@@ -31,6 +31,25 @@ const storage = multer.diskStorage({
   
   const uploadOptions = multer({ storage: storage })
 
+/**
+ * @swagger
+ * /api/v1/products:
+ *   get:
+ *     summary: Get all products
+ *     tags: [Products]
+ *     parameters:
+ *       - in: query
+ *         name: isFeatured
+ *         schema:
+ *           type: string
+ *           enum: [true, false]
+ *         description: Filter by featured products
+ *     responses:
+ *       200:
+ *         description: List of products
+ *       500:
+ *         description: Server error
+ */
 //Get all products
 router.get(`/`, async(req, res) => {
     try {
@@ -57,6 +76,25 @@ router.get(`/`, async(req, res) => {
     }
  })
 
+/**
+ * @swagger
+ * /api/v1/products/{id}:
+ *   get:
+ *     summary: Get product by ID
+ *     tags: [Products]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Product ID
+ *     responses:
+ *       200:
+ *         description: Product details
+ *       500:
+ *         description: Product not found
+ */
  router.get('/:id', async(req, res) => {
     const product = await Product.findById(req.params.id).populate('category');
  

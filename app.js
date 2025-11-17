@@ -70,6 +70,10 @@ app.use((req, res, next) => {
 
 const api = process.env.API_URL;
 
+// Swagger documentation
+const swaggerUi = require('swagger-ui-express');
+const swaggerDocs = require('./swagger');
+
 const productsRouter = require('./routers/products');
 const categoriesRouter = require('./routers/categories');
 const ordersRouter = require('./routers/orders');
@@ -86,6 +90,9 @@ app.use('/public/uploads', express.static(__dirname + '/public/uploads'));;
 app.use(errorHandler);
 app.use(express.urlencoded({ extended: true }));
 
+
+//Swagger Documentation Route (public - no auth required)
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
 
 //Routers
 app.use(`${api}/products`, productsRouter);
