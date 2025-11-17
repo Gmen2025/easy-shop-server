@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: easy-shop-api
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: API_URL
+        value: /api/v1
+      - key: PORT
+        value: 3001
+    # Add your environment variables in Render Dashboard
+    # Don't put secrets here - configure them in Render's Environment tab
