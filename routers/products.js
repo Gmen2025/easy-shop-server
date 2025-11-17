@@ -33,13 +33,28 @@ const storage = multer.diskStorage({
 
 //Get all products
 router.get(`/`, async(req, res) => {
-    const productList = await Product.find().populate('category');
- 
-    if(!productList) {
-       res.status(500).json({success: false});
-     }
-     
-     res.send(productList);
+    try {
+        let filter = {};
+        
+        // Handle isFeatured query parameter
+        if (req.query.isFeatured === 'true') {
+            filter.isFeatured = true;
+        } else if (req.query.isFeatured === 'false') {
+            filter.isFeatured = false;
+        }
+        
+        console.log('Products filter:', filter);
+        
+        const productList = await Product.find(filter).populate('category');
+        
+        if (!productList) {
+            res.status(500).json({ success: false });
+        }
+        
+        res.send(productList);
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
  })
 
  router.get('/:id', async(req, res) => {

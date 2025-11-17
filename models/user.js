@@ -1,57 +1,75 @@
-const mongoose = require('mongoose');
-
+const mongoose = require("mongoose");
 
 const userSchema = new mongoose.Schema({
-    name: {
-        type: String,
-        required: true  
-    },
-    email: {
-        type: String,
-        required: true
-    },
-    passwordHash: {
-        type: String,
-        required: true
-    },
-    phone: {
-        type: String,
-        required: true
-    },
-    isAdmin: {
-        type: Boolean,
-        default: false
-    },
-    street: {
-        type: String,
-        default: ''
-    },
-    apartment: {
-        type: String,
-        default: ''
-    },
-    zip: {
-        type: String,
-        default: ''
-    },
-    city: {
-        type: String,
-        default: ''
-    },
-    country: {
-        type: String,
-        default: ''
-    }
+  name: {
+    type: String,
+    required: true,
+  },
+  email: {
+    type: String,
+    required: true,
+  },
+  passwordHash: {
+    type: String,
+    required: true,
+  },
+  phone: {
+    type: String,
+    required: true,
+  },
+  isAdmin: {
+    type: Boolean,
+    default: false,
+  },
+  street: {
+    type: String,
+    default: "",
+  },
+  apartment: {
+    type: String,
+    default: "",
+  },
+  zip: {
+    type: String,
+    default: "",
+  },
+  city: {
+    type: String,
+    default: "",
+  },
+  country: {
+    type: String,
+    default: "",
+  },
+  emailVerificationToken: {
+    type: String,
+  },
+  isEmailVerified: {
+    type: Boolean,
+    default: false,
+  },
+  passwordResetToken: {
+    type: String,
+  },
+  passwordResetTokenExpiry: {
+    type: Date,
+  },
+  emailVerificationToken: {
+    type: String,
+  },
+  isEmailVerified: {
+    type: Boolean,
+    default: false,
+  },
 });
 
-userSchema.virtual('id').get(function() {
-    return this._id.toHexString();
+userSchema.virtual("id").get(function () {
+  return this._id.toHexString();
 });
 
-userSchema.set('toJSON', {
-    virtuals: true
+userSchema.set("toJSON", {
+  virtuals: true,
 });
 
-
-exports.User = mongoose.model('User', userSchema);
+exports.User = mongoose.model("User", userSchema);
 //exports.userSchema = userSchema;
