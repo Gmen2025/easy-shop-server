@@ -1,16 +1,32 @@
 const express = require('express');
 const router = express.Router();
-const stripe = require('stripe')(process.env.STRIPE_KEY);
+
+// Initialize Stripe lazily to avoid startup errors if key is missing
+let stripe = null;
+const getStripe = () => {
+  if (!stripe && process.env.STRIPE_KEY) {
+    stripe = require('stripe')(process.env.STRIPE_KEY);
+  }
+  return stripe;
+};
 
 // Create payment intent
 router.post('/create-payment-intent', async (req, res) => {
   try {
+    const stripeInstance = getStripe();
+    
+    if (!stripeInstance) {
+      return res.status(500).json({ 
+        error: 'Stripe is not configured. Please set STRIPE_KEY environment variable.' 
+      });
+    }
+    
     console.log('Request body:', req.body);
     console.log('Stripe key exists:', !!process.env.STRIPE_KEY);
     
     const { amount, currency, orderId } = req.body;
 
-    const paymentIntent = await stripe.paymentIntents.create({
+    const paymentIntent = await stripeInstance.paymentIntents.create({
       amount,
       currency,
       metadata: { orderId },
