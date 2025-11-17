@@ -88,7 +88,16 @@ app.use(morgan('tiny'));
 app.use(express.urlencoded({ extended: true }));
 
 //Swagger Documentation Route (MUST be before authJwt middleware)
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerDocs));
+const swaggerOptions = {
+  swaggerOptions: {
+    url: '/api-docs/swagger.json',
+  }
+};
+app.get('/api-docs/swagger.json', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.send(swaggerDocs);
+});
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(null, swaggerOptions));
 
 // Apply JWT authentication (after Swagger route)
 app.use(authJwt());

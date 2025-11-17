@@ -15,6 +15,7 @@ function authJwt() {
       "/api/v1/users/verify-reset-token",
       '/api/v1/users/test-reset',
       '/api-docs',  // Swagger documentation
+      '/api-docs/swagger.json',  // Swagger spec
       { url: /\/api-docs\/.*/ },  // Swagger static files
       {
         url: /\/api\/v1\/users\/verify-email(.*)/,
