@@ -14,12 +14,10 @@ const swaggerOptions = {
     },
     servers: [
       {
-        url: 'http://localhost:3001',
-        description: 'Development server'
-      },
-      {
-        url: 'https://easy-shop-server-wldr.onrender.com',
-        description: 'Production server'
+        url: process.env.NODE_ENV === 'production' 
+          ? 'https://easy-shop-server-wldr.onrender.com'
+          : 'http://localhost:3001',
+        description: process.env.NODE_ENV === 'production' ? 'Production server' : 'Development server'
       }
     ],
     components: {
