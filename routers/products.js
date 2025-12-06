@@ -104,6 +104,57 @@ router.get(`/`, async(req, res) => {
     res.send(product);
   })
  
+/**
+ * @swagger
+ * /api/v1/products:
+ *   post:
+ *     summary: Create a new product
+ *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *               - description
+ *               - price
+ *               - category
+ *               - countInStock
+ *               - image
+ *             properties:
+ *               name:
+ *                 type: string
+ *               description:
+ *                 type: string
+ *               richDescription:
+ *                 type: string
+ *               image:
+ *                 type: string
+ *                 format: binary
+ *               brand:
+ *                 type: string
+ *               price:
+ *                 type: number
+ *               category:
+ *                 type: string
+ *               countInStock:
+ *                 type: number
+ *               rating:
+ *                 type: number
+ *               numReviews:
+ *                 type: number
+ *               isFeatured:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Product created successfully
+ *       400:
+ *         description: Invalid category or missing image
+ */
 //Create a new product
 router.post(`/`, uploadOptions.single('image'), async(req, res) => {
 
@@ -141,6 +192,59 @@ const basePath = `${req.protocol}://${req.get('host')}/public/uploads/`;
     res.send(prod);
 })
 
+/**
+ * @swagger
+ * /api/v1/products/{id}:
+ *   put:
+ *     summary: Update a product
+ *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Product ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *               description:
+ *                 type: string
+ *               richDescription:
+ *                 type: string
+ *               image:
+ *                 type: string
+ *                 format: binary
+ *               brand:
+ *                 type: string
+ *               price:
+ *                 type: number
+ *               category:
+ *                 type: string
+ *               countInStock:
+ *                 type: number
+ *               rating:
+ *                 type: number
+ *               numReviews:
+ *                 type: number
+ *               isFeatured:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Product updated successfully
+ *       400:
+ *         description: Invalid product ID or category
+ *       404:
+ *         description: Product not found
+ */
 //Update a product
 router.put('/:id', uploadOptions.single('image'), async(req, res) => {
     if(!mongoose.isValidObjectId(req.params.id)) {
@@ -186,6 +290,29 @@ router.put('/:id', uploadOptions.single('image'), async(req, res) => {
     res.send(updatedProduct);
 })
 
+/**
+ * @swagger
+ * /api/v1/products/{id}:
+ *   delete:
+ *     summary: Delete a product
+ *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Product ID
+ *     responses:
+ *       200:
+ *         description: Product deleted successfully
+ *       404:
+ *         description: Product not found
+ *       400:
+ *         description: Delete operation failed
+ */
 //Delete a product
 router.delete('/:id', (req, res) => {
     
@@ -200,6 +327,25 @@ router.delete('/:id', (req, res) => {
     })
 })
 
+/**
+ * @swagger
+ * /api/v1/products/get/count:
+ *   get:
+ *     summary: Get total product count
+ *     tags: [Products]
+ *     responses:
+ *       200:
+ *         description: Product count retrieved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 productCount:
+ *                   type: number
+ *       500:
+ *         description: Failed to retrieve count
+ */
 //Count the number of products
 router.get(`/get/count`, async(req, res) => {
     const productCount= await Product.countDocuments({}); //counting all products
@@ -213,6 +359,25 @@ router.get(`/get/count`, async(req, res) => {
         });
     })
 
+/**
+ * @swagger
+ * /api/v1/products/get/featured/{count}:
+ *   get:
+ *     summary: Get featured products
+ *     tags: [Products]
+ *     parameters:
+ *       - in: path
+ *         name: count
+ *         required: true
+ *         schema:
+ *           type: number
+ *         description: Number of featured products to retrieve (0 for all)
+ *     responses:
+ *       200:
+ *         description: List of featured products
+ *       500:
+ *         description: Failed to retrieve products
+ */
     //Get featured products
     router.get(`/get/featured/:count`, async(req, res) => {
     const count = req.params.count ? req.params.count : 0
@@ -241,6 +406,42 @@ router.get(`/get/count`, async(req, res) => {
         res.send(productList);
     })
 
+/**
+ * @swagger
+ * /api/v1/products/gallery-images/{id}:
+ *   put:
+ *     summary: Update product gallery images
+ *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Product ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               images:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   format: binary
+ *                 maxItems: 10
+ *     responses:
+ *       200:
+ *         description: Gallery images updated successfully
+ *       400:
+ *         description: Invalid product ID
+ *       404:
+ *         description: Product not found
+ */
 //images gallery
 router.put('/gallery-images/:id', uploadOptions.array('images', 10), async(req, res) => {
     if(!mongoose.isValidObjectId(req.params.id)) {

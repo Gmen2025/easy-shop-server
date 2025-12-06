@@ -27,6 +27,20 @@ const transporterConfig = process.env.EMAIL_SERVICE
 
 const transporter = nodemailer.createTransport(transporterConfig);
 
+/**
+ * @swagger
+ * /api/v1/users:
+ *   get:
+ *     summary: Get all users
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of all users (without password hashes)
+ *       500:
+ *         description: Server error
+ */
 router.get(`/`, async (req, res) => {
   const userList = await User.find().select("-passwordHash");
 
@@ -149,6 +163,52 @@ router.post("/login", async (req, res) => {
 
 // })
 
+/**
+ * @swagger
+ * /api/v1/users/register:
+ *   post:
+ *     summary: Register a new user
+ *     tags: [Users]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *               - email
+ *               - password
+ *               - phone
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 example: John Doe
+ *               email:
+ *                 type: string
+ *                 example: john@example.com
+ *               password:
+ *                 type: string
+ *                 example: password123
+ *               phone:
+ *                 type: string
+ *                 example: "+1234567890"
+ *               street:
+ *                 type: string
+ *               apartment:
+ *                 type: string
+ *               city:
+ *                 type: string
+ *               zip:
+ *                 type: string
+ *               country:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: User registered successfully, verification email sent
+ *       400:
+ *         description: Email already exists or invalid data
+ */
 router.post(`/register`, async (req, res) => {
   try {
     console.log("Registration request body:", req.body); // Debug log
@@ -241,6 +301,27 @@ router.post(`/register`, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/users/get/count:
+ *   get:
+ *     summary: Get total user count
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: User count retrieved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 userCount:
+ *                   type: number
+ *       500:
+ *         description: Failed to retrieve count
+ */
 //Count the number of Users
 router.get(`/get/count`, async (req, res) => {
   const userCount = await User.countDocuments({});
@@ -254,6 +335,32 @@ router.get(`/get/count`, async (req, res) => {
   });
 });
 
+/**
+ * @swagger
+ * /api/v1/users/resend-verification:
+ *   post:
+ *     summary: Resend email verification link
+ *     tags: [Users]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 format: email
+ *     responses:
+ *       200:
+ *         description: Verification email sent successfully
+ *       400:
+ *         description: Invalid email or user not found
+ *       500:
+ *         description: Failed to send email
+ */
 // POST /users/resend-verification - Resend verification email
 router.post("/resend-verification", async (req, res) => {
   try {
@@ -369,6 +476,37 @@ router.post("/resend-verification", async (req, res) => {
 //   }
 // });
 
+/**
+ * @swagger
+ * /api/v1/users/verify-email:
+ *   get:
+ *     summary: Verify user email with token
+ *     tags: [Users]
+ *     parameters:
+ *       - in: query
+ *         name: token
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Email verification token
+ *       - in: query
+ *         name: email
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: User email address
+ *     responses:
+ *       200:
+ *         description: Email verified successfully (HTML response)
+ *         content:
+ *           text/html:
+ *             schema:
+ *               type: string
+ *       400:
+ *         description: Invalid or expired token
+ *       500:
+ *         description: Server error
+ */
 // GET /users/verify-email - Verify email with token
 router.get("/verify-email", async (req, res) => {
   const { token, email } = req.query;
@@ -549,6 +687,30 @@ router.get("/verify-email", async (req, res) => {
 
 // Add these routes to your users.js file
 
+/**
+ * @swagger
+ * /api/v1/users/forgot-password:
+ *   post:
+ *     summary: Request password reset
+ *     tags: [Users]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - email
+ *             properties:
+ *               email:
+ *                 type: string
+ *                 example: user@example.com
+ *     responses:
+ *       200:
+ *         description: Password reset email sent (if account exists)
+ *       400:
+ *         description: Email is required
+ */
 // POST /users/forgot-password - Request password reset
 router.post("/forgot-password", async (req, res) => {
   try {
@@ -681,6 +843,31 @@ router.post("/forgot-password", async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/users/verify-reset-token:
+ *   get:
+ *     summary: Verify password reset token
+ *     tags: [Users]
+ *     parameters:
+ *       - in: query
+ *         name: token
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Password reset token
+ *       - in: query
+ *         name: email
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: User email address
+ *     responses:
+ *       200:
+ *         description: Token is valid
+ *       400:
+ *         description: Invalid or expired token
+ */
 // GET /users/verify-reset-token - Verify reset token (optional, for frontend validation)
 router.get("/verify-reset-token", async (req, res) => {
   const { token, email } = req.query;
@@ -723,6 +910,38 @@ router.get("/verify-reset-token", async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/users/reset-password:
+ *   post:
+ *     summary: Reset password with token
+ *     tags: [Users]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - token
+ *               - email
+ *               - newPassword
+ *             properties:
+ *               token:
+ *                 type: string
+ *                 example: abc123def456
+ *               email:
+ *                 type: string
+ *                 example: user@example.com
+ *               newPassword:
+ *                 type: string
+ *                 example: newPassword123
+ *     responses:
+ *       200:
+ *         description: Password reset successful
+ *       400:
+ *         description: Invalid or expired token
+ */
 // POST /users/reset-password - Reset password with token
 router.post("/reset-password", async (req, res) => {
   try {
@@ -1150,6 +1369,27 @@ router.get("/reset-password", async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/users/{id}:
+ *   get:
+ *     summary: Get user by ID
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: User ID
+ *     responses:
+ *       200:
+ *         description: User details retrieved
+ *       500:
+ *         description: User not found
+ */
 router.get("/:id", async (req, res) => {
   const user = await User.findById(req.params.id).select("-passwordHash");
 

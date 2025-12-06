@@ -9,6 +9,20 @@ const nodemailer = require("nodemailer");
 //const Preview = require('twilio/lib/rest/Preview');
 //const twilio = require("twilio");
 
+/**
+ * @swagger
+ * /api/v1/orders:
+ *   get:
+ *     summary: Get all orders
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of all orders
+ *       500:
+ *         description: Server error
+ */
 router.get(`/`, async (req, res) => {
   const orderList = await Order.find()
     .populate("user", "name email")
@@ -21,6 +35,27 @@ router.get(`/`, async (req, res) => {
   res.send(orderList);
 });
 
+/**
+ * @swagger
+ * /api/v1/orders/{id}:
+ *   get:
+ *     summary: Get order by ID
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Order ID
+ *     responses:
+ *       200:
+ *         description: Order details with populated user and products
+ *       500:
+ *         description: Order not found
+ */
 // Get a specific order by ID
 router.get(`/:id`, async (req, res) => {
   const order = await Order.findById(req.params.id)
@@ -40,6 +75,61 @@ router.get(`/:id`, async (req, res) => {
   res.send(order);
 });
 
+/**
+ * @swagger
+ * /api/v1/orders:
+ *   post:
+ *     summary: Create a new order
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - orderItems
+ *               - shippingAddress1
+ *               - city
+ *               - zip
+ *               - country
+ *               - phone
+ *               - user
+ *             properties:
+ *               orderItems:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     quantity:
+ *                       type: number
+ *                     product:
+ *                       type: string
+ *               shippingAddress1:
+ *                 type: string
+ *               shippingAddress2:
+ *                 type: string
+ *               city:
+ *                 type: string
+ *               zip:
+ *                 type: string
+ *               country:
+ *                 type: string
+ *               phone:
+ *                 type: string
+ *               status:
+ *                 type: string
+ *                 default: Pending
+ *               user:
+ *                 type: string
+ *     responses:
+ *       201:
+ *         description: Order created successfully and email sent
+ *       400:
+ *         description: Invalid order data
+ */
 // Create a new order
 router.post(`/`, async (req, res) => {
   // Create an array of promises for creating OrderItem documents
@@ -181,6 +271,39 @@ router.post(`/`, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/orders/{id}:
+ *   put:
+ *     summary: Update order status
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Order ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - status
+ *             properties:
+ *               status:
+ *                 type: string
+ *                 enum: [Pending, Processing, Shipped, Delivered, Cancelled]
+ *     responses:
+ *       200:
+ *         description: Order status updated successfully
+ *       400:
+ *         description: Order cannot be updated
+ */
 //updating order status
 router.put("/:id", async (req, res) => {
   const order = await Order.findByIdAndUpdate(
@@ -198,6 +321,29 @@ router.put("/:id", async (req, res) => {
   res.send(order);
 });
 
+/**
+ * @swagger
+ * /api/v1/orders/{id}:
+ *   delete:
+ *     summary: Delete an order
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Order ID
+ *     responses:
+ *       200:
+ *         description: Order deleted successfully
+ *       404:
+ *         description: Order not found
+ *       400:
+ *         description: Delete operation failed
+ */
 //deleting order
 router.delete("/:id", (req, res) => {
   Order.findByIdAndDelete(req.params.id)
@@ -221,6 +367,27 @@ router.delete("/:id", (req, res) => {
     });
 });
 
+/**
+ * @swagger
+ * /api/v1/orders/get/totalsales:
+ *   get:
+ *     summary: Get total sales amount
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Total sales retrieved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 totalsales:
+ *                   type: number
+ *       400:
+ *         description: Failed to generate sales report
+ */
 //sum of the totral sales
 router.get("/get/totalsales", async (req, res) => {
   const totalSales = await Order.aggregate([
@@ -234,6 +401,27 @@ router.get("/get/totalsales", async (req, res) => {
   res.send({ totalsales: totalSales.pop().totalsales });
 });
 
+/**
+ * @swagger
+ * /api/v1/orders/get/count:
+ *   get:
+ *     summary: Get total order count
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Order count retrieved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 orderCount:
+ *                   type: number
+ *       500:
+ *         description: Failed to retrieve count
+ */
 //count of the orders
 router.get(`/get/count`, async (req, res) => {
   const orderCount = await Order.countDocuments({}); //counting all orders
@@ -247,6 +435,27 @@ router.get(`/get/count`, async (req, res) => {
   });
 });
 
+/**
+ * @swagger
+ * /api/v1/orders/get/userorders/{userid}:
+ *   get:
+ *     summary: Get order history for a specific user
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: userid
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: User ID
+ *     responses:
+ *       200:
+ *         description: User order history retrieved
+ *       500:
+ *         description: Failed to retrieve orders
+ */
 //User orders history
 router.get(`/get/userorders/:userid`, async (req, res) => {
   const userOrderList = await Order.find({ user: req.params.userid })

@@ -10,6 +10,41 @@ const getStripe = () => {
   return stripe;
 };
 
+/**
+ * @swagger
+ * /api/v1/stripe/create-payment-intent:
+ *   post:
+ *     summary: Create Stripe payment intent
+ *     tags: [Payment - Stripe]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - amount
+ *               - currency
+ *             properties:
+ *               amount:
+ *                 type: number
+ *                 example: 2000
+ *                 description: Amount in cents (e.g., 2000 = $20.00)
+ *               currency:
+ *                 type: string
+ *                 example: usd
+ *               orderId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Payment intent created successfully
+ *       400:
+ *         description: Invalid request
+ *       500:
+ *         description: Stripe not configured
+ */
 // Create payment intent
 router.post('/create-payment-intent', async (req, res) => {
   try {

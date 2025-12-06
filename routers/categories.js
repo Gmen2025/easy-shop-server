@@ -2,6 +2,18 @@ const {Category} = require('../models/category');
 const express = require('express');
 const router = require("express").Router();
 
+/**
+ * @swagger
+ * /api/v1/categories:
+ *   get:
+ *     summary: Get all categories
+ *     tags: [Categories]
+ *     responses:
+ *       200:
+ *         description: List of all categories
+ *       500:
+ *         description: Server error
+ */
 router.get(`/`, async(req, res) => {
     const categoryList = await Category.find();
  
@@ -12,7 +24,25 @@ router.get(`/`, async(req, res) => {
      res.status(200).send(categoryList);
 })
 
-//http://localhost:3000/api/v1/categories/id
+/**
+ * @swagger
+ * /api/v1/categories/{id}:
+ *   get:
+ *     summary: Get category by ID
+ *     tags: [Categories]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Category ID
+ *     responses:
+ *       200:
+ *         description: Category details
+ *       500:
+ *         description: Category not found
+ */
 router.get('/:id', async(req, res) => {
     const category = await Category.findById(req.params.id);
  
@@ -22,7 +52,38 @@ router.get('/:id', async(req, res) => {
     res.status(200).send(category);
 })
 
-//creating data
+/**
+ * @swagger
+ * /api/v1/categories:
+ *   post:
+ *     summary: Create a new category
+ *     tags: [Categories]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - name
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 example: Electronics
+ *               icon:
+ *                 type: string
+ *                 example: computer
+ *               color:
+ *                 type: string
+ *                 example: "#FF5733"
+ *     responses:
+ *       200:
+ *         description: Category created successfully
+ *       400:
+ *         description: Category creation failed
+ */
 router.post(`/`, async (req, res) => {
     let category = new Category({
         name: req.body.name,
@@ -38,6 +99,40 @@ router.post(`/`, async (req, res) => {
     res.send(category);
 })
 
+/**
+ * @swagger
+ * /api/v1/categories/{id}:
+ *   put:
+ *     summary: Update a category
+ *     tags: [Categories]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Category ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *               icon:
+ *                 type: string
+ *               color:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Category updated successfully
+ *       400:
+ *         description: Category cannot be updated
+ */
 //updating category data
 router.put('/:id', async(req, res) => {
     const category = await Category.findByIdAndUpdate(req.params.id, {
@@ -54,6 +149,29 @@ router.put('/:id', async(req, res) => {
         res.send(category);
 })
 
+/**
+ * @swagger
+ * /api/v1/categories/{id}:
+ *   delete:
+ *     summary: Delete a category
+ *     tags: [Categories]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Category ID
+ *     responses:
+ *       200:
+ *         description: Category deleted successfully
+ *       404:
+ *         description: Category not found
+ *       400:
+ *         description: Delete operation failed
+ */
 router.delete('/:id', (req, res) => {
     
   Category.findByIdAndDelete(req.params.id).exec().then(category => {  

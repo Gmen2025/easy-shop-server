@@ -2,6 +2,42 @@ const express = require('express');
 const router = express.Router();
 const createOrderService = require('../service/createOrder');
 
+/**
+ * @swagger
+ * /api/v1/telebirr/initiate-payment:
+ *   post:
+ *     summary: Initiate Telebirr payment
+ *     tags: [Payment - Telebirr]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required:
+ *               - amount
+ *               - phoneNumber
+ *               - customerName
+ *             properties:
+ *               amount:
+ *                 type: number
+ *                 example: 100
+ *               phoneNumber:
+ *                 type: string
+ *                 example: "251912345678"
+ *               customerName:
+ *                 type: string
+ *                 example: John Doe
+ *               orderId:
+ *                 type: string
+ *               description:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Payment initiated successfully
+ *       400:
+ *         description: Invalid request data
+ */
 // Create/Initiate Telebirr payment
 router.post('/initiate-payment', async (req, res) => {
   try {
@@ -116,6 +152,31 @@ router.post('/initiate-payment', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/telebirr/verify-payment:
+ *   post:
+ *     summary: Verify Telebirr payment status
+ *     tags: [Telebirr]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               transactionId:
+ *                 type: string
+ *               orderId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Payment verification result
+ *       400:
+ *         description: Missing transaction or order ID
+ *       500:
+ *         description: Verification failed
+ */
 // Verify payment status
 router.post('/verify-payment', async (req, res) => {
   try {
@@ -183,6 +244,25 @@ router.post('/verify-payment', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/telebirr/payment-status/{transactionId}:
+ *   get:
+ *     summary: Get payment status by transaction ID
+ *     tags: [Telebirr]
+ *     parameters:
+ *       - in: path
+ *         name: transactionId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Transaction ID
+ *     responses:
+ *       200:
+ *         description: Payment status retrieved
+ *       500:
+ *         description: Failed to retrieve status
+ */
 // Get payment status
 router.get('/payment-status/:transactionId', async (req, res) => {
   try {
@@ -229,6 +309,34 @@ router.get('/payment-status/:transactionId', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/telebirr/webhook:
+ *   post:
+ *     summary: Receive Telebirr payment notifications
+ *     tags: [Telebirr]
+ *     description: Webhook endpoint for receiving payment status updates from Telebirr
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               transactionId:
+ *                 type: string
+ *               status:
+ *                 type: string
+ *               amount:
+ *                 type: number
+ *               orderId:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Webhook processed successfully
+ *       500:
+ *         description: Webhook processing failed
+ */
 // Webhook endpoint for Telebirr notifications
 router.post('/webhook', async (req, res) => {
   try {
