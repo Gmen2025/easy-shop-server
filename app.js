@@ -80,6 +80,7 @@ const ordersRouter = require('./routers/orders');
 const usersRouter = require('./routers/users');
 const stripeRouter = require('./routers/stripe');
 const telebirrRouter = require('./routers/telebirr');
+const cloudinaryRouter = require('./routers/cloudinary');
 
 
 //Middleware
@@ -116,6 +117,7 @@ app.use(`${api}/orders`, ordersRouter);
 app.use(`${api}/users`, usersRouter);
 app.use(`${api}/stripe`, stripeRouter); 
 app.use(`${api}/telebirr`, telebirrRouter);
+app.use(`${api}/cloudinary`, cloudinaryRouter);
 
 const PORT = process.env.PORT || 3001;
 
