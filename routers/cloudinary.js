@@ -8,6 +8,7 @@ const cloudinary = require('cloudinary').v2;
 // Body (optional): object containing the params that should be signed (e.g. { public_id })
 router.post('/sign', (req, res) => {
   try {
+    // Validate Cloudinary config is present
     const apiSecret = process.env.CLOUDINARY_API_SECRET;
     if (!apiSecret || !process.env.CLOUDINARY_API_KEY || !process.env.CLOUDINARY_CLOUD_NAME) {
       return res.status(500).json({ message: 'Cloudinary not configured on server' });

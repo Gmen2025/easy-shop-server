@@ -118,6 +118,7 @@ app.use(`${api}/users`, usersRouter);
 app.use(`${api}/stripe`, stripeRouter); 
 app.use(`${api}/telebirr`, telebirrRouter);
 app.use(`${api}/cloudinary`, cloudinaryRouter);
+app.use('/', cloudinaryRouter);
 
 const PORT = process.env.PORT || 3001;
 

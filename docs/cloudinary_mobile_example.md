@@ -3,6 +3,7 @@
 This file shows a minimal React Native example that:
 
 - Requests a server-side signature from `POST /api/v1/cloudinary/sign`
+- (Compatibility) You can also call legacy `POST /sign`
 - Uploads the image directly to Cloudinary using the returned signature
 - Returns the uploaded image `secure_url` which you can save on your product
 
