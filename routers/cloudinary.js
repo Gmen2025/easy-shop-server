@@ -25,13 +25,31 @@ function getCloudinaryCredentials() {
   return null;
 }
 
+function getMissingCloudinaryKeys() {
+  const missing = [];
+  if (!(process.env.CLOUDINARY_CLOUD_NAME || process.env.CLOUDINARY_NAME || process.env.CLOUD_NAME)) {
+    missing.push('CLOUDINARY_CLOUD_NAME');
+  }
+  if (!(process.env.CLOUDINARY_API_KEY || process.env.CLOUDINARY_KEY)) {
+    missing.push('CLOUDINARY_API_KEY');
+  }
+  if (!(process.env.CLOUDINARY_API_SECRET || process.env.CLOUDINARY_SECRET)) {
+    missing.push('CLOUDINARY_API_SECRET');
+  }
+  return missing;
+}
+
 // POST /api/v1/cloudinary/sign
 // Body (optional): object containing the params that should be signed (e.g. { public_id })
 router.post('/sign', (req, res) => {
   try {
     const credentials = getCloudinaryCredentials();
     if (!credentials) {
-      return res.status(500).json({ message: 'Cloudinary not configured on server' });
+      const missing = getMissingCloudinaryKeys();
+      return res.status(500).json({
+        message: 'Cloudinary not configured on server',
+        missing,
+      });
     }
 
     const timestamp = Math.round(Date.now() / 1000);
