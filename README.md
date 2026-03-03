@@ -182,8 +182,15 @@ The API is deployed on Render.com:
 
 1. Push your code to GitHub
 2. Connect your repository to Render
-3. Set environment variables in Render dashboard
+3. Set environment variables in Render dashboard (including Cloudinary server vars)
 4. Deploy using the `render.yaml` configuration
+
+Required Cloudinary env vars on backend (Render Environment tab):
+- `CLOUDINARY_CLOUD_NAME`
+- `CLOUDINARY_API_KEY`
+- `CLOUDINARY_API_SECRET`
+
+Do not expose these in Expo/mobile env files.
 
 ## 📁 Project Structure
 

@@ -21,12 +21,14 @@ async function pickAndUpload() {
   if (!res.assets || res.assets.length === 0) return null;
   const asset = res.assets[0];
   const localUri = asset.uri;
+  const publicId = `eshop/products/${Date.now()}`;
+  const folder = 'eshop/products';
 
   // 1) Ask backend for a signature
   const signResp = await fetch('http://<BACKEND_HOST>:3001/api/v1/cloudinary/sign', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ params_to_sign: { public_id: `eshop/products/${Date.now()}` } })
+    body: JSON.stringify({ params_to_sign: { public_id: publicId, folder } })
   });
   const { signature, api_key, timestamp, cloud_name } = await signResp.json();
 
@@ -36,8 +38,8 @@ async function pickAndUpload() {
   form.append('api_key', api_key);
   form.append('timestamp', String(timestamp));
   form.append('signature', signature);
-  form.append('public_id', `eshop/products/${Date.now()}`);
-  form.append('folder', 'eshop/products');
+  form.append('public_id', publicId);
+  form.append('folder', folder);
 
   const uploadUrl = `https://api.cloudinary.com/v1_1/${cloud_name}/image/upload`;
   const uploadRes = await fetch(uploadUrl, { method: 'POST', body: form });

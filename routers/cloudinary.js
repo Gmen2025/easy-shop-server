@@ -39,6 +39,33 @@ function getMissingCloudinaryKeys() {
   return missing;
 }
 
+function buildParamsToSign(body, timestamp) {
+  const allowedTopLevelKeys = [
+    'folder',
+    'public_id',
+    'upload_preset',
+    'tags',
+    'context',
+    'eager',
+    'transformation',
+    'type',
+    'invalidate',
+    'overwrite',
+    'resource_type',
+  ];
+
+  const paramsToSign = Object.assign({}, body && body.params_to_sign ? body.params_to_sign : {});
+
+  for (const key of allowedTopLevelKeys) {
+    if (paramsToSign[key] === undefined && body && body[key] !== undefined) {
+      paramsToSign[key] = body[key];
+    }
+  }
+
+  paramsToSign.timestamp = timestamp;
+  return paramsToSign;
+}
+
 // POST /api/v1/cloudinary/sign
 // Body (optional): object containing the params that should be signed (e.g. { public_id })
 router.post('/sign', (req, res) => {
@@ -53,11 +80,7 @@ router.post('/sign', (req, res) => {
     }
 
     const timestamp = Math.round(Date.now() / 1000);
-
-    // Only include allowed params to sign. If client sends `params_to_sign`, use it.
-    const paramsToSign = Object.assign({}, req.body.params_to_sign || {});
-    // Ensure timestamp is part of the signature payload
-    paramsToSign.timestamp = timestamp;
+    const paramsToSign = buildParamsToSign(req.body || {}, timestamp);
 
     // Create signature using cloudinary utility
     const signature = cloudinary.utils.api_sign_request(paramsToSign, credentials.apiSecret);

@@ -11,5 +11,11 @@ services:
         value: /api/v1
       - key: PORT
         value: 3001
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
     # Add your environment variables in Render Dashboard
     # Don't put secrets here - configure them in Render's Environment tab
