@@ -24,6 +24,40 @@ const storage = new CloudinaryStorage({
 
 const uploadOptions = multer({ storage: storage });
 
+const getUploadedFileUrl = (file) => {
+    if (!file) return '';
+
+    if (typeof file.secure_url === 'string' && file.secure_url.trim()) {
+        return file.secure_url.trim();
+    }
+
+    if (typeof file.path === 'string' && file.path.trim()) {
+        const uploadedPath = file.path.trim();
+        if (uploadedPath.includes('res.cloudinary.com')) {
+            return uploadedPath.replace(/^http:\/\//i, 'https://');
+        }
+        return uploadedPath;
+    }
+
+    if (typeof file.filename === 'string' && file.filename.trim()) {
+        return cloudinary.url(file.filename.trim(), {
+            secure: true,
+            resource_type: 'image'
+        });
+    }
+
+    return '';
+};
+
+const normalizeImageInput = (value) => {
+    if (typeof value !== 'string') return '';
+    const normalized = value.trim();
+    if (normalized.includes('res.cloudinary.com')) {
+        return normalized.replace(/^http:\/\//i, 'https://');
+    }
+    return normalized;
+};
+
 /**
  * @swagger
  * /api/v1/products:
@@ -155,13 +189,16 @@ const category = await Category.findById(req.body.category);
 if(!category) return res.status(400).send('Invalid Category');
 
 const file = req.file;
-if(!file) return res.status(400).send('No image in the request');
+const bodyImage = normalizeImageInput(req.body.image);
+const imagePath = getUploadedFileUrl(file) || bodyImage;
+
+if(!imagePath) return res.status(400).send('No image in the request');
 
     const product = new Product({
         name: req.body.name,
         description: req.body.description,
         richDescription: req.body.richDescription,
-        image: file.path,
+        image: imagePath,
         images: req.body.images,
         brand: req.body.brand,
         price: req.body.price,
@@ -248,12 +285,8 @@ router.put('/:id', uploadOptions.single('image'), async(req, res) => {
     if(!product) return res.status(400).send('Invalid Product');
 
     const file = req.file;
-    let imagePath;
-    if(file) {
-        imagePath = file.path;
-    } else {
-        imagePath = product.image;
-    }
+    const bodyImage = normalizeImageInput(req.body.image);
+    const imagePath = getUploadedFileUrl(file) || bodyImage || product.image;
 
     const updatedProduct = await Product.findByIdAndUpdate(req.params.id, {
         name: req.body.name,
