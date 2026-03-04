@@ -1,0 +1,99 @@
+{
+  "info": {
+    "name": "E-Shop Products (Cloudinary secure_url)",
+    "_postman_id": "9a77d92a-9a1d-4f5c-b3ae-a79e6c540a7a",
+    "description": "Create and update product payloads using Cloudinary secure_url in image field.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Create Product (JSON + secure_url)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"iPhone 16\",\n  \"description\": \"Latest model\",\n  \"richDescription\": \"Detailed description\",\n  \"image\": \"{{secure_url}}\",\n  \"brand\": \"Apple\",\n  \"price\": 1200,\n  \"category\": \"{{categoryId}}\",\n  \"countInStock\": 10,\n  \"isFeatured\": true\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/products",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "products"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Update Product Image (JSON + secure_url)",
+      "request": {
+        "method": "PUT",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer {{token}}",
+            "type": "text"
+          },
+          {
+            "key": "Content-Type",
+            "value": "application/json",
+            "type": "text"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"category\": \"{{categoryId}}\",\n  \"image\": \"{{secure_url}}\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/products/{{productId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "products",
+            "{{productId}}"
+          ]
+        }
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3001"
+    },
+    {
+      "key": "token",
+      "value": ""
+    },
+    {
+      "key": "categoryId",
+      "value": ""
+    },
+    {
+      "key": "productId",
+      "value": ""
+    },
+    {
+      "key": "secure_url",
+      "value": "https://res.cloudinary.com/<cloud>/image/upload/..."
+    }
+  ]
+}

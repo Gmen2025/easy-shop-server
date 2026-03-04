@@ -165,6 +165,9 @@ Update product image (JSON):
 }
 ```
 
+Postman collection example:
+- `docs/postman_products_cloudinary.json`
+
 ### Categories
 - `GET /api/v1/categories` - Get all categories
 - `GET /api/v1/categories/:id` - Get category by ID
