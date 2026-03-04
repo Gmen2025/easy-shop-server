@@ -160,8 +160,12 @@ router.get(`/`, async(req, res) => {
  *               richDescription:
  *                 type: string
  *               image:
- *                 type: string
- *                 format: binary
+ *                 oneOf:
+ *                   - type: string
+ *                     format: binary
+ *                   - type: string
+ *                     format: uri
+ *                 description: Upload a file or send a Cloudinary secure_url
  *               brand:
  *                 type: string
  *               price:
@@ -248,8 +252,12 @@ if(!imagePath) return res.status(400).send('No image in the request');
  *               richDescription:
  *                 type: string
  *               image:
- *                 type: string
- *                 format: binary
+ *                 oneOf:
+ *                   - type: string
+ *                     format: binary
+ *                   - type: string
+ *                     format: uri
+ *                 description: Upload a file or send a Cloudinary secure_url
  *               brand:
  *                 type: string
  *               price:
