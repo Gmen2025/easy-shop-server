@@ -57,3 +57,46 @@ Notes
 
 Saving to product
 - After successful upload, call your products API (`POST /api/v1/products`) and set the `image` field to the returned `secure_url`.
+
+Frontend payload format (Cloudinary `secure_url`)
+
+Create product (JSON)
+```javascript
+await fetch('http://<BACKEND_HOST>:3001/api/v1/products', {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`,
+  },
+  body: JSON.stringify({
+    name: 'iPhone 16',
+    description: 'Latest model',
+    richDescription: 'Detailed description',
+    image: secureUrl, // e.g. https://res.cloudinary.com/.../image/upload/...
+    brand: 'Apple',
+    price: 1200,
+    category: '<CATEGORY_ID>',
+    countInStock: 10,
+    isFeatured: true,
+  }),
+});
+```
+
+Update product image only (JSON)
+```javascript
+await fetch(`http://<BACKEND_HOST>:3001/api/v1/products/${productId}`, {
+  method: 'PUT',
+  headers: {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${token}`,
+  },
+  body: JSON.stringify({
+    category: '<CATEGORY_ID>',
+    image: secureUrl,
+  }),
+});
+```
+
+Alternative format (multipart/form-data)
+- You can still send a real image file in `image` field.
+- If sending multipart without a file, send `image` as a text field containing the Cloudinary `secure_url`.

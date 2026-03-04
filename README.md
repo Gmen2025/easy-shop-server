@@ -138,6 +138,33 @@ Most endpoints require JWT authentication. To authenticate:
 - `GET /api/v1/products/get/featured/:count` - Get featured products
 - `GET /api/v1/products/get/count` - Get product count
 
+#### Frontend payload format (Cloudinary image)
+
+If your app uploads directly to Cloudinary, send the returned `secure_url` in `image`.
+
+Create product (JSON):
+```json
+{
+  "name": "iPhone 16",
+  "description": "Latest model",
+  "richDescription": "Detailed description",
+  "image": "https://res.cloudinary.com/<cloud>/image/upload/...",
+  "brand": "Apple",
+  "price": 1200,
+  "category": "<CATEGORY_ID>",
+  "countInStock": 10,
+  "isFeatured": true
+}
+```
+
+Update product image (JSON):
+```json
+{
+  "category": "<CATEGORY_ID>",
+  "image": "https://res.cloudinary.com/<cloud>/image/upload/..."
+}
+```
+
 ### Categories
 - `GET /api/v1/categories` - Get all categories
 - `GET /api/v1/categories/:id` - Get category by ID
