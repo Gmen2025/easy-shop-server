@@ -70,6 +70,8 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
    ```env
    # Database
    CONNECTION_STRING=mongodb+srv://username:password@cluster.mongodb.net/E_Shopping?retryWrites=true&w=majority
+  DEFAULT_DB_NAME=E_Shopping
+  ALLOWED_DB_NAMES=E_Shopping,E_Shopping_2
    
    # API Configuration
    API_URL=/api/v1
@@ -98,6 +100,22 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
    NODE_ENV=development
    PORT=3001
    ```
+
+## 🗄️ Multi-Database Selection
+
+- Default database is `E_Shopping`.
+- Frontend can choose a database from a dropdown and send it with each API request.
+- Supported request sources (priority order):
+  - Header: `x-database-name`
+  - Query: `?db=...`
+  - Body: `databaseName`
+- If the provided database is invalid or not allowed, the backend falls back to `E_Shopping`.
+
+Example request header:
+
+```http
+x-database-name: E_Shopping_2
+```
 
 4. **Start the server**
    

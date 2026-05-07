@@ -1,8 +1,5 @@
-const { Order } = require("../models/order");
 const express = require("express");
-const { OrderItem } = require("../models/order-item");
 const router = require("express").Router();
-const { Product } = require("../models/product");
 
 // For sending emails and SMS
 const nodemailer = require("nodemailer");
@@ -24,6 +21,7 @@ const nodemailer = require("nodemailer");
  *         description: Server error
  */
 router.get(`/`, async (req, res) => {
+  const { Order } = req.dbModels;
   const orderList = await Order.find()
     .populate("user", "name email")
     .sort({ dateOrdered: -1 }); // sort in descending order
@@ -58,6 +56,7 @@ router.get(`/`, async (req, res) => {
  */
 // Get a specific order by ID
 router.get(`/:id`, async (req, res) => {
+  const { Order } = req.dbModels;
   const order = await Order.findById(req.params.id)
     .populate("user", "name")
     .populate({
@@ -132,6 +131,7 @@ router.get(`/:id`, async (req, res) => {
  */
 // Create a new order
 router.post(`/`, async (req, res) => {
+  const { Order, OrderItem, Product } = req.dbModels;
   // Create an array of promises for creating OrderItem documents
   const orderItemsIDS = Promise.all(
     req.body.orderItems.map(async (orderItem) => {
@@ -306,6 +306,7 @@ router.post(`/`, async (req, res) => {
  */
 //updating order status
 router.put("/:id", async (req, res) => {
+  const { Order } = req.dbModels;
   const order = await Order.findByIdAndUpdate(
     req.params.id,
     {
@@ -346,6 +347,7 @@ router.put("/:id", async (req, res) => {
  */
 //deleting order
 router.delete("/:id", (req, res) => {
+  const { Order, OrderItem } = req.dbModels;
   Order.findByIdAndDelete(req.params.id)
     .exec()
     .then(async (order) => {
@@ -390,6 +392,7 @@ router.delete("/:id", (req, res) => {
  */
 //sum of the totral sales
 router.get("/get/totalsales", async (req, res) => {
+  const { Order } = req.dbModels;
   const totalSales = await Order.aggregate([
     { $group: { _id: null, totalsales: { $sum: "$totalPrice" } } },
   ]);
@@ -424,6 +427,7 @@ router.get("/get/totalsales", async (req, res) => {
  */
 //count of the orders
 router.get(`/get/count`, async (req, res) => {
+  const { Order } = req.dbModels;
   const orderCount = await Order.countDocuments({}); //counting all orders
 
   if (!orderCount) {
@@ -458,6 +462,7 @@ router.get(`/get/count`, async (req, res) => {
  */
 //User orders history
 router.get(`/get/userorders/:userid`, async (req, res) => {
+  const { Order } = req.dbModels;
   const userOrderList = await Order.find({ user: req.params.userid })
     .populate({
       path: "orderItems",

@@ -1,4 +1,3 @@
-const {Category} = require('../models/category');
 const express = require('express');
 const router = require("express").Router();
 
@@ -15,6 +14,7 @@ const router = require("express").Router();
  *         description: Server error
  */
 router.get(`/`, async(req, res) => {
+    const { Category } = req.dbModels;
     const categoryList = await Category.find();
  
     if(!categoryList) {
@@ -44,6 +44,7 @@ router.get(`/`, async(req, res) => {
  *         description: Category not found
  */
 router.get('/:id', async(req, res) => {
+    const { Category } = req.dbModels;
     const category = await Category.findById(req.params.id);
  
     if(!category) {
@@ -85,6 +86,7 @@ router.get('/:id', async(req, res) => {
  *         description: Category creation failed
  */
 router.post(`/`, async (req, res) => {
+    const { Category } = req.dbModels;
     let category = new Category({
         name: req.body.name,
         icon: req.body.icon,
@@ -135,6 +137,7 @@ router.post(`/`, async (req, res) => {
  */
 //updating category data
 router.put('/:id', async(req, res) => {
+    const { Category } = req.dbModels;
     const category = await Category.findByIdAndUpdate(req.params.id, {
         name: req.body.name,
         icon: req.body.icon,
@@ -173,6 +176,7 @@ router.put('/:id', async(req, res) => {
  *         description: Delete operation failed
  */
 router.delete('/:id', (req, res) => {
+    const { Category } = req.dbModels;
     
   Category.findByIdAndDelete(req.params.id).exec().then(category => {  
       if(category) {

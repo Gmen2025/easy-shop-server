@@ -1,10 +1,11 @@
-const { User } = require("../models/user");
 const express = require("express");
 const router = require("express").Router();
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 const crypto = require("crypto");
+
+const getUserModel = (req) => req.dbModels.User;
 
 //Configure nodemailer transporter
 const transporterConfig = process.env.EMAIL_SERVICE
@@ -42,7 +43,7 @@ const transporter = nodemailer.createTransport(transporterConfig);
  *         description: Server error
  */
 router.get(`/`, async (req, res) => {
-  const userList = await User.find().select("-passwordHash");
+  const userList = await getUserModel(req).find().select("-passwordHash");
 
   if (!userList) {
     res.status(500).json({ success: false });
@@ -52,6 +53,7 @@ router.get(`/`, async (req, res) => {
 });
 
 router.post(`/`, async (req, res) => {
+  const User = getUserModel(req);
   const user = new User({
     name: req.body.name,
     email: req.body.email,
@@ -104,7 +106,7 @@ router.post(`/`, async (req, res) => {
  */
 // Modified login to check email verification
 router.post("/login", async (req, res) => {
-  const user = await User.findOne({ email: req.body.email });
+  const user = await getUserModel(req).findOne({ email: req.body.email });
   const secret = process.env.secret;
 
   if (!user) {
@@ -224,7 +226,7 @@ router.post(`/register`, async (req, res) => {
     }
 
     // Check if user already exists
-    const existingUser = await User.findOne({ email });
+    const existingUser = await getUserModel(req).findOne({ email });
     if (existingUser) {
       return res.status(400).json({
         success: false,
@@ -235,6 +237,7 @@ router.post(`/register`, async (req, res) => {
     // Generate verification token
     const verificationToken = crypto.randomBytes(32).toString("hex");
 
+    const User = getUserModel(req);
     const user = new User({
       name,
       email,
@@ -324,7 +327,7 @@ router.post(`/register`, async (req, res) => {
  */
 //Count the number of Users
 router.get(`/get/count`, async (req, res) => {
-  const userCount = await User.countDocuments({});
+  const userCount = await getUserModel(req).countDocuments({});
 
   if (userCount === 0) {
     return res.status(500).json({ success: false });
@@ -373,7 +376,7 @@ router.post("/resend-verification", async (req, res) => {
       });
     }
 
-    const user = await User.findOne({ email });
+    const user = await getUserModel(req).findOne({ email });
 
     if (!user) {
       return res.status(404).json({
@@ -539,7 +542,7 @@ router.get("/verify-email", async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({ emailVerificationToken: token });
+    const user = await getUserModel(req).findOne({ emailVerificationToken: token });
 
     if (!user) {
       return res.status(400).send(`
@@ -723,7 +726,7 @@ router.post("/forgot-password", async (req, res) => {
       });
     }
 
-    const user = await User.findOne({ email });
+    const user = await getUserModel(req).findOne({ email });
 
     if (!user) {
       return res.json({
@@ -880,7 +883,7 @@ router.get("/verify-reset-token", async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({
+    const user = await getUserModel(req).findOne({
       email: email,
       passwordResetToken: token,
       passwordResetTokenExpiry: { $gt: Date.now() },
@@ -962,7 +965,7 @@ router.post("/reset-password", async (req, res) => {
       });
     }
 
-    const user = await User.findOne({
+    const user = await getUserModel(req).findOne({
       email: email,
       passwordResetToken: token,
       passwordResetTokenExpiry: { $gt: Date.now() },
@@ -1076,7 +1079,7 @@ router.get("/reset-password", async (req, res) => {
     console.log("Looking for user with token and checking expiry...");
     console.log("Current time:", new Date());
 
-    const user = await User.findOne({
+    const user = await getUserModel(req).findOne({
       email: email,
       passwordResetToken: token,
     });
@@ -1391,7 +1394,7 @@ router.get("/reset-password", async (req, res) => {
  *         description: User not found
  */
 router.get("/:id", async (req, res) => {
-  const user = await User.findById(req.params.id).select("-passwordHash");
+  const user = await getUserModel(req).findById(req.params.id).select("-passwordHash");
 
   if (!user) {
     res

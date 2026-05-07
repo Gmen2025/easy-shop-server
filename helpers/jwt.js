@@ -31,6 +31,7 @@ function authJwt() {
       { url: /\/api\/v1\/telebirr(.*)/, methods: ["POST", "GET", "OPTIONS"] },
       { url: /\/api\/v1\/cloudinary\/sign$/, methods: ["POST", "OPTIONS"] },
       { url: /\/sign$/, methods: ["POST", "OPTIONS"] },
+      { url: /\/api\/v1\/database(.*)/, methods: ["GET", "POST", "OPTIONS"] },
     ],
   });
 }

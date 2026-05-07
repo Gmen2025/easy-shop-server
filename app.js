@@ -7,6 +7,8 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const authJwt = require('./helpers/jwt');
 const errorHandler = require('./helpers/error-handler');
+const dbSelector = require('./helpers/db-selector');
+const { connectDefaultDatabase } = require('./helpers/db-manager');
 
 
 // Safari-compatible CORS configuration
@@ -42,9 +44,11 @@ const corsConfig = {
     'Content-Type',
     'Authorization', 
     'X-Requested-With',
+    'x-database-name',
     'Accept',
     'Origin'
-  ]
+  ],
+  exposedHeaders: ['x-selected-database']
 };
 
 app.use(cors(corsConfig));
@@ -52,6 +56,12 @@ app.use(cors(corsConfig));
 //   origin: 'http://localhost:3001', // or your frontend URL
 //   credentials: true
 // }));
+
+// Log all inbound requests early (including OPTIONS preflight)
+app.use((req, res, next) => {
+  console.log(`[Inbound] ${req.method} ${req.originalUrl} from ${req.headers.origin || 'unknown-origin'}`);
+  next();
+});
 
 
 app.options('*', cors(corsConfig)); // Enable pre-flight for all routes
@@ -61,7 +71,8 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, x-database-name');
+  res.setHeader('Access-Control-Expose-Headers', 'x-selected-database');
   
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
@@ -82,12 +93,14 @@ const usersRouter = require('./routers/users');
 const stripeRouter = require('./routers/stripe');
 const telebirrRouter = require('./routers/telebirr');
 const cloudinaryRouter = require('./routers/cloudinary');
+const databaseRouter = require('./routers/database');
 
 
 //Middleware
 app.use(express.json());
 app.use(morgan('tiny'));
 app.use(express.urlencoded({ extended: true }));
+app.use(dbSelector);
 
 //Swagger Documentation Route (MUST be before authJwt middleware)
 app.get('/api-docs/swagger.json', (req, res) => {
@@ -119,14 +132,13 @@ app.use(`${api}/users`, usersRouter);
 app.use(`${api}/stripe`, stripeRouter); 
 app.use(`${api}/telebirr`, telebirrRouter);
 app.use(`${api}/cloudinary`, cloudinaryRouter);
+app.use(`${api}/database`, databaseRouter);
 app.use('/', cloudinaryRouter);
 
 const PORT = process.env.PORT || 3001;
 
 //Database connection
-mongoose.connect(process.env.CONNECTION_STRING, {
-  dbName: 'E_Shopping'
-}).then(() => {
+connectDefaultDatabase().then(() => {
   console.log('Database connection is ready...');
    // Bind to 0.0.0.0 to accept connections from any network interface
     const server = app.listen(PORT, '0.0.0.0', () => {

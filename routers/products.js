@@ -1,5 +1,3 @@
-const {Product} = require('../models/product');
-const {Category} = require('../models/category');
 const express = require('express');
 const router = require("express").Router();
 const mongoose = require('mongoose');
@@ -79,6 +77,7 @@ const normalizeImageInput = (value) => {
  */
 //Get all products
 router.get(`/`, async(req, res) => {
+    const { Product } = req.dbModels;
     try {
         let filter = {};
         
@@ -123,6 +122,7 @@ router.get(`/`, async(req, res) => {
  *         description: Product not found
  */
  router.get('/:id', async(req, res) => {
+     const { Product } = req.dbModels;
     const product = await Product.findById(req.params.id).populate('category');
  
     if(!product) {
@@ -188,6 +188,7 @@ router.get(`/`, async(req, res) => {
  */
 //Create a new product
 router.post(`/`, uploadOptions.single('image'), async(req, res) => {
+const { Product, Category } = req.dbModels;
 
 const category = await Category.findById(req.body.category);
 if(!category) return res.status(400).send('Invalid Category');
@@ -282,6 +283,7 @@ if(!imagePath) return res.status(400).send('No image in the request');
  */
 //Update a product
 router.put('/:id', uploadOptions.single('image'), async(req, res) => {
+    const { Product, Category } = req.dbModels;
     if(!mongoose.isValidObjectId(req.params.id)) {
         return res.status(400).send('Invalid Product Id')
     }
@@ -344,6 +346,7 @@ router.put('/:id', uploadOptions.single('image'), async(req, res) => {
  */
 //Delete a product
 router.delete('/:id', (req, res) => {
+    const { Product } = req.dbModels;
     
     Product.findByIdAndDelete(req.params.id).exec().then(product => {  
         if(product) {
@@ -377,6 +380,7 @@ router.delete('/:id', (req, res) => {
  */
 //Count the number of products
 router.get(`/get/count`, async(req, res) => {
+    const { Product } = req.dbModels;
     const productCount= await Product.countDocuments({}); //counting all products
 
     if(!productCount) {
@@ -409,6 +413,7 @@ router.get(`/get/count`, async(req, res) => {
  */
     //Get featured products
     router.get(`/get/featured/:count`, async(req, res) => {
+    const { Product } = req.dbModels;
     const count = req.params.count ? req.params.count : 0
     const products = await Product.find({isFeatured: true}).limit(+count);//+count converts string to number
 
@@ -421,6 +426,7 @@ router.get(`/get/count`, async(req, res) => {
 
     //Get products by category
     router.get(`/`, async(req, res) => {
+    const { Product } = req.dbModels;
     //http://localhost:3000/api/v1/products?categories=2342342,234234
     let filter = {};
     if(req.query.categories) {
@@ -473,6 +479,7 @@ router.get(`/get/count`, async(req, res) => {
  */
 //images gallery
 router.put('/gallery-images/:id', uploadOptions.array('images', 10), async(req, res) => {
+    const { Product } = req.dbModels;
     if(!mongoose.isValidObjectId(req.params.id)) {
         return res.status(400).send('Invalid Product Id')
     }
