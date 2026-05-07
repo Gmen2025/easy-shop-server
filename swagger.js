@@ -220,6 +220,36 @@ const swaggerOptions = {
             }
           }
         },
+        DatabaseListResponse: {
+          type: 'object',
+          properties: {
+            success: { type: 'boolean', example: true },
+            databases: {
+              type: 'array',
+              items: { type: 'string' },
+              example: ['E_Shopping', 'E_ShopUSA']
+            },
+            default: { type: 'string', example: 'E_Shopping' }
+          }
+        },
+        DatabaseSwitchRequest: {
+          type: 'object',
+          required: ['database'],
+          properties: {
+            database: { type: 'string', example: 'E_ShopUSA', description: 'Name of the database to switch to' },
+            databaseName: { type: 'string', description: 'Alias for database' },
+            db: { type: 'string', description: 'Alias for database' }
+          }
+        },
+        DatabaseSwitchResponse: {
+          type: 'object',
+          properties: {
+            success: { type: 'boolean', example: true },
+            message: { type: 'string' },
+            database: { type: 'string', example: 'E_ShopUSA' },
+            instruction: { type: 'string', example: 'Add header to every request: x-database-name: E_ShopUSA' }
+          }
+        },
         Error: {
           type: 'object',
           properties: {
@@ -230,6 +260,9 @@ const swaggerOptions = {
         }
       }
     },
+    tags: [
+      { name: 'Database', description: 'Multi-database switching endpoints — no authentication required. Use x-database-name header on all subsequent requests after switching.' }
+    ],
     security: [{
       bearerAuth: []
     }]
