@@ -91,6 +91,11 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
    
    # Payment Gateways
    STRIPE_KEY=sk_test_your_stripe_secret_key
+  # Optional per-database Stripe keys (recommended for multi-database setups)
+  # For E_ShopUSA selected via x-database-name
+  STRIPE_KEY_E_SHOPUSA=sk_test_your_usa_stripe_secret_key
+  # Optional short alias fallback used by backend
+  STRIPE_KEY_USA=sk_test_your_usa_stripe_secret_key
    
    TELEBIRR_BASE_URL=https://api.telebirr.com
    USE_MOCK_TELEBIRR=true

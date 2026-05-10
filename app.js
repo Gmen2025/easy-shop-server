@@ -137,6 +137,15 @@ app.use('/', cloudinaryRouter);
 
 const PORT = process.env.PORT || 3001;
 
+function getConfiguredStripeEnvNames() {
+  const stripeEnvPrefixes = ['STRIPE_KEY', 'STRIPE_SECRET_KEY', 'STRIPE_API_KEY'];
+
+  return Object.keys(process.env)
+    .filter((name) => stripeEnvPrefixes.some((prefix) => name === prefix || name.startsWith(`${prefix}_`)))
+    .filter((name) => !!process.env[name])
+    .sort();
+}
+
 //Database connection
 connectDefaultDatabase().then(() => {
   console.log('Database connection is ready...');
@@ -160,6 +169,13 @@ connectDefaultDatabase().then(() => {
             console.log(`- http://${addr}:${PORT}`);
         });
         console.log(`API available at ${process.env.API_URL}`);
+
+        const stripeEnvNames = getConfiguredStripeEnvNames();
+        if (stripeEnvNames.length > 0) {
+          console.log(`[Startup] Stripe env keys detected: ${stripeEnvNames.join(', ')}`);
+        } else {
+          console.log('[Startup] Stripe env keys detected: none');
+        }
     });
     
     server.on('error', (err) => {
