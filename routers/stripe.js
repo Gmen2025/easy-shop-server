@@ -19,18 +19,40 @@ function normalizeDbEnvSuffix(dbName) {
 function getStripeKeyCandidates(dbName) {
   const dbSuffix = normalizeDbEnvSuffix(dbName);
   const candidates = [];
+  const aliases = new Set();
 
   if (dbSuffix) {
-    candidates.push(`STRIPE_KEY_${dbSuffix}`);
-    candidates.push(`STRIPE_SECRET_KEY_${dbSuffix}`);
+    aliases.add(dbSuffix);
+
+    // Common prefix variants, e.g. E_SHOPUSA -> SHOPUSA / USA
+    if (dbSuffix.startsWith('E_')) {
+      aliases.add(dbSuffix.slice(2));
+    }
+    if (dbSuffix.startsWith('E_SHOP')) {
+      aliases.add(dbSuffix.slice('E_SHOP'.length));
+    }
+    if (dbSuffix.startsWith('SHOP')) {
+      aliases.add(dbSuffix.slice('SHOP'.length));
+    }
 
     // Convenience fallback for names like E_SHOPUSA -> USA
     const tokens = dbSuffix.split('_').filter(Boolean);
     if (tokens.length > 1) {
       const lastToken = tokens[tokens.length - 1];
-      candidates.push(`STRIPE_KEY_${lastToken}`);
-      candidates.push(`STRIPE_SECRET_KEY_${lastToken}`);
+      aliases.add(lastToken);
+
+      // If token is SHOPUSA style, also try USA.
+      if (lastToken.startsWith('SHOP') && lastToken.length > 4) {
+        aliases.add(lastToken.slice(4));
+      }
     }
+
+    Array.from(aliases)
+      .filter(Boolean)
+      .forEach((alias) => {
+        candidates.push(`STRIPE_KEY_${alias}`);
+        candidates.push(`STRIPE_SECRET_KEY_${alias}`);
+      });
   }
 
   candidates.push('STRIPE_KEY');
