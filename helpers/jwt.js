@@ -32,6 +32,7 @@ function authJwt() {
       { url: /\/api\/v1\/cloudinary\/sign$/, methods: ["POST", "OPTIONS"] },
       { url: /\/sign$/, methods: ["POST", "OPTIONS"] },
       { url: /\/api\/v1\/database(.*)/, methods: ["GET", "POST", "OPTIONS"] },
+      { url: /\/api\/v1\/notifications\/health$/, methods: ["GET", "OPTIONS"] },
     ],
   });
 }

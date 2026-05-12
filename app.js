@@ -94,6 +94,7 @@ const stripeRouter = require('./routers/stripe');
 const telebirrRouter = require('./routers/telebirr');
 const cloudinaryRouter = require('./routers/cloudinary');
 const databaseRouter = require('./routers/database');
+const notificationsRouter = require('./routers/notifications');
 
 
 //Middleware
@@ -133,6 +134,9 @@ app.use(`${api}/stripe`, stripeRouter);
 app.use(`${api}/telebirr`, telebirrRouter);
 app.use(`${api}/cloudinary`, cloudinaryRouter);
 app.use(`${api}/database`, databaseRouter);
+// Notifications: push-token sub-routes live under /users, send/health under /notifications
+app.use(`${api}/notifications`, notificationsRouter);
+app.use(`${api}/users`, notificationsRouter);
 app.use('/', cloudinaryRouter);
 
 const PORT = process.env.PORT || 3001;
