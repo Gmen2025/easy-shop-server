@@ -261,6 +261,7 @@ const swaggerOptions = {
       }
     },
     tags: [
+      { name: 'Notifications', description: 'Push notification endpoints for device token management and admin message delivery.' },
       { name: 'Database', description: 'Multi-database switching endpoints — no authentication required. Use x-database-name header on all subsequent requests after switching.' }
     ],
     security: [{

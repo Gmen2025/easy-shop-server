@@ -5,6 +5,47 @@ const router = require("express").Router();
 const nodemailer = require("nodemailer");
 //const Preview = require('twilio/lib/rest/Preview');
 //const twilio = require("twilio");
+const { Expo } = require("expo-server-sdk");
+
+const expo = new Expo();
+
+const sendPushToUser = async ({ User, userId, title, body, data = {} }) => {
+  try {
+    if (!User || !userId || !title || !body) {
+      return { sent: 0 };
+    }
+
+    const user = await User.findById(userId).select("pushTokens");
+    if (!user || !Array.isArray(user.pushTokens) || user.pushTokens.length === 0) {
+      return { sent: 0 };
+    }
+
+    const messages = user.pushTokens
+      .filter((token) => Expo.isExpoPushToken(token))
+      .map((token) => ({
+        to: token,
+        sound: "default",
+        title,
+        body,
+        data,
+        priority: "high",
+      }));
+
+    if (messages.length === 0) {
+      return { sent: 0 };
+    }
+
+    const chunks = expo.chunkPushNotifications(messages);
+    for (const chunk of chunks) {
+      await expo.sendPushNotificationsAsync(chunk);
+    }
+
+    return { sent: messages.length };
+  } catch (error) {
+    console.error("Automatic push send failed:", error?.message || error);
+    return { sent: 0 };
+  }
+};
 
 /**
  * @swagger
@@ -131,7 +172,7 @@ router.get(`/:id`, async (req, res) => {
  */
 // Create a new order
 router.post(`/`, async (req, res) => {
-  const { Order, OrderItem, Product } = req.dbModels;
+  const { Order, OrderItem, Product, User } = req.dbModels;
   // Create an array of promises for creating OrderItem documents
   const orderItemsIDS = Promise.all(
     req.body.orderItems.map(async (orderItem) => {
@@ -184,6 +225,17 @@ router.post(`/`, async (req, res) => {
 
   // Save the Order document
   const ord = await order.save();
+
+  await sendPushToUser({
+    User,
+    userId: ord.user,
+    title: "Purchase successful",
+    body: `Your order #${ord._id} was placed successfully.`,
+    data: {
+      type: "order_placed",
+      orderId: String(ord._id),
+    },
+  });
 
   // Handle the case where the order could not be created
   if (!ord) {
@@ -306,7 +358,7 @@ router.post(`/`, async (req, res) => {
  */
 //updating order status
 router.put("/:id", async (req, res) => {
-  const { Order } = req.dbModels;
+  const { Order, User } = req.dbModels;
   const order = await Order.findByIdAndUpdate(
     req.params.id,
     {
@@ -319,6 +371,22 @@ router.put("/:id", async (req, res) => {
   if (!order) {
     return res.status(400).send("the category cannot be updated!");
   }
+
+  if (order.user) {
+    const statusText = String(order.status || "updated");
+    await sendPushToUser({
+      User,
+      userId: order.user,
+      title: "Order status update",
+      body: `Your order #${order._id} is now ${statusText}.`,
+      data: {
+        type: "order_status_changed",
+        orderId: String(order._id),
+        status: statusText,
+      },
+    });
+  }
+
   res.send(order);
 });
 
