@@ -8,7 +8,7 @@ const expo = new Expo();
 // ── User push-token routes ────────────────────────────────────────────────────
 /**
  * @swagger
- * /users/{userId}/push-token:
+ * /api/v1/users/{userId}/push-token:
  *   put:
  *     summary: Register an Expo push token for a user
  *     tags: [Notifications]
@@ -82,7 +82,7 @@ router.put('/:userId/push-token', async (req, res) => {
 
 /**
  * @swagger
- * /users/{userId}/push-token:
+ * /api/v1/users/{userId}/push-token:
  *   delete:
  *     summary: Remove an Expo push token for a user
  *     tags: [Notifications]
@@ -150,7 +150,7 @@ router.delete('/:userId/push-token', async (req, res) => {
 // ── Notification send/health routes ──────────────────────────────────────────
 /**
  * @swagger
- * /notifications/send:
+ * /api/v1/notifications/send:
  *   post:
  *     summary: Send a push notification to all registered tokens for a user
  *     tags: [Notifications]
@@ -258,7 +258,7 @@ router.post('/send', async (req, res) => {
 
 /**
  * @swagger
- * /notifications/health:
+ * /api/v1/notifications/health:
  *   get:
  *     summary: Health check for notifications API
  *     tags: [Notifications]
