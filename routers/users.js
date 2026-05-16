@@ -7,6 +7,19 @@ const { getFrontendBaseUrl, sendMailSafe } = require("../helpers/mailer");
 
 const getUserModel = (req) => req.dbModels.User;
 
+const getBackendBaseUrl = (req) => {
+  const protocol = req.protocol || "http";
+  const host = req.get("host");
+  return (process.env.BACKEND_URL || `${protocol}://${host}`).replace(/\/$/, "");
+};
+
+const getApiBase = () => (process.env.API_URL || "/api/v1").trim();
+
+const buildVerificationUrl = (req, token, email) => {
+  const baseUrl = getBackendBaseUrl(req);
+  return `${baseUrl}${getApiBase()}/users/verify-email?token=${token}&email=${encodeURIComponent(email)}`;
+};
+
 /**
  * @swagger
  * /api/v1/users:
@@ -234,9 +247,7 @@ router.post(`/register`, async (req, res) => {
 
     const savedUser = await user.save();
 
-    // Add frontend URL to your .env file if not exists
-    const frontendUrl = getFrontendBaseUrl();
-    const verificationUrl = `${frontendUrl}/verify-email?token=${verificationToken}&email=${email}`;
+    const verificationUrl = buildVerificationUrl(req, verificationToken, email);
 
     const mailOptions = {
       to: email,
@@ -382,8 +393,7 @@ router.post("/resend-verification", async (req, res) => {
     await user.save();
 
     // Send verification email
-    const frontendUrl = getFrontendBaseUrl();
-    const verificationUrl = `${frontendUrl}/verify-email?token=${verificationToken}&email=${email}`;
+    const verificationUrl = buildVerificationUrl(req, verificationToken, email);
 
     const mailOptions = {
       to: email,
@@ -677,6 +687,51 @@ router.get("/verify-email", async (req, res) => {
       </body>
       </html>
     `);
+  }
+});
+
+// POST /users/verify-email - Verify email with token (mobile app compatibility)
+router.post("/verify-email", async (req, res) => {
+  try {
+    const token = req.body?.token;
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: "Verification token is required",
+      });
+    }
+
+    const user = await getUserModel(req).findOne({ emailVerificationToken: token });
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired verification token",
+      });
+    }
+
+    if (user.isEmailVerified) {
+      return res.status(200).json({
+        success: true,
+        message: "Email already verified",
+      });
+    }
+
+    user.isEmailVerified = true;
+    user.emailVerificationToken = undefined;
+    await user.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Email verified successfully",
+    });
+  } catch (err) {
+    console.error("Email verification (POST) error:", err);
+    return res.status(500).json({
+      success: false,
+      message: "An error occurred while verifying email",
+    });
   }
 });
 
