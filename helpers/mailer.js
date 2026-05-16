@@ -10,6 +10,16 @@ function envValue(...keys) {
   return "";
 }
 
+function envValueWithSource(...keys) {
+  for (const key of keys) {
+    const value = process.env[key];
+    if (typeof value === "string" && value.trim()) {
+      return { value: value.trim(), key };
+    }
+  }
+  return { value: "", key: null };
+}
+
 function normalizePassword(rawPassword, { serviceName = "", host = "", user = "" } = {}) {
   if (!rawPassword) {
     return "";
@@ -29,42 +39,80 @@ function normalizePassword(rawPassword, { serviceName = "", host = "", user = ""
 }
 
 function createTransportConfig() {
-  const service = envValue("EMAIL_SERVICE");
-  const user = envValue("EMAIL_User", "EMAIL_USER", "Email_User");
+  const serviceMeta = envValueWithSource("EMAIL_SERVICE", "MAIL_SERVICE");
+  const userMeta = envValueWithSource(
+    "EMAIL_User",
+    "EMAIL_USER",
+    "Email_User",
+    "SMTP_USER",
+    "MAIL_USER",
+    "GMAIL_USER"
+  );
   const host = envValue("SMTP_HOST") || "smtp.gmail.com";
   const port = Number(envValue("SMTP_PORT")) || 587;
   const secure = envValue("SMTP_SECURE").toLowerCase() === "true";
-  const pass = normalizePassword(
-    envValue("EMAIL_Pass", "EMAIL_PASS", "Email_Pass"),
-    { serviceName: service, host, user }
+  const passMeta = envValueWithSource(
+    "EMAIL_Pass",
+    "EMAIL_PASS",
+    "Email_Pass",
+    "SMTP_PASS",
+    "MAIL_PASS",
+    "GMAIL_APP_PASSWORD"
   );
-
-  if (service) {
-    return {
-      service,
-      auth: { user, pass },
-      connectionTimeout: 10000,
-      greetingTimeout: 10000,
-      socketTimeout: 15000,
-    };
-  }
-
-  return {
+  const service = serviceMeta.value;
+  const user = userMeta.value;
+  const pass = normalizePassword(passMeta.value, {
+    serviceName: service,
     host,
-    port,
-    secure,
+    user,
+  });
+
+  const baseConfig = {
     auth: { user, pass },
     connectionTimeout: 10000,
     greetingTimeout: 10000,
     socketTimeout: 15000,
   };
+
+  if (service) {
+    return {
+      config: {
+      service,
+      ...baseConfig,
+      },
+      meta: {
+        serviceKey: serviceMeta.key,
+        userKey: userMeta.key,
+        passKey: passMeta.key,
+      },
+    };
+  }
+
+  return {
+    config: {
+      host,
+      port,
+      secure,
+      ...baseConfig,
+    },
+    meta: {
+      serviceKey: serviceMeta.key,
+      userKey: userMeta.key,
+      passKey: passMeta.key,
+    },
+  };
 }
 
-const transportConfig = createTransportConfig();
+const { config: transportConfig, meta: transportMeta } = createTransportConfig();
 const transporter = nodemailer.createTransport(transportConfig);
 
 if (!transportConfig?.auth?.user || !transportConfig?.auth?.pass) {
-  console.warn("[Mail] Missing email credentials. Set EMAIL_USER/EMAIL_PASS (or EMAIL_User/EMAIL_Pass). Emails will fail.");
+  console.warn("[Mail] Missing email credentials. Accepted keys for user: EMAIL_USER/EMAIL_User/SMTP_USER/MAIL_USER/GMAIL_USER. Accepted keys for pass: EMAIL_PASS/EMAIL_Pass/SMTP_PASS/MAIL_PASS/GMAIL_APP_PASSWORD.");
+  console.warn("[Mail] Detected keys:", {
+    serviceKey: transportMeta?.serviceKey || "none",
+    userKey: transportMeta?.userKey || "none",
+    passKey: transportMeta?.passKey || "none",
+  });
 }
 
 const isGmailTransport = () => {
@@ -82,7 +130,7 @@ if (isGmailTransport()) {
 }
 
 function getMailFrom() {
-  return envValue("FROM_EMAIL") || envValue("EMAIL_User", "EMAIL_USER", "Email_User");
+  return envValue("FROM_EMAIL", "MAIL_FROM") || envValue("EMAIL_User", "EMAIL_USER", "Email_User", "SMTP_USER", "MAIL_USER", "GMAIL_USER");
 }
 
 async function sendMailSafe(mailOptions, context = "email") {
