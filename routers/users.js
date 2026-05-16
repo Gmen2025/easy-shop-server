@@ -2,31 +2,10 @@ const express = require("express");
 const router = require("express").Router();
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
-const nodemailer = require("nodemailer");
 const crypto = require("crypto");
+const { getFrontendBaseUrl, sendMailSafe } = require("../helpers/mailer");
 
 const getUserModel = (req) => req.dbModels.User;
-
-//Configure nodemailer transporter
-const transporterConfig = process.env.EMAIL_SERVICE
-  ? {
-      service: process.env.EMAIL_SERVICE, // 'gmail', 'sendgrid', 'outlook', etc.
-      auth: {
-        user: process.env.EMAIL_User,
-        pass: process.env.EMAIL_Pass,
-      },
-    }
-  : {
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: process.env.SMTP_PORT || 587,
-      secure: process.env.SMTP_SECURE === 'true' || false,
-      auth: {
-        user: process.env.EMAIL_User,
-        pass: process.env.EMAIL_Pass,
-      },
-    };
-
-const transporter = nodemailer.createTransport(transporterConfig);
 
 /**
  * @swagger
@@ -256,11 +235,10 @@ router.post(`/register`, async (req, res) => {
     const savedUser = await user.save();
 
     // Add frontend URL to your .env file if not exists
-    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const frontendUrl = getFrontendBaseUrl();
     const verificationUrl = `${frontendUrl}/verify-email?token=${verificationToken}&email=${email}`;
 
     const mailOptions = {
-      from: process.env.EMAIL_User,
       to: email,
       subject: "Email Verification",
       html: `
@@ -272,8 +250,10 @@ router.post(`/register`, async (req, res) => {
     };
 
     try {
-      await transporter.sendMail(mailOptions);
-      console.log("Verification email sent successfully");
+      const emailResult = await sendMailSafe(mailOptions, "user_register_verification");
+      if (emailResult.ok) {
+        console.log("Verification email sent successfully");
+      }
     } catch (emailError) {
       console.error("Error sending email:", emailError);
       // Don't fail registration if email fails
@@ -398,11 +378,10 @@ router.post("/resend-verification", async (req, res) => {
     await user.save();
 
     // Send verification email
-    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:3000";
+    const frontendUrl = getFrontendBaseUrl();
     const verificationUrl = `${frontendUrl}/verify-email?token=${verificationToken}&email=${email}`;
 
     const mailOptions = {
-      from: process.env.EMAIL_User,
       to: email,
       subject: "Email Verification - Resend",
       html: `
@@ -413,7 +392,10 @@ router.post("/resend-verification", async (req, res) => {
       `,
     };
 
-    await transporter.sendMail(mailOptions);
+    const emailResult = await sendMailSafe(mailOptions, "user_resend_verification");
+    if (!emailResult.ok && !emailResult.skipped) {
+      throw emailResult.error;
+    }
 
     res.json({
       success: true,
@@ -533,7 +515,7 @@ router.get("/verify-email", async (req, res) => {
           <h1>❌ Verification Failed</h1>
           <p>Verification token is required.</p>
           <a href="${
-            process.env.FRONTEND_URL || "http://localhost:3000"
+            getFrontendBaseUrl()
           }" class="button">Go to Homepage</a>
         </div>
       </body>
@@ -759,7 +741,6 @@ router.post("/forgot-password", async (req, res) => {
     console.log('Protocol:', protocol);
 
     const mailOptions = {
-      from: process.env.EMAIL_User,
       to: email,
       subject: "Password Reset Request",
       html: `
@@ -826,7 +807,7 @@ router.post("/forgot-password", async (req, res) => {
     };
 
     try {
-      await transporter.sendMail(mailOptions);
+      await sendMailSafe(mailOptions, "user_forgot_password");
       console.log("Password reset email sent successfully to:", email);
     } catch (emailError) {
       console.error("Error sending password reset email:", emailError);
@@ -986,7 +967,6 @@ router.post("/reset-password", async (req, res) => {
 
     // Send confirmation email
     const mailOptions = {
-      from: process.env.EMAIL_User,
       to: email,
       subject: "Password Reset Successful",
       html: `
@@ -1012,7 +992,7 @@ router.post("/reset-password", async (req, res) => {
               <p>Your password has been successfully reset.</p>
               <p>You can now log in to your account with your new password.</p>
               <a href="${
-                process.env.FRONTEND_URL || "http://localhost:3000"
+                getFrontendBaseUrl()
               }/login" class="button">Go to Login</a>
               <p><strong>If you didn't reset your password, please contact our support team immediately.</strong></p>
             </div>
@@ -1026,7 +1006,7 @@ router.post("/reset-password", async (req, res) => {
     };
 
     try {
-      await transporter.sendMail(mailOptions);
+      await sendMailSafe(mailOptions, "user_password_reset_confirmation");
       console.log("Password reset confirmation email sent to:", email);
     } catch (emailError) {
       console.error("Error sending confirmation email:", emailError);
@@ -1113,7 +1093,7 @@ router.get("/reset-password", async (req, res) => {
           <div class="error">
             <h1>⏰ Reset Link Expired</h1>
             <p>This password reset link has expired or is invalid.</p>
-            <a href="${process.env.FRONTEND_URL || "http://localhost:3000"}/forgot-password" class="button">Request New Reset Link</a>
+            <a href="${getFrontendBaseUrl()}/forgot-password" class="button">Request New Reset Link</a>
           </div>
         </body>
         </html>
@@ -1327,7 +1307,7 @@ router.get("/reset-password", async (req, res) => {
                 
                 // Redirect to login after 2 seconds
                 setTimeout(() => {
-                  window.location.href = '${process.env.FRONTEND_URL || "http://localhost:3000"}/login';
+                  window.location.href = '${getFrontendBaseUrl()}/login';
                 }, 2000);
               } else {
                 showMessage('❌ ' + (data.message || 'Failed to reset password. Please try again.'), 'error');

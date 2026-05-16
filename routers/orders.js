@@ -2,10 +2,10 @@ const express = require("express");
 const router = require("express").Router();
 
 // For sending emails and SMS
-const nodemailer = require("nodemailer");
 //const Preview = require('twilio/lib/rest/Preview');
 //const twilio = require("twilio");
 const { Expo } = require("expo-server-sdk");
+const { sendMailSafe } = require("../helpers/mailer");
 
 const expo = new Expo();
 
@@ -247,29 +247,6 @@ router.post(`/`, async (req, res) => {
 
   // Prepare email message
 
-  // Create a transporter object using SMTP transport
-  //sending email and text message when order is placed
-  // Setup nodemailer transporter
-  const transporterConfig = process.env.EMAIL_SERVICE
-    ? {
-        service: process.env.EMAIL_SERVICE, // 'gmail', 'sendgrid', 'outlook', etc.
-        auth: {
-          user: process.env.EMAIL_User,
-          pass: process.env.EMAIL_Pass,
-        },
-      }
-    : {
-        host: process.env.SMTP_HOST || 'smtp.gmail.com',
-        port: process.env.SMTP_PORT || 587,
-        secure: process.env.SMTP_SECURE === 'true' || false,
-        auth: {
-          user: process.env.EMAIL_User,
-          pass: process.env.EMAIL_Pass,
-        },
-      };
-
-  const transporter = nodemailer.createTransport(transporterConfig);
-
   try {
     //Populate user to get email
     await ord.populate("user", "name email");
@@ -279,7 +256,6 @@ router.post(`/`, async (req, res) => {
     console.log("Order object:", ord);
     // Send email notification
     const mailOptions = {
-      from: process.env.FROM_EMAIL, // sender address
       to: ord.user.email, // make sure you populate user email
       subject: "New Order Placed", // Subject line
       text: `A new order has been placed with total price: $${ord.totalPrice}.
@@ -292,15 +268,16 @@ router.post(`/`, async (req, res) => {
       //html: '<b>Hello world?</b>' // html body
     };
     // Send email notification
-    let info = await transporter.sendMail(mailOptions);
-    console.log("Email sent: ", info);
+    const emailResult = await sendMailSafe(mailOptions, "order_created");
 
     // Respond with success message
     return res.status(201).json({
       success: true,
-      message: "Order created and email sent successfully",
+      message: emailResult.ok
+        ? "Order created and email sent successfully"
+        : "Order created; email delivery skipped or failed",
       order: ord,
-      info,
+      info: emailResult.info,
     });
 
     // Send SMS notification using Twilio
@@ -385,6 +362,18 @@ router.put("/:id", async (req, res) => {
         status: statusText,
       },
     });
+
+    const orderUser = await User.findById(order.user).select("name email");
+    if (orderUser?.email) {
+      await sendMailSafe(
+        {
+          to: orderUser.email,
+          subject: `Order #${order._id} status updated`,
+          text: `Hello ${orderUser.name || "Customer"},\n\nYour order #${order._id} status is now: ${statusText}.\n\nThank you for shopping with us.`,
+        },
+        "order_status_changed"
+      );
+    }
   }
 
   res.send(order);
