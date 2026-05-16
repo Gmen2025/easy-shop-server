@@ -9,6 +9,7 @@ const authJwt = require('./helpers/jwt');
 const errorHandler = require('./helpers/error-handler');
 const dbSelector = require('./helpers/db-selector');
 const { connectDefaultDatabase } = require('./helpers/db-manager');
+const { verifyMailerConnection } = require('./helpers/mailer');
 
 
 // Safari-compatible CORS configuration
@@ -180,6 +181,11 @@ connectDefaultDatabase().then(() => {
         } else {
           console.log('[Startup] Stripe env keys detected: none');
         }
+
+        // Surface SMTP/auth issues immediately in startup logs.
+        verifyMailerConnection('startup').catch((error) => {
+          console.error('[Mail:startup] Unexpected verification error:', error?.message || error);
+        });
     });
     
     server.on('error', (err) => {
