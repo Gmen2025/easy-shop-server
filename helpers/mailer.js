@@ -59,6 +59,7 @@ function createTransportConfig() {
     "MAIL_PASS",
     "GMAIL_APP_PASSWORD"
   );
+
   const service = serviceMeta.value;
   const user = userMeta.value;
   const pass = normalizePassword(passMeta.value, {
@@ -77,8 +78,8 @@ function createTransportConfig() {
   if (service) {
     return {
       config: {
-      service,
-      ...baseConfig,
+        service,
+        ...baseConfig,
       },
       meta: {
         serviceKey: serviceMeta.key,
@@ -106,7 +107,14 @@ function createTransportConfig() {
 const { config: transportConfig, meta: transportMeta } = createTransportConfig();
 const transporter = nodemailer.createTransport(transportConfig);
 
-const createGmailFallbackTransporter = () => {
+function isGmailTransport() {
+  const service = String(transportConfig?.service || "").toLowerCase();
+  const host = String(transportConfig?.host || "").toLowerCase();
+  const user = String(transportConfig?.auth?.user || "").toLowerCase();
+  return service === "gmail" || host.includes("gmail") || user.endsWith("@gmail.com");
+}
+
+function createGmailFallbackTransporter() {
   if (!isGmailTransport()) {
     return null;
   }
@@ -126,7 +134,7 @@ const createGmailFallbackTransporter = () => {
     greetingTimeout: 20000,
     socketTimeout: 30000,
   });
-};
+}
 
 const fallbackTransporter = createGmailFallbackTransporter();
 
@@ -139,13 +147,6 @@ if (!transportConfig?.auth?.user || !transportConfig?.auth?.pass) {
   });
 }
 
-const isGmailTransport = () => {
-  const service = String(transportConfig?.service || "").toLowerCase();
-  const host = String(transportConfig?.host || "").toLowerCase();
-  const user = String(transportConfig?.auth?.user || "").toLowerCase();
-  return service === "gmail" || host.includes("gmail") || user.endsWith("@gmail.com");
-};
-
 if (isGmailTransport()) {
   const normalizedPass = String(transportConfig?.auth?.pass || "");
   if (!normalizedPass || normalizedPass.length < 16) {
@@ -155,6 +156,10 @@ if (isGmailTransport()) {
 
 function getMailFrom() {
   return envValue("FROM_EMAIL", "MAIL_FROM") || envValue("EMAIL_User", "EMAIL_USER", "Email_User", "SMTP_USER", "MAIL_USER", "GMAIL_USER");
+}
+
+function shouldTryFallback(error) {
+  return !!fallbackTransporter && (error?.code === "ETIMEDOUT" || error?.code === "ECONNREFUSED" || error?.command === "CONN");
 }
 
 async function sendMailSafe(mailOptions, context = "email") {
@@ -192,11 +197,7 @@ async function sendMailSafe(mailOptions, context = "email") {
     };
     console.error(`[Mail:${context}] Failed:`, details);
 
-    const shouldTryFallback =
-      !!fallbackTransporter &&
-      (error?.code === "ETIMEDOUT" || error?.code === "ECONNREFUSED" || error?.command === "CONN");
-
-    if (shouldTryFallback) {
+    if (shouldTryFallback(error)) {
       try {
         const info = await fallbackTransporter.sendMail({ ...mailOptions, from });
         console.log(`[Mail:${context}] Sent via fallback SMTP transport to ${to}`);
@@ -241,11 +242,7 @@ async function verifyMailerConnection(context = "startup") {
     };
     console.error(`[Mail:${context}] SMTP verification failed:`, details);
 
-    const shouldTryFallback =
-      !!fallbackTransporter &&
-      (error?.code === "ETIMEDOUT" || error?.code === "ECONNREFUSED" || error?.command === "CONN");
-
-    if (shouldTryFallback) {
+    if (shouldTryFallback(error)) {
       try {
         await fallbackTransporter.verify();
         console.log(`[Mail:${context}] Fallback SMTP connection verified.`);
