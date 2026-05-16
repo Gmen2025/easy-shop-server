@@ -817,22 +817,25 @@ router.post("/forgot-password", async (req, res) => {
       `,
     };
 
-    try {
-      const emailResult = await sendMailSafe(mailOptions, "user_forgot_password");
-      if (emailResult.ok) {
-        console.log("Password reset email sent successfully to:", email);
-      } else {
-        console.warn("Password reset email was not sent:", emailResult.reason || emailResult.error?.message || "unknown_error");
-      }
-    } catch (emailError) {
-      console.error("Error sending password reset email:", emailError);
-    }
-
+    // Respond immediately so the client doesn't time out waiting for SMTP
     res.json({
       success: true,
       message:
         "If an account with that email exists, a password reset link has been sent.",
     });
+
+    // Send email in the background (non-blocking)
+    sendMailSafe(mailOptions, "user_forgot_password")
+      .then((emailResult) => {
+        if (emailResult.ok) {
+          console.log("Password reset email sent successfully to:", email);
+        } else {
+          console.warn("Password reset email was not sent:", emailResult.reason || emailResult.error?.message || "unknown_error");
+        }
+      })
+      .catch((emailError) => {
+        console.error("Error sending password reset email:", emailError);
+      });
   } catch (err) {
     console.error("Forgot password error:", err);
     return res.status(500).json({

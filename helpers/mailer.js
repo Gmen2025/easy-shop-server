@@ -43,6 +43,9 @@ function createTransportConfig() {
     return {
       service,
       auth: { user, pass },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
     };
   }
 
@@ -51,6 +54,9 @@ function createTransportConfig() {
     port,
     secure,
     auth: { user, pass },
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 15000,
   };
 }
 
