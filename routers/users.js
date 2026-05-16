@@ -732,9 +732,10 @@ router.post("/forgot-password", async (req, res) => {
     const host = req.get('host');
     
     // For mobile devices, use the server's actual IP address
-    const baseUrl = process.env.BACKEND_URL || `${protocol}://${host}`;
-    
-    const resetUrl = `${baseUrl}${process.env.API_URL}/users/reset-password?token=${resetToken}&email=${encodeURIComponent(email)}`;
+    const baseUrl = (process.env.BACKEND_URL || `${protocol}://${host}`).replace(/\/$/, "");
+    const apiBase = (process.env.API_URL || "/api/v1").trim();
+
+    const resetUrl = `${baseUrl}${apiBase}/users/reset-password?token=${resetToken}&email=${encodeURIComponent(email)}`;
 
     console.log('Generated reset URL:', resetUrl);
     console.log('Request host:', host);
@@ -807,8 +808,12 @@ router.post("/forgot-password", async (req, res) => {
     };
 
     try {
-      await sendMailSafe(mailOptions, "user_forgot_password");
-      console.log("Password reset email sent successfully to:", email);
+      const emailResult = await sendMailSafe(mailOptions, "user_forgot_password");
+      if (emailResult.ok) {
+        console.log("Password reset email sent successfully to:", email);
+      } else {
+        console.warn("Password reset email was not sent:", emailResult.reason || emailResult.error?.message || "unknown_error");
+      }
     } catch (emailError) {
       console.error("Error sending password reset email:", emailError);
     }

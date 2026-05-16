@@ -10,13 +10,17 @@ function envValue(...keys) {
   return "";
 }
 
-function normalizePassword(rawPassword, serviceName) {
+function normalizePassword(rawPassword, { serviceName = "", host = "", user = "" } = {}) {
   if (!rawPassword) {
     return "";
   }
 
   const password = rawPassword.trim();
-  if ((serviceName || "").toLowerCase() === "gmail") {
+  const isGmailService = (serviceName || "").toLowerCase() === "gmail";
+  const isGmailHost = /gmail\.com$/i.test(host || "");
+  const isGmailUser = /@gmail\.com$/i.test(user || "");
+
+  if (isGmailService || isGmailHost || isGmailUser) {
     // Gmail app passwords are often copied with spaces for readability.
     return password.replace(/\s+/g, "");
   }
@@ -27,9 +31,12 @@ function normalizePassword(rawPassword, serviceName) {
 function createTransportConfig() {
   const service = envValue("EMAIL_SERVICE");
   const user = envValue("EMAIL_User", "EMAIL_USER", "Email_User");
+  const host = envValue("SMTP_HOST") || "smtp.gmail.com";
+  const port = Number(envValue("SMTP_PORT")) || 587;
+  const secure = envValue("SMTP_SECURE").toLowerCase() === "true";
   const pass = normalizePassword(
     envValue("EMAIL_Pass", "EMAIL_PASS", "Email_Pass"),
-    service
+    { serviceName: service, host, user }
   );
 
   if (service) {
@@ -40,14 +47,19 @@ function createTransportConfig() {
   }
 
   return {
-    host: envValue("SMTP_HOST") || "smtp.gmail.com",
-    port: Number(envValue("SMTP_PORT")) || 587,
-    secure: envValue("SMTP_SECURE").toLowerCase() === "true",
+    host,
+    port,
+    secure,
     auth: { user, pass },
   };
 }
 
-const transporter = nodemailer.createTransport(createTransportConfig());
+const transportConfig = createTransportConfig();
+const transporter = nodemailer.createTransport(transportConfig);
+
+if (!transportConfig?.auth?.user || !transportConfig?.auth?.pass) {
+  console.warn("[Mail] Missing email credentials. Set EMAIL_USER/EMAIL_PASS (or EMAIL_User/EMAIL_Pass). Emails will fail.");
+}
 
 function getMailFrom() {
   return envValue("FROM_EMAIL") || envValue("EMAIL_User", "EMAIL_USER", "Email_User");
@@ -56,6 +68,13 @@ function getMailFrom() {
 async function sendMailSafe(mailOptions, context = "email") {
   const from = getMailFrom();
   const to = mailOptions?.to;
+  const authUser = transportConfig?.auth?.user;
+  const authPass = transportConfig?.auth?.pass;
+
+  if (!authUser || !authPass) {
+    console.warn(`[Mail:${context}] Skipped: missing SMTP auth credentials.`);
+    return { ok: false, skipped: true, reason: "missing_auth" };
+  }
 
   if (!from) {
     console.warn(`[Mail:${context}] Skipped: missing FROM_EMAIL/EMAIL_User env.`);
