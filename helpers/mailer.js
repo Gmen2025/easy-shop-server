@@ -69,9 +69,9 @@ function createTransportConfig() {
 
   const baseConfig = {
     auth: { user, pass },
-    connectionTimeout: 10000,
-    greetingTimeout: 10000,
-    socketTimeout: 15000,
+    connectionTimeout: 30000,
+    greetingTimeout: 20000,
+    socketTimeout: 30000,
   };
 
   if (service) {
@@ -105,6 +105,30 @@ function createTransportConfig() {
 
 const { config: transportConfig, meta: transportMeta } = createTransportConfig();
 const transporter = nodemailer.createTransport(transportConfig);
+
+const createGmailFallbackTransporter = () => {
+  if (!isGmailTransport()) {
+    return null;
+  }
+
+  const auth = transportConfig?.auth || {};
+  if (!auth.user || !auth.pass) {
+    return null;
+  }
+
+  return nodemailer.createTransport({
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+    auth,
+    family: 4,
+    connectionTimeout: 30000,
+    greetingTimeout: 20000,
+    socketTimeout: 30000,
+  });
+};
+
+const fallbackTransporter = createGmailFallbackTransporter();
 
 if (!transportConfig?.auth?.user || !transportConfig?.auth?.pass) {
   console.warn("[Mail] Missing email credentials. Accepted keys for user: EMAIL_USER/EMAIL_User/SMTP_USER/MAIL_USER/GMAIL_USER. Accepted keys for pass: EMAIL_PASS/EMAIL_Pass/SMTP_PASS/MAIL_PASS/GMAIL_APP_PASSWORD.");
@@ -167,6 +191,29 @@ async function sendMailSafe(mailOptions, context = "email") {
       response: error?.response,
     };
     console.error(`[Mail:${context}] Failed:`, details);
+
+    const shouldTryFallback =
+      !!fallbackTransporter &&
+      (error?.code === "ETIMEDOUT" || error?.code === "ECONNREFUSED" || error?.command === "CONN");
+
+    if (shouldTryFallback) {
+      try {
+        const info = await fallbackTransporter.sendMail({ ...mailOptions, from });
+        console.log(`[Mail:${context}] Sent via fallback SMTP transport to ${to}`);
+        return { ok: true, info };
+      } catch (fallbackError) {
+        const fallbackDetails = {
+          message: fallbackError?.message || "Unknown fallback mail error",
+          code: fallbackError?.code,
+          responseCode: fallbackError?.responseCode,
+          command: fallbackError?.command,
+          response: fallbackError?.response,
+        };
+        console.error(`[Mail:${context}] Fallback failed:`, fallbackDetails);
+        return { ok: false, error: fallbackError };
+      }
+    }
+
     return { ok: false, error };
   }
 }
@@ -194,8 +241,30 @@ async function verifyMailerConnection(context = "startup") {
     };
     console.error(`[Mail:${context}] SMTP verification failed:`, details);
 
+    const shouldTryFallback =
+      !!fallbackTransporter &&
+      (error?.code === "ETIMEDOUT" || error?.code === "ECONNREFUSED" || error?.command === "CONN");
+
+    if (shouldTryFallback) {
+      try {
+        await fallbackTransporter.verify();
+        console.log(`[Mail:${context}] Fallback SMTP connection verified.`);
+        return { ok: true, usedFallback: true };
+      } catch (fallbackError) {
+        const fallbackDetails = {
+          message: fallbackError?.message || "Fallback SMTP verification failed",
+          code: fallbackError?.code,
+          responseCode: fallbackError?.responseCode,
+          command: fallbackError?.command,
+          response: fallbackError?.response,
+        };
+        console.error(`[Mail:${context}] Fallback SMTP verification failed:`, fallbackDetails);
+      }
+    }
+
     if (isGmailTransport()) {
       console.error("[Mail] Gmail hint: set EMAIL_SERVICE=gmail and use a valid Gmail App Password in EMAIL_PASS/EMAIL_Pass.");
+      console.error("[Mail] Network hint: on some hosts port 587 is flaky; fallback tries port 465 secure SMTP.");
     }
 
     return { ok: false, error };
