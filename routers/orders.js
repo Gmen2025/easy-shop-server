@@ -271,6 +271,14 @@ router.post(`/`, async (req, res) => {
     const emailResult = await sendMailSafe(mailOptions, "order_created");
 
     // Respond with success message
+    if (emailResult.ok) {
+      console.log("[Order:Created] Email sent to:", ord.user.email);
+    } else if (emailResult.skipped) {
+      console.warn("[Order:Created] Email skipped:", emailResult.reason);
+    } else {
+      console.error("[Order:Created] Email failed:", emailResult.error?.message);
+    }
+
     return res.status(201).json({
       success: true,
       message: emailResult.ok
@@ -365,7 +373,7 @@ router.put("/:id", async (req, res) => {
 
     const orderUser = await User.findById(order.user).select("name email");
     if (orderUser?.email) {
-      await sendMailSafe(
+      const statusEmailResult = await sendMailSafe(
         {
           to: orderUser.email,
           subject: `Order #${order._id} status updated`,
@@ -373,6 +381,14 @@ router.put("/:id", async (req, res) => {
         },
         "order_status_changed"
       );
+
+      if (statusEmailResult.ok) {
+        console.log("[Order:StatusChanged] Email sent to:", orderUser.email);
+      } else if (statusEmailResult.skipped) {
+        console.warn("[Order:StatusChanged] Email skipped:", statusEmailResult.reason);
+      } else {
+        console.error("[Order:StatusChanged] Email failed:", statusEmailResult.error?.message);
+      }
     }
   }
 

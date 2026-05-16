@@ -253,6 +253,10 @@ router.post(`/register`, async (req, res) => {
       const emailResult = await sendMailSafe(mailOptions, "user_register_verification");
       if (emailResult.ok) {
         console.log("Verification email sent successfully");
+      } else if (emailResult.skipped) {
+        console.warn("[Register] Verification email skipped:", emailResult.reason);
+      } else {
+        console.error("[Register] Verification email failed:", emailResult.error?.message);
       }
     } catch (emailError) {
       console.error("Error sending email:", emailError);
@@ -395,6 +399,12 @@ router.post("/resend-verification", async (req, res) => {
     const emailResult = await sendMailSafe(mailOptions, "user_resend_verification");
     if (!emailResult.ok && !emailResult.skipped) {
       throw emailResult.error;
+    }
+
+    if (emailResult.ok) {
+      console.log("[Resend-Verification] Email sent to:", email);
+    } else if (emailResult.skipped) {
+      console.warn("[Resend-Verification] Email skipped:", emailResult.reason);
     }
 
     res.json({
@@ -1014,7 +1024,7 @@ router.post("/reset-password", async (req, res) => {
       await sendMailSafe(mailOptions, "user_password_reset_confirmation");
       console.log("Password reset confirmation email sent to:", email);
     } catch (emailError) {
-      console.error("Error sending confirmation email:", emailError);
+      console.warn("Password reset confirmation email failed:", emailError?.message);
     }
 
     res.json({
