@@ -31,5 +31,7 @@ services:
         sync: false
       - key: FROM_EMAIL
         sync: false
+      - key: RESEND_API_KEY
+        sync: false
     # Add your environment variables in Render Dashboard
     # Don't put secrets here - configure them in Render's Environment tab
