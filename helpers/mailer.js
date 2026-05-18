@@ -31,7 +31,6 @@ function normalizePassword(rawPassword, { serviceName = "", host = "", user = ""
   const isGmailUser = /@gmail\.com$/i.test(user || "");
 
   if (isGmailService || isGmailHost || isGmailUser) {
-    // Gmail app passwords are often copied with spaces for readability.
     return password.replace(/\s+/g, "");
   }
 
@@ -158,8 +157,74 @@ function getMailFrom() {
   return envValue("FROM_EMAIL", "MAIL_FROM") || envValue("EMAIL_User", "EMAIL_USER", "Email_User", "SMTP_USER", "MAIL_USER", "GMAIL_USER");
 }
 
+function getResendApiKey() {
+  return envValue("RESEND_API_KEY", "EMAIL_API_KEY");
+}
+
+function parseAddress(address) {
+  const raw = String(address || "").trim();
+  const match = raw.match(/<([^>]+)>/);
+  return match ? match[1].trim() : raw;
+}
+
+function isResendSenderVerificationError(status, message) {
+  const normalized = String(message || "").toLowerCase();
+  return (
+    status === 403 ||
+    status === 422 ||
+    /verify|verified|domain|sender|from address|from email/.test(normalized)
+  );
+}
+
 function shouldTryFallback(error) {
   return !!fallbackTransporter && (error?.code === "ETIMEDOUT" || error?.code === "ECONNREFUSED" || error?.command === "CONN");
+}
+
+async function sendViaResend(mailOptions, context, from, to) {
+  const apiKey = getResendApiKey();
+  if (!apiKey) {
+    console.warn(
+      `[Mail:${context}] Resend fallback unavailable: missing RESEND_API_KEY. Set RESEND_API_KEY in Render to bypass SMTP timeouts.`
+    );
+    return { ok: false, skipped: true, reason: "missing_resend_api_key" };
+  }
+
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from,
+        to: [parseAddress(to)],
+        subject: mailOptions?.subject || "Notification",
+        html: mailOptions?.html,
+        text: mailOptions?.text,
+      }),
+    });
+
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      const message = body?.message || body?.error || `HTTP ${response.status}`;
+      console.error(`[Mail:${context}] Resend API failed:`, message);
+
+      if (isResendSenderVerificationError(response.status, message)) {
+        console.error(
+          `[Mail:${context}] Resend sender not verified. Ensure FROM_EMAIL (${from}) is a verified sender/domain in Resend.`
+        );
+      }
+
+      return { ok: false, error: new Error(message) };
+    }
+
+    console.log(`[Mail:${context}] Sent via Resend API to ${to}`);
+    return { ok: true, info: body };
+  } catch (error) {
+    console.error(`[Mail:${context}] Resend API error:`, error?.message || error);
+    return { ok: false, error };
+  }
 }
 
 async function sendMailSafe(mailOptions, context = "email") {
@@ -167,11 +232,7 @@ async function sendMailSafe(mailOptions, context = "email") {
   const to = mailOptions?.to;
   const authUser = transportConfig?.auth?.user;
   const authPass = transportConfig?.auth?.pass;
-
-  if (!authUser || !authPass) {
-    console.warn(`[Mail:${context}] Skipped: missing SMTP auth credentials.`);
-    return { ok: false, skipped: true, reason: "missing_auth" };
-  }
+  const resendApiKey = getResendApiKey();
 
   if (!from) {
     console.warn(`[Mail:${context}] Skipped: missing FROM_EMAIL/EMAIL_User env.`);
@@ -181,6 +242,15 @@ async function sendMailSafe(mailOptions, context = "email") {
   if (!to) {
     console.warn(`[Mail:${context}] Skipped: missing recipient email.`);
     return { ok: false, skipped: true, reason: "missing_to" };
+  }
+
+  if (resendApiKey) {
+    return sendViaResend(mailOptions, context, from, to);
+  }
+
+  if (!authUser || !authPass) {
+    console.warn(`[Mail:${context}] SMTP skipped: missing auth credentials; trying Resend API fallback.`);
+    return sendViaResend(mailOptions, context, from, to);
   }
 
   try {
@@ -211,17 +281,21 @@ async function sendMailSafe(mailOptions, context = "email") {
           response: fallbackError?.response,
         };
         console.error(`[Mail:${context}] Fallback failed:`, fallbackDetails);
-        return { ok: false, error: fallbackError };
       }
     }
 
-    return { ok: false, error };
+    return sendViaResend(mailOptions, context, from, to);
   }
 }
 
 async function verifyMailerConnection(context = "startup") {
   const authUser = transportConfig?.auth?.user;
   const authPass = transportConfig?.auth?.pass;
+
+  if (getResendApiKey()) {
+    console.warn(`[Mail:${context}] Resend API key detected; skipping SMTP verification and using HTTPS fallback when needed.`);
+    return { ok: true, usedResend: true };
+  }
 
   if (!authUser || !authPass) {
     console.warn(`[Mail:${context}] Verification skipped: missing auth credentials.`);
@@ -259,9 +333,14 @@ async function verifyMailerConnection(context = "startup") {
       }
     }
 
+    if (getResendApiKey()) {
+      console.warn(`[Mail:${context}] SMTP unavailable but Resend API key detected; emails can still be delivered via HTTPS fallback.`);
+      return { ok: true, usedResend: true };
+    }
+
     if (isGmailTransport()) {
       console.error("[Mail] Gmail hint: set EMAIL_SERVICE=gmail and use a valid Gmail App Password in EMAIL_PASS/EMAIL_Pass.");
-      console.error("[Mail] Network hint: on some hosts port 587 is flaky; fallback tries port 465 secure SMTP.");
+      console.error("[Mail] Network hint: on some hosts SMTP ports are blocked; use RESEND_API_KEY to send via HTTPS.");
     }
 
     return { ok: false, error };
@@ -271,7 +350,6 @@ async function verifyMailerConnection(context = "startup") {
 function getFrontendBaseUrl() {
   const raw = envValue("FRONTEND_PUBLIC_URL") || envValue("FRONTEND_URL") || "http://localhost:3000";
 
-  // If someone stored an API route instead of frontend root, normalize it.
   return raw
     .replace(/\/api\/v\d+\/users\/?$/i, "")
     .replace(/\/$/, "");

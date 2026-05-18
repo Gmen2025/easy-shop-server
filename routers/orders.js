@@ -260,7 +260,7 @@ router.post(`/`, async (req, res) => {
       subject: "New Order Placed", // Subject line
       text: `A new order has been placed with total price: $${ord.totalPrice}.
               Dear ${ord.user.name},\n\nThank you for your order #${ord._id}.
-               \n\n if you have any questions, contact us at girma.m.halie19@gmail.com
+               \n\n if you have any questions, contact us at ${process.env.FROM_EMAIL || "notifications@info.addugeneteshop.com"}
               and/or call us at +251913303648 
               \n\n we will get back to you as soon as possible!  
               \n\nWe appreciate your business! \n\nBest regards,\nE-Shopping Team
