@@ -11,6 +11,9 @@ const dbSelector = require('./helpers/db-selector');
 const { connectDefaultDatabase } = require('./helpers/db-manager');
 const { verifyMailerConnection } = require('./helpers/mailer');
 
+// Respect x-forwarded-* headers when running behind Render/reverse proxies.
+app.set('trust proxy', 1);
+
 
 // Safari-compatible CORS configuration
 const corsConfig = {

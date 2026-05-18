@@ -1175,10 +1175,9 @@ router.get("/reset-password", async (req, res) => {
 
     console.log("Token is valid, showing reset form");
 
-    // Get the current host to build the API URL
-    const protocol = req.protocol;
-    const host = req.get('host');
-    const apiUrl = `${protocol}://${host}${process.env.API_URL}/users/reset-password`;
+    // Use a same-origin relative API path to avoid mixed-content issues behind proxies.
+    const apiBase = (process.env.API_URL || "/api/v1").trim();
+    const apiUrl = `${apiBase}/users/reset-password`;
 
     res.send(`
       <!DOCTYPE html>
