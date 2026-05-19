@@ -17,7 +17,8 @@ const getApiBase = () => (process.env.API_URL || "/api/v1").trim();
 
 const buildVerificationUrl = (req, token, email) => {
   const baseUrl = getBackendBaseUrl(req);
-  return `${baseUrl}${getApiBase()}/users/verify-email?token=${token}&email=${encodeURIComponent(email)}`;
+  const dbQuery = req.dbName ? `&db=${encodeURIComponent(req.dbName)}` : "";
+  return `${baseUrl}${getApiBase()}/users/verify-email?token=${token}&email=${encodeURIComponent(email)}${dbQuery}`;
 };
 
 /**
