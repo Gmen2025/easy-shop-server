@@ -9,6 +9,25 @@ const { sendMailSafe } = require("../helpers/mailer");
 
 const expo = new Expo();
 
+const STATUS_LABELS = {
+  0: 'Pending',
+  1: 'Processing',
+  2: 'Shipped',
+  3: 'Delivered',
+  4: 'Cancelled',
+  pending: 'Pending',
+  processing: 'Processing',
+  shipped: 'Shipped',
+  delivered: 'Delivered',
+  cancelled: 'Cancelled',
+};
+
+const resolveStatusLabel = (status) => {
+  if (status === undefined || status === null) return 'Updated';
+  const key = String(status).toLowerCase();
+  return STATUS_LABELS[key] || STATUS_LABELS[status] || String(status);
+};
+
 const sendPushToUser = async ({ User, userId, title, body, data = {} }) => {
   try {
     if (!User || !userId || !title || !body) {
@@ -358,7 +377,7 @@ router.put("/:id", async (req, res) => {
   }
 
   if (order.user) {
-    const statusText = String(order.status || "updated");
+    const statusText = resolveStatusLabel(order.status);
     await sendPushToUser({
       User,
       userId: order.user,
@@ -376,8 +395,8 @@ router.put("/:id", async (req, res) => {
       const statusEmailResult = await sendMailSafe(
         {
           to: orderUser.email,
-          subject: `Order #${order._id} status updated`,
-          text: `Hello ${orderUser.name || "Customer"},\n\nYour order #${order._id} status is now: ${statusText}.\n\nThank you for shopping with us.`,
+          subject: `Order #${order._id} status updated to ${statusText}`,
+          text: `Hello ${orderUser.name || "Customer"},\n\nYour order #${order._id} status has been updated to: ${statusText}.\n\nThank you for shopping with us.`,
         },
         "order_status_changed"
       );
