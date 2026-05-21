@@ -1427,6 +1427,100 @@ router.get("/reset-password", async (req, res) => {
 
 /**
  * @swagger
+ * /api/v1/users/profile:
+ *   put:
+ *     summary: Update current authenticated user's profile
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *               phone:
+ *                 type: string
+ *               street:
+ *                 type: string
+ *               apartment:
+ *                 type: string
+ *               city:
+ *                 type: string
+ *               zip:
+ *                 type: string
+ *               country:
+ *                 type: string
+ *               address:
+ *                 type: string
+ *               address2:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Profile updated successfully
+ *       401:
+ *         description: Unauthorized
+ *       404:
+ *         description: User not found
+ */
+router.put("/profile", async (req, res) => {
+  try {
+    const userId = req.auth?.userId;
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    const updates = {};
+    const mapField = (source, target) => {
+      if (Object.prototype.hasOwnProperty.call(req.body, source)) {
+        updates[target] = req.body[source] ?? "";
+      }
+    };
+
+    mapField("name", "name");
+    mapField("phone", "phone");
+    mapField("city", "city");
+    mapField("zip", "zip");
+    mapField("country", "country");
+    mapField("street", "street");
+    mapField("apartment", "apartment");
+    mapField("address", "street");
+    mapField("address2", "apartment");
+
+    const updatedUser = await getUserModel(req)
+      .findByIdAndUpdate(userId, updates, { new: true })
+      .select("-passwordHash");
+
+    if (!updatedUser) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Profile updated successfully",
+      user: updatedUser,
+    });
+  } catch (error) {
+    console.error("Update profile error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "An error occurred while updating profile",
+    });
+  }
+});
+
+/**
+ * @swagger
  * /api/v1/users/{id}:
  *   get:
  *     summary: Get user by ID
