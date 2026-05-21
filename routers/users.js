@@ -1491,8 +1491,8 @@ router.put("/profile", async (req, res) => {
     mapField("country", "country");
     mapField("street", "street");
     mapField("apartment", "apartment");
-    mapField("address", "street");
-    mapField("address2", "apartment");
+    mapField("address", "address");
+    mapField("address2", "address2");
 
     const updatedUser = await getUserModel(req)
       .findByIdAndUpdate(userId, updates, { new: true })
