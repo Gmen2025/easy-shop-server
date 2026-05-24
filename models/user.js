@@ -65,6 +65,10 @@ const userSchema = new mongoose.Schema({
     type: [String],
     default: [],
   },
+  expoPushTokens: {
+    type: [String],
+    default: [],
+  },
 });
 
 userSchema.virtual("id").get(function () {

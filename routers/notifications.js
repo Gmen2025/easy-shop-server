@@ -62,6 +62,15 @@ const sendToTokens = async ({ tokens, title, body, data }) => {
   };
 };
 
+const getUserTokens = (user) => {
+  const tokens = [
+    ...(Array.isArray(user?.pushTokens) ? user.pushTokens : []),
+    ...(Array.isArray(user?.expoPushTokens) ? user.expoPushTokens : []),
+  ];
+
+  return [...new Set(tokens)].filter((token) => Expo.isExpoPushToken(token));
+};
+
 // ── User push-token routes ────────────────────────────────────────────────────
 /**
  * @swagger
@@ -136,8 +145,17 @@ router.put('/:userId/push-token', async (req, res) => {
 
   if (!user.pushTokens.includes(pushToken)) {
     user.pushTokens.push(pushToken);
-    await user.save();
   }
+
+  if (!Array.isArray(user.expoPushTokens)) {
+    user.expoPushTokens = [];
+  }
+
+  if (!user.expoPushTokens.includes(pushToken)) {
+    user.expoPushTokens.push(pushToken);
+  }
+
+  await user.save();
 
   return res.json({
     message: 'Push token saved',
@@ -213,6 +231,9 @@ router.delete('/:userId/push-token', async (req, res) => {
 
   const before = user.pushTokens.length;
   user.pushTokens = user.pushTokens.filter((t) => t !== pushToken);
+  if (Array.isArray(user.expoPushTokens)) {
+    user.expoPushTokens = user.expoPushTokens.filter((t) => t !== pushToken);
+  }
   const removed = user.pushTokens.length < before;
 
   if (removed) {
@@ -289,12 +310,12 @@ router.post('/send', async (req, res) => {
     return res.status(403).json({ message: 'Forbidden' });
   }
 
-  const user = await User.findById(userId).select('pushTokens');
+  const user = await User.findById(userId).select('pushTokens expoPushTokens');
   if (!user) {
     return res.status(404).json({ message: 'User not found' });
   }
 
-  const tokens = user.pushTokens || [];
+  const tokens = getUserTokens(user);
   if (tokens.length === 0) {
     return res.status(404).json({ message: 'No push tokens registered for this user' });
   }
@@ -359,13 +380,13 @@ router.post('/admin/send-user', requireAdmin, async (req, res) => {
     return res.status(400).json({ message: 'userId, title, and body are required' });
   }
 
-  const user = await User.findById(userId).select('pushTokens');
+  const user = await User.findById(userId).select('pushTokens expoPushTokens');
   if (!user) {
     return res.status(404).json({ message: 'User not found' });
   }
 
   const result = await sendToTokens({
-    tokens: user.pushTokens || [],
+    tokens: getUserTokens(user),
     title,
     body,
     data: data || {},
@@ -420,8 +441,8 @@ router.post('/admin/send-many', requireAdmin, async (req, res) => {
     return res.status(400).json({ message: 'userIds[], title, and body are required' });
   }
 
-  const users = await User.find({ _id: { $in: userIds } }).select('pushTokens');
-  const tokens = users.flatMap((user) => user.pushTokens || []);
+  const users = await User.find({ _id: { $in: userIds } }).select('pushTokens expoPushTokens');
+  const tokens = users.flatMap((user) => getUserTokens(user));
 
   const result = await sendToTokens({
     tokens,
@@ -475,8 +496,8 @@ router.post('/admin/broadcast', requireAdmin, async (req, res) => {
     return res.status(400).json({ message: 'title and body are required' });
   }
 
-  const users = await User.find({}).select('pushTokens');
-  const tokens = users.flatMap((user) => user.pushTokens || []);
+  const users = await User.find({}).select('pushTokens expoPushTokens');
+  const tokens = users.flatMap((user) => getUserTokens(user));
 
   const result = await sendToTokens({
     tokens,
@@ -519,12 +540,12 @@ router.get('/admin/user/:userId/tokens', requireAdmin, async (req, res) => {
     return res.status(500).json({ message: 'User model is not available' });
   }
 
-  const user = await User.findById(userId).select('name email pushTokens');
+  const user = await User.findById(userId).select('name email pushTokens expoPushTokens');
   if (!user) {
     return res.status(404).json({ message: 'User not found' });
   }
 
-  const tokens = Array.isArray(user.pushTokens) ? user.pushTokens : [];
+  const tokens = getUserTokens(user);
 
   return res.json({
     userId,

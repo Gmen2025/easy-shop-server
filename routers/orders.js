@@ -34,21 +34,26 @@ const sendPushToUser = async ({ User, userId, title, body, data = {} }) => {
       return { sent: 0 };
     }
 
-    const user = await User.findById(userId).select("pushTokens");
-    if (!user || !Array.isArray(user.pushTokens) || user.pushTokens.length === 0) {
+    const user = await User.findById(userId).select("pushTokens expoPushTokens");
+    const tokens = [
+      ...(Array.isArray(user?.pushTokens) ? user.pushTokens : []),
+      ...(Array.isArray(user?.expoPushTokens) ? user.expoPushTokens : []),
+    ];
+
+    const uniqueTokens = [...new Set(tokens)].filter((token) => Expo.isExpoPushToken(token));
+
+    if (!user || uniqueTokens.length === 0) {
       return { sent: 0 };
     }
 
-    const messages = user.pushTokens
-      .filter((token) => Expo.isExpoPushToken(token))
-      .map((token) => ({
-        to: token,
-        sound: "default",
-        title,
-        body,
-        data,
-        priority: "high",
-      }));
+    const messages = uniqueTokens.map((token) => ({
+      to: token,
+      sound: "default",
+      title,
+      body,
+      data,
+      priority: "high",
+    }));
 
     if (messages.length === 0) {
       return { sent: 0 };
