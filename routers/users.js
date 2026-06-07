@@ -1522,6 +1522,78 @@ router.put("/profile", async (req, res) => {
 /**
  * @swagger
  * /api/v1/users/{id}:
+ *   delete:
+ *     summary: Delete a user
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: User ID
+ *     responses:
+ *       200:
+ *         description: User deleted successfully
+ *       401:
+ *         description: Unauthorized
+ *       403:
+ *         description: Forbidden
+ *       404:
+ *         description: User not found
+ *       500:
+ *         description: Server error
+ */
+router.delete("/:id", async (req, res) => {
+  try {
+    const requesterId = req.auth?.userId;
+    const isAdmin = !!req.auth?.isAdmin;
+    const targetUserId = req.params.id;
+
+    if (!requesterId) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    if (!isAdmin && requesterId !== targetUserId) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only delete your own account",
+      });
+    }
+
+    const deletedUser = await getUserModel(req)
+      .findByIdAndDelete(targetUserId)
+      .select("-passwordHash");
+
+    if (!deletedUser) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "User deleted successfully",
+      user: deletedUser,
+    });
+  } catch (error) {
+    console.error("Delete user error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "An error occurred while deleting user",
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/v1/users/{id}:
  *   get:
  *     summary: Get user by ID
  *     tags: [Users]
