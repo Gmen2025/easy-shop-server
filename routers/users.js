@@ -1548,11 +1548,17 @@ router.put("/profile", async (req, res) => {
  */
 router.delete("/:id", async (req, res) => {
   try {
+    const normalizeId = (value) =>
+      String(value || "")
+        .trim()
+        .replace(/^['\"]|['\"]$/g, "")
+        .toLowerCase();
+
     const requesterId = req.auth?.userId || req.auth?.sub;
     const isAdmin = !!req.auth?.isAdmin;
     const targetUserId = req.params.id;
-    const requesterIdStr = requesterId ? String(requesterId).trim() : "";
-    const targetUserIdStr = targetUserId ? String(targetUserId).trim() : "";
+    const requesterIdStr = normalizeId(requesterId);
+    const targetUserIdStr = normalizeId(targetUserId);
 
     if (!requesterIdStr) {
       return res.status(401).json({
@@ -1568,15 +1574,19 @@ router.delete("/:id", async (req, res) => {
       });
     }
 
-    if (!isAdmin && requesterIdStr !== targetUserIdStr) {
+    const isSelfDelete = targetUserIdStr === "me" || targetUserIdStr === requesterIdStr;
+
+    if (!isAdmin && !isSelfDelete) {
       return res.status(403).json({
         success: false,
         message: "You can only delete your own account",
       });
     }
 
+    const idToDelete = !isAdmin && isSelfDelete ? requesterIdStr : targetUserIdStr;
+
     const deletedUser = await getUserModel(req)
-      .findByIdAndDelete(targetUserIdStr)
+      .findByIdAndDelete(idToDelete)
       .select("-passwordHash");
 
     if (!deletedUser) {
