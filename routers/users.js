@@ -1548,18 +1548,27 @@ router.put("/profile", async (req, res) => {
  */
 router.delete("/:id", async (req, res) => {
   try {
-    const requesterId = req.auth?.userId;
+    const requesterId = req.auth?.userId || req.auth?.sub;
     const isAdmin = !!req.auth?.isAdmin;
     const targetUserId = req.params.id;
+    const requesterIdStr = requesterId ? String(requesterId).trim() : "";
+    const targetUserIdStr = targetUserId ? String(targetUserId).trim() : "";
 
-    if (!requesterId) {
+    if (!requesterIdStr) {
       return res.status(401).json({
         success: false,
         message: "Unauthorized",
       });
     }
 
-    if (!isAdmin && requesterId !== targetUserId) {
+    if (!targetUserIdStr) {
+      return res.status(400).json({
+        success: false,
+        message: "User ID is required",
+      });
+    }
+
+    if (!isAdmin && requesterIdStr !== targetUserIdStr) {
       return res.status(403).json({
         success: false,
         message: "You can only delete your own account",
@@ -1567,7 +1576,7 @@ router.delete("/:id", async (req, res) => {
     }
 
     const deletedUser = await getUserModel(req)
-      .findByIdAndDelete(targetUserId)
+      .findByIdAndDelete(targetUserIdStr)
       .select("-passwordHash");
 
     if (!deletedUser) {
