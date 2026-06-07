@@ -22,9 +22,21 @@ const requireAdmin = (req, res, next) => {
 };
 
 const sendToTokens = async ({ tokens, title, body, data }) => {
+  console.log('[PushNotification] sendToTokens called', {
+    tokenCount: Array.isArray(tokens) ? tokens.length : 0,
+    tokens,
+    title,
+  });
+
   const messages = [];
   for (const pushToken of tokens) {
-    if (!Expo.isExpoPushToken(pushToken)) continue;
+    if (!Expo.isExpoPushToken(pushToken)) {
+      console.log('[PushNotification] Skipping invalid token', { pushToken });
+      continue;
+    }
+
+    console.log('[PushNotification] Queueing token', { pushToken });
+
     messages.push({
       to: pushToken,
       sound: 'default',
@@ -137,6 +149,11 @@ router.put('/:userId/push-token', async (req, res) => {
   if (!Expo.isExpoPushToken(pushToken)) {
     return res.status(400).json({ message: 'Invalid Expo push token' });
   }
+
+  console.log('[PushToken] Received token for user', {
+    userId,
+    pushToken,
+  });
 
   const user = await User.findById(userId);
   if (!user) {
@@ -498,6 +515,13 @@ router.post('/admin/broadcast', requireAdmin, async (req, res) => {
 
   const users = await User.find({}).select('pushTokens expoPushTokens');
   const tokens = users.flatMap((user) => getUserTokens(user));
+
+  console.log('[PushNotification] Broadcast prepared', {
+    userCount: users.length,
+    tokenCount: tokens.length,
+    tokens,
+    title,
+  });
 
   const result = await sendToTokens({
     tokens,
