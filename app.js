@@ -126,7 +126,6 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(null, swaggerOptions));
 // Apply JWT authentication (after Swagger route)
 app.use(authJwt());
 app.use('/public/uploads', express.static(__dirname + '/public/uploads'));;
-app.use(errorHandler);
 
 
 //Routers
@@ -142,6 +141,8 @@ app.use(`${api}/database`, databaseRouter);
 app.use(`${api}/notifications`, notificationsRouter);
 app.use(`${api}/users`, notificationsRouter);
 app.use('/', cloudinaryRouter);
+
+app.use(errorHandler);
 
 const PORT = process.env.PORT || 3001;
 
