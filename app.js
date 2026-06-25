@@ -22,24 +22,23 @@ const corsConfig = {
     if (!origin) return callback(null, true);
     
     const allowedOrigins = [
-      'http://localhost:3000',
-      'http://127.0.0.1:3000',
-      'http://localhost:3001',
-      'http://127.0.0.1:3001',
-      'http://localhost:5173',
-      'http://127.0.0.1:5173',
       process.env.FRONTEND_URL,
       process.env.BACKEND_URL
-    ];
+    ].filter(Boolean);
 
-     // Allow all local network IPs (192.168.x.x)
-    if (origin.match(/^http:\/\/192\.168\.\d+\.\d+:\d+$/)) {
+    // Allow any localhost / 127.0.0.1 origin (any port)
+    if (origin.match(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/)) {
       return callback(null, true);
     }
-    
+
+    // Allow all local network IPs (192.168.x.x, any port)
+    if (origin.match(/^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/)) {
+      return callback(null, true);
+    }
+
     // Check if the origin is in the allowed list
     if (allowedOrigins.includes(origin)) {
-      return callback(null, true); 
+      return callback(null, true);
     }
     
     callback(new Error('Not allowed by CORS'));
