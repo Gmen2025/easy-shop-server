@@ -481,7 +481,7 @@ router.put("/:id", async (req, res) => {
         {
           to: recipientEmail,
           subject: `Order #${order._id} status updated to ${statusText}`,
-          text: `Hello ${orderUser?.name || "Customer"},\n\nYour order #${order._id} status has been updated to: ${statusText}.\n\nOrder Summary\nUser: ${orderUser?.name || "Customer"}\nEmail: ${recipientEmail || "N/A"}\nPhone: ${order.phone || orderUser?.phone || "N/A"}\nAddress 1: ${order.shippingAddress1 || "N/A"}\nAddress 2: ${order.shippingAddress2 || "N/A"}\nCity: ${order.city || "N/A"}\nZip: ${order.zip || "N/A"}\nCountry: ${order.country || "N/A"}\n\nItems\n${itemLines}\n\nTotal Subtotal: ${Number(order.totalPrice || 0)}\n\nThank you for shopping with us.`,
+          text: `Hello ${orderUser?.name || "Customer"},\n\nYour order #${order._id} status has been updated to: ${statusText}.\n\nOrder Date: ${new Date(order.dateOrdered || Date.now()).toLocaleString()}\n\nOrder Summary\nUser: ${orderUser?.name || "Customer"}\nEmail: ${recipientEmail || "N/A"}\nPhone: ${order.phone || orderUser?.phone || "N/A"}\nAddress 1: ${order.shippingAddress1 || "N/A"}\nAddress 2: ${order.shippingAddress2 || "N/A"}\nCity: ${order.city || "N/A"}\nZip: ${order.zip || "N/A"}\nCountry: ${order.country || "N/A"}\n\nItems\n${itemLines}\n\nTotal Subtotal: ${Number(order.totalPrice || 0)}\n\nThank you for shopping with us.`,
         },
         "order_status_changed"
       );
