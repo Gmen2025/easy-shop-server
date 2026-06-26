@@ -197,6 +197,15 @@ router.get(`/:id`, async (req, res) => {
 // Create a new order
 router.post(`/`, async (req, res) => {
   const { Order, OrderItem, Product, User } = req.dbModels;
+  const authenticatedUserId = req.auth?.userId;
+  const orderUserId = authenticatedUserId || req.body.user;
+
+  if (!orderUserId) {
+    return res.status(400).json({
+      success: false,
+      message: "User is required to create an order.",
+    });
+  }
   // Create an array of promises for creating OrderItem documents
   const orderItemsIDS = Promise.all(
     req.body.orderItems.map(async (orderItem) => {
@@ -244,7 +253,7 @@ router.post(`/`, async (req, res) => {
     phone: req.body.phone,
     status: req.body.status,
     totalPrice: totalPrice,
-    user: req.body.user,
+    user: orderUserId,
   });
 
   // Save the Order document
@@ -280,7 +289,11 @@ router.post(`/`, async (req, res) => {
       orderUser = await User.findById(ord.user).select("name email");
     }
 
-    const recipientEmail = orderUser?.email;
+    const recipientEmail =
+      orderUser?.email ||
+      req.body.customerEmail ||
+      req.body.email ||
+      null;
     const recipientName = orderUser?.name || "Customer";
 
     if (!recipientEmail) {
