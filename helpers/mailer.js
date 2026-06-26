@@ -244,8 +244,62 @@ async function sendMailSafe(mailOptions, context = "email") {
     return { ok: false, skipped: true, reason: "missing_to" };
   }
 
+  const smtpSend = async () => {
+    if (!authUser || !authPass) {
+      console.warn(`[Mail:${context}] SMTP skipped: missing auth credentials.`);
+      return { ok: false, skipped: true, reason: "missing_smtp_auth" };
+    }
+
+    const smtpFrom = isGmailTransport() ? authUser : from;
+
+    try {
+      const info = await transporter.sendMail({ ...mailOptions, from: smtpFrom });
+      console.log(`[Mail:${context}] Sent to ${to}`);
+      return { ok: true, info };
+    } catch (error) {
+      const details = {
+        message: error?.message || "Unknown mail error",
+        code: error?.code,
+        responseCode: error?.responseCode,
+        command: error?.command,
+        response: error?.response,
+      };
+      console.error(`[Mail:${context}] Failed:`, details);
+
+      if (shouldTryFallback(error)) {
+        try {
+          const info = await fallbackTransporter.sendMail({ ...mailOptions, from: smtpFrom });
+          console.log(`[Mail:${context}] Sent via fallback SMTP transport to ${to}`);
+          return { ok: true, info };
+        } catch (fallbackError) {
+          const fallbackDetails = {
+            message: fallbackError?.message || "Unknown fallback mail error",
+            code: fallbackError?.code,
+            responseCode: fallbackError?.responseCode,
+            command: fallbackError?.command,
+            response: fallbackError?.response,
+          };
+          console.error(`[Mail:${context}] Fallback failed:`, fallbackDetails);
+        }
+      }
+
+      return { ok: false, error };
+    }
+  };
+
   if (resendApiKey) {
-    return sendViaResend(mailOptions, context, from, to);
+    const resendResult = await sendViaResend(mailOptions, context, from, to);
+    if (resendResult.ok) {
+      return resendResult;
+    }
+
+    if (!authUser || !authPass) {
+      return resendResult;
+    }
+
+    console.warn(`[Mail:${context}] Resend failed; attempting SMTP fallback.`);
+    const smtpResult = await smtpSend();
+    return smtpResult.ok ? smtpResult : resendResult;
   }
 
   if (!authUser || !authPass) {
@@ -253,39 +307,12 @@ async function sendMailSafe(mailOptions, context = "email") {
     return sendViaResend(mailOptions, context, from, to);
   }
 
-  try {
-    const info = await transporter.sendMail({ ...mailOptions, from });
-    console.log(`[Mail:${context}] Sent to ${to}`);
-    return { ok: true, info };
-  } catch (error) {
-    const details = {
-      message: error?.message || "Unknown mail error",
-      code: error?.code,
-      responseCode: error?.responseCode,
-      command: error?.command,
-      response: error?.response,
-    };
-    console.error(`[Mail:${context}] Failed:`, details);
-
-    if (shouldTryFallback(error)) {
-      try {
-        const info = await fallbackTransporter.sendMail({ ...mailOptions, from });
-        console.log(`[Mail:${context}] Sent via fallback SMTP transport to ${to}`);
-        return { ok: true, info };
-      } catch (fallbackError) {
-        const fallbackDetails = {
-          message: fallbackError?.message || "Unknown fallback mail error",
-          code: fallbackError?.code,
-          responseCode: fallbackError?.responseCode,
-          command: fallbackError?.command,
-          response: fallbackError?.response,
-        };
-        console.error(`[Mail:${context}] Fallback failed:`, fallbackDetails);
-      }
-    }
-
-    return sendViaResend(mailOptions, context, from, to);
+  const smtpResult = await smtpSend();
+  if (smtpResult.ok) {
+    return smtpResult;
   }
+
+  return sendViaResend(mailOptions, context, from, to);
 }
 
 async function verifyMailerConnection(context = "startup") {
