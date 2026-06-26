@@ -28,6 +28,22 @@ const resolveStatusLabel = (status) => {
   return STATUS_LABELS[key] || STATUS_LABELS[status] || String(status);
 };
 
+const buildOrderItemsEmailLines = (orderItems = []) => {
+  if (!Array.isArray(orderItems) || orderItems.length === 0) {
+    return "No item details available.";
+  }
+
+  return orderItems
+    .map((item, index) => {
+      const product = item?.product || {};
+      const quantity = Number(item?.quantity || 0);
+      const price = Number(product?.price || 0);
+      const subtotal = quantity * price;
+      return `${index + 1}. ${product?.name || "Unnamed item"}\n   Qty: ${quantity}\n   Price: ${price}\n   Subtotal: ${subtotal}`;
+    })
+    .join("\n\n");
+};
+
 const sendPushToUser = async ({ User, userId, title, body, data = {} }) => {
   try {
     if (!User || !userId || !title || !body) {
@@ -88,7 +104,14 @@ const sendPushToUser = async ({ User, userId, title, body, data = {} }) => {
 router.get(`/`, async (req, res) => {
   const { Order } = req.dbModels;
   const orderList = await Order.find()
-    .populate("user", "name email")
+    .populate("user", "name email phone")
+    .populate({
+      path: "orderItems",
+      populate: {
+        path: "product",
+        select: "name image price",
+      },
+    })
     .sort({ dateOrdered: -1 }); // sort in descending order
 
   if (!orderList) {
@@ -399,7 +422,7 @@ router.post(`/`, async (req, res) => {
 //updating order status
 router.put("/:id", async (req, res) => {
   const { Order, User } = req.dbModels;
-  const order = await Order.findByIdAndUpdate(
+  let order = await Order.findByIdAndUpdate(
     req.params.id,
     {
       status: req.body.status,
@@ -412,11 +435,26 @@ router.put("/:id", async (req, res) => {
     return res.status(400).send("the category cannot be updated!");
   }
 
+  order = await Order.findById(order._id)
+    .populate("user", "name email phone")
+    .populate({
+      path: "orderItems",
+      populate: {
+        path: "product",
+        select: "name image price",
+      },
+    });
+
+  if (!order) {
+    return res.status(404).send("order not found after update");
+  }
+
   if (order.user) {
     const statusText = resolveStatusLabel(order.status);
+    const orderUserId = typeof order.user === "object" ? order.user?._id : order.user;
     await sendPushToUser({
       User,
-      userId: order.user,
+      userId: orderUserId,
       title: "Order status update",
       body: `Your order #${order._id} is now ${statusText}.`,
       data: {
@@ -426,13 +464,18 @@ router.put("/:id", async (req, res) => {
       },
     });
 
-    const orderUser = await User.findById(order.user).select("name email");
+    const orderUser =
+      typeof order.user === "object" && order.user?.email
+        ? order.user
+        : await User.findById(orderUserId).select("name email phone");
+
     if (orderUser?.email) {
+      const itemLines = buildOrderItemsEmailLines(order.orderItems);
       const statusEmailResult = await sendMailSafe(
         {
           to: orderUser.email,
           subject: `Order #${order._id} status updated to ${statusText}`,
-          text: `Hello ${orderUser.name || "Customer"},\n\nYour order #${order._id} status has been updated to: ${statusText}.\n\nThank you for shopping with us.`,
+          text: `Hello ${orderUser.name || "Customer"},\n\nYour order #${order._id} status has been updated to: ${statusText}.\n\nOrder Summary\nUser: ${orderUser.name || "Customer"}\nEmail: ${orderUser.email || "N/A"}\nPhone: ${order.phone || orderUser.phone || "N/A"}\nAddress 1: ${order.shippingAddress1 || "N/A"}\nAddress 2: ${order.shippingAddress2 || "N/A"}\nCity: ${order.city || "N/A"}\nZip: ${order.zip || "N/A"}\nCountry: ${order.country || "N/A"}\n\nItems\n${itemLines}\n\nTotal Subtotal: ${Number(order.totalPrice || 0)}\n\nThank you for shopping with us.`,
         },
         "order_status_changed"
       );
@@ -592,11 +635,12 @@ router.get(`/get/count`, async (req, res) => {
 router.get(`/get/userorders/:userid`, async (req, res) => {
   const { Order } = req.dbModels;
   const userOrderList = await Order.find({ user: req.params.userid })
+    .populate("user", "name email phone")
     .populate({
       path: "orderItems",
       populate: {
         path: "product",
-        populate: "category",
+        select: "name image price",
       },
     })
     .sort({ dateOrdered: -1 }); // sort in descending order
