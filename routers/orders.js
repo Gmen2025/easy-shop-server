@@ -272,18 +272,36 @@ router.post(`/`, async (req, res) => {
   // Prepare email message
 
   try {
-    //Populate user to get email
+    // Populate order user; fallback query if population is missing/incomplete.
     await ord.populate("user", "name email");
-    console.log("Order user:", ord.user);
-    console.log("Order user email:", ord.user.email);
-    console.log("Order user name:", ord.user.name);
-    console.log("Order object:", ord);
+    let orderUser = ord.user;
+
+    if (!orderUser || !orderUser.email) {
+      orderUser = await User.findById(ord.user).select("name email");
+    }
+
+    const recipientEmail = orderUser?.email;
+    const recipientName = orderUser?.name || "Customer";
+
+    if (!recipientEmail) {
+      console.warn("[Order:Created] Email skipped: missing user email", {
+        orderId: String(ord._id),
+        userId: String(ord.user),
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: "Order created; customer email is missing.",
+        order: ord,
+      });
+    }
+
     // Send email notification
     const mailOptions = {
-      to: ord.user.email, // make sure you populate user email
+      to: recipientEmail,
       subject: "New Order Placed", // Subject line
       text: `A new order has been placed with total price: $${ord.totalPrice}.
-              Dear ${ord.user.name},\n\nThank you for your order #${ord._id}.
+              Dear ${recipientName},\n\nThank you for your order #${ord._id}.
                \n\n if you have any questions, contact us at ${process.env.FROM_EMAIL || "notifications@info.addugeneteshop.com"}
               and/or call us at +251913303648 
               \n\n we will get back to you as soon as possible!  
@@ -296,7 +314,7 @@ router.post(`/`, async (req, res) => {
 
     // Respond with success message
     if (emailResult.ok) {
-      console.log("[Order:Created] Email sent to:", ord.user.email);
+      console.log("[Order:Created] Email sent to:", recipientEmail);
     } else if (emailResult.skipped) {
       console.warn("[Order:Created] Email skipped:", emailResult.reason);
     } else {
