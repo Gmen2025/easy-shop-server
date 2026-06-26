@@ -229,6 +229,10 @@ router.post(`/`, async (req, res) => {
       message: "User is required to create an order.",
     });
   }
+
+  const orderUserRecord = await User.findById(orderUserId).select("email");
+  const customerEmail =
+    orderUserRecord?.email || req.body.customerEmail || req.body.email || "";
   // Create an array of promises for creating OrderItem documents
   const orderItemsIDS = Promise.all(
     req.body.orderItems.map(async (orderItem) => {
@@ -274,6 +278,7 @@ router.post(`/`, async (req, res) => {
     zip: req.body.zip,
     country: req.body.country,
     phone: req.body.phone,
+    customerEmail,
     status: req.body.status,
     totalPrice: totalPrice,
     user: orderUserId,
@@ -469,19 +474,20 @@ router.put("/:id", async (req, res) => {
         ? order.user
         : await User.findById(orderUserId).select("name email phone");
 
-    if (orderUser?.email) {
+    const recipientEmail = orderUser?.email || order.customerEmail || null;
+    if (recipientEmail) {
       const itemLines = buildOrderItemsEmailLines(order.orderItems);
       const statusEmailResult = await sendMailSafe(
         {
-          to: orderUser.email,
+          to: recipientEmail,
           subject: `Order #${order._id} status updated to ${statusText}`,
-          text: `Hello ${orderUser.name || "Customer"},\n\nYour order #${order._id} status has been updated to: ${statusText}.\n\nOrder Summary\nUser: ${orderUser.name || "Customer"}\nEmail: ${orderUser.email || "N/A"}\nPhone: ${order.phone || orderUser.phone || "N/A"}\nAddress 1: ${order.shippingAddress1 || "N/A"}\nAddress 2: ${order.shippingAddress2 || "N/A"}\nCity: ${order.city || "N/A"}\nZip: ${order.zip || "N/A"}\nCountry: ${order.country || "N/A"}\n\nItems\n${itemLines}\n\nTotal Subtotal: ${Number(order.totalPrice || 0)}\n\nThank you for shopping with us.`,
+          text: `Hello ${orderUser?.name || "Customer"},\n\nYour order #${order._id} status has been updated to: ${statusText}.\n\nOrder Summary\nUser: ${orderUser?.name || "Customer"}\nEmail: ${recipientEmail || "N/A"}\nPhone: ${order.phone || orderUser?.phone || "N/A"}\nAddress 1: ${order.shippingAddress1 || "N/A"}\nAddress 2: ${order.shippingAddress2 || "N/A"}\nCity: ${order.city || "N/A"}\nZip: ${order.zip || "N/A"}\nCountry: ${order.country || "N/A"}\n\nItems\n${itemLines}\n\nTotal Subtotal: ${Number(order.totalPrice || 0)}\n\nThank you for shopping with us.`,
         },
         "order_status_changed"
       );
 
       if (statusEmailResult.ok) {
-        console.log("[Order:StatusChanged] Email sent to:", orderUser.email);
+        console.log("[Order:StatusChanged] Email sent to:", recipientEmail);
       } else if (statusEmailResult.skipped) {
         console.warn("[Order:StatusChanged] Email skipped:", statusEmailResult.reason);
       } else {
