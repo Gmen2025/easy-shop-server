@@ -16,14 +16,16 @@ app.set('trust proxy', 1);
 
 
 // Safari-compatible CORS configuration
+const deployedFrontendOrigin = 'https://easy-shop-webapp.onrender.com';
 const corsConfig = {
   origin: function (origin, callback) {
     // Allow requests with no origin (mobile apps, curl, postman)
     if (!origin) return callback(null, true);
-    
+
     const allowedOrigins = [
+      deployedFrontendOrigin,
       process.env.FRONTEND_URL,
-      process.env.BACKEND_URL
+      process.env.BACKEND_URL,
     ].filter(Boolean);
 
     // Allow any localhost / 127.0.0.1 origin (any port)
@@ -40,7 +42,7 @@ const corsConfig = {
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
-    
+
     callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
@@ -57,10 +59,6 @@ const corsConfig = {
 };
 
 app.use(cors(corsConfig));
-// app.use(cors({
-//   origin: 'http://localhost:3001', // or your frontend URL
-//   credentials: true
-// }));
 
 // Log all inbound requests early (including OPTIONS preflight)
 app.use((req, res, next) => {
@@ -73,8 +71,19 @@ app.options('*', cors(corsConfig)); // Enable pre-flight for all routes
 
 // Safari-specific headers middleware
 app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  const allowedOrigins = [
+    deployedFrontendOrigin,
+    process.env.FRONTEND_URL,
+    process.env.BACKEND_URL,
+  ].filter(Boolean);
+
+  if (origin && allowedOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
+
   res.setHeader('Access-Control-Allow-Credentials', 'true');
-  res.setHeader('Access-Control-Allow-Origin', req.headers.origin || '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With, x-database-name');
   res.setHeader('Access-Control-Expose-Headers', 'x-selected-database');
