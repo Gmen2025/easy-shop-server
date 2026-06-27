@@ -15,31 +15,43 @@ const { verifyMailerConnection } = require('./helpers/mailer');
 app.set('trust proxy', 1);
 
 
+function parseCsvEnv(value) {
+  return String(value || '')
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+const localhostOriginRegex = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+const localNetworkOriginRegex = /^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/;
+
 // Safari-compatible CORS configuration
 const deployedFrontendOrigin = 'https://easy-shop-webapp.onrender.com';
+const allowedOrigins = [
+  deployedFrontendOrigin,
+  process.env.FRONTEND_URL,
+  process.env.BACKEND_URL,
+  ...parseCsvEnv(process.env.CORS_ORIGINS),
+].filter(Boolean);
+
+function isOriginAllowed(origin) {
+  if (!origin) {
+    return true;
+  }
+
+  if (localhostOriginRegex.test(origin) || localNetworkOriginRegex.test(origin)) {
+    return true;
+  }
+
+  return allowedOrigins.includes(origin);
+}
+
 const corsConfig = {
   origin: function (origin, callback) {
     // Allow requests with no origin (mobile apps, curl, postman)
     if (!origin) return callback(null, true);
 
-    const allowedOrigins = [
-      deployedFrontendOrigin,
-      process.env.FRONTEND_URL,
-      process.env.BACKEND_URL,
-    ].filter(Boolean);
-
-    // Allow any localhost / 127.0.0.1 origin (any port)
-    if (origin.match(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/)) {
-      return callback(null, true);
-    }
-
-    // Allow all local network IPs (192.168.x.x, any port)
-    if (origin.match(/^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/)) {
-      return callback(null, true);
-    }
-
-    // Check if the origin is in the allowed list
-    if (allowedOrigins.includes(origin)) {
+    if (isOriginAllowed(origin)) {
       return callback(null, true);
     }
 
@@ -72,13 +84,8 @@ app.options('*', cors(corsConfig)); // Enable pre-flight for all routes
 // Safari-specific headers middleware
 app.use((req, res, next) => {
   const origin = req.headers.origin;
-  const allowedOrigins = [
-    deployedFrontendOrigin,
-    process.env.FRONTEND_URL,
-    process.env.BACKEND_URL,
-  ].filter(Boolean);
 
-  if (origin && allowedOrigins.includes(origin)) {
+  if (origin && isOriginAllowed(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
   }
