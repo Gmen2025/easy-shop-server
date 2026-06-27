@@ -27,8 +27,12 @@ const localNetworkOriginRegex = /^http:\/\/192\.168\.\d+\.\d+(:\d+)?$/;
 
 // Safari-compatible CORS configuration
 const deployedFrontendOrigin = 'https://easy-shop-webapp.onrender.com';
+const customFrontendOrigin = 'https://addugeneteshop.com';
+const customFrontendWwwOrigin = 'https://www.addugeneteshop.com';
 const allowedOrigins = [
   deployedFrontendOrigin,
+  customFrontendOrigin,
+  customFrontendWwwOrigin,
   process.env.FRONTEND_URL,
   process.env.BACKEND_URL,
   ...parseCsvEnv(process.env.CORS_ORIGINS),
