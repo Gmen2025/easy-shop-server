@@ -28,6 +28,22 @@ const resolveStatusLabel = (status) => {
   return STATUS_LABELS[key] || STATUS_LABELS[status] || String(status);
 };
 
+const isTruthy = (value) => {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "true" || normalized === "1" || normalized === "yes";
+  }
+  return false;
+};
+
+const isValidEmail = (value) => {
+  if (!value) return false;
+  const email = String(value).trim();
+  return email.includes("@") && !email.includes(" ");
+};
+
 const buildOrderItemsEmailLines = (orderItems = []) => {
   if (!Array.isArray(orderItems) || orderItems.length === 0) {
     return "No item details available.";
@@ -504,6 +520,7 @@ router.put("/:id", async (req, res) => {
  * /api/v1/orders/{id}:
  *   delete:
  *     summary: Delete an order
+ *     description: Deletes an order and its related order items. Optionally notify customer by email using query or body flag.
  *     tags: [Orders]
  *     security:
  *       - bearerAuth: []
@@ -514,36 +531,162 @@ router.put("/:id", async (req, res) => {
  *         schema:
  *           type: string
  *         description: Order ID
+ *       - in: query
+ *         name: notifyCustomer
+ *         required: false
+ *         schema:
+ *           type: boolean
+ *         description: Send cancellation email to customer when true
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               notifyCustomer:
+ *                 type: boolean
+ *                 description: Send cancellation email to customer when true
+ *               customerEmail:
+ *                 type: string
+ *                 format: email
+ *                 description: Optional fallback recipient email if order/user email is unavailable
+ *               customerName:
+ *                 type: string
+ *                 description: Optional customer name used in email greeting
  *     responses:
  *       200:
  *         description: Order deleted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 message:
+ *                   type: string
+ *                   example: the order is deleted!
+ *                 notification:
+ *                   type: object
+ *                   properties:
+ *                     attempted:
+ *                       type: boolean
+ *                     delivered:
+ *                       type: boolean
+ *                     skipped:
+ *                       type: boolean
+ *                     reason:
+ *                       type: string
+ *                       nullable: true
  *       404:
  *         description: Order not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: false
+ *                 message:
+ *                   type: string
+ *                   example: order not found!
  *       400:
  *         description: Delete operation failed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: false
+ *                 error:
+ *                   type: string
  */
 //deleting order
-router.delete("/:id", (req, res) => {
-  const { Order, OrderItem } = req.dbModels;
-  Order.findByIdAndDelete(req.params.id)
-    .exec()
-    .then(async (order) => {
-      if (order) {
-        await order.orderItems.map(async (orderItem) => {
-          await OrderItem.findByIdAndDelete(orderItem);
-        });
-        return res
-          .status(200)
-          .json({ success: true, message: "the order is deleted!" });
+router.delete("/:id", async (req, res) => {
+  const { Order, OrderItem, User } = req.dbModels;
+
+  try {
+    const order = await Order.findByIdAndDelete(req.params.id).exec();
+
+    if (!order) {
+      return res
+        .status(404)
+        .json({ success: false, message: "order not found!" });
+    }
+
+    await Promise.all(
+      (order.orderItems || []).map((orderItemId) =>
+        OrderItem.findByIdAndDelete(orderItemId)
+      )
+    );
+
+    const shouldNotify =
+      isTruthy(req.query.notifyCustomer) || isTruthy(req.body?.notifyCustomer);
+
+    const notification = {
+      attempted: shouldNotify,
+      delivered: false,
+      skipped: false,
+      reason: null,
+    };
+
+    if (shouldNotify) {
+      const deletedOrderUserId =
+        typeof order.user === "object" ? order.user?._id : order.user;
+      const orderUser = deletedOrderUserId
+        ? await User.findById(deletedOrderUserId).select("name email")
+        : null;
+
+      const fallbackEmail = isValidEmail(req.body?.customerEmail)
+        ? String(req.body.customerEmail).trim()
+        : null;
+
+      const recipientEmail =
+        (isValidEmail(orderUser?.email) && String(orderUser.email).trim()) ||
+        (isValidEmail(order.customerEmail) && String(order.customerEmail).trim()) ||
+        fallbackEmail ||
+        null;
+
+      const recipientName =
+        orderUser?.name || req.body?.customerName || "Customer";
+
+      if (!recipientEmail) {
+        notification.skipped = true;
+        notification.reason = "missing_recipient_email";
       } else {
-        return res
-          .status(404)
-          .json({ success: false, message: "order not found!" });
+        const emailResult = await sendMailSafe(
+          {
+            to: recipientEmail,
+            subject: `Order #${order._id} cancellation notice`,
+            text: `Hello ${recipientName},\n\nYour order #${order._id} has been cancelled and deleted by our admin team.\n\nOrder Date: ${new Date(order.dateOrdered || Date.now()).toLocaleString()}\nTotal Amount: ${Number(order.totalPrice || 0)}\n\nIf you have any questions, contact us at ${process.env.FROM_EMAIL || "notifications@info.addugeneteshop.com"}.\n\nBest regards,\nE-Shopping Team`,
+          },
+          "order_deleted"
+        );
+
+        if (emailResult.ok) {
+          notification.delivered = true;
+        } else if (emailResult.skipped) {
+          notification.skipped = true;
+          notification.reason = emailResult.reason || "email_skipped";
+        } else {
+          notification.reason = emailResult.error?.message || "email_failed";
+        }
       }
-    })
-    .catch((err) => {
-      return res.status(400).json({ success: false, error: err });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "the order is deleted!",
+      notification,
     });
+  } catch (err) {
+    return res.status(400).json({ success: false, error: err?.message || err });
+  }
 });
 
 /**
