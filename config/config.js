@@ -25,7 +25,7 @@ module.exports = {
   merchantAppId: process.env.TELEBIRR_MERCHANT_APP_ID || "your_merchant_app_id",
   
   // Webhook and redirect URLs
-  notifyUrl: process.env.NOTIFY_URL || "https://yourdomain.com/api/v1/telebirr/webhook",
+  notifyUrl: process.env.NOTIFY_URL || "",
   redirectUrl: process.env.REDIRECT_URL || "https://yourdomain.com/payment/success",
   webBaseUrl: process.env.TELEBIRR_WEB_BASE_URL || "https://telebirr.com/payment/checkout",
   

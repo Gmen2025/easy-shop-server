@@ -43,6 +43,27 @@ const orderSchema = new mongoose.Schema({
         required: true,
         default: 'Pending'
     },
+    paymentMethod: {
+        type: String,
+        default: ''
+    },
+    paymentProvider: {
+        type: String,
+        default: ''
+    },
+    paymentStatus: {
+        type: String,
+        enum: ['pending', 'completed', 'failed'],
+        default: 'pending'
+    },
+    paymentTransactionId: {
+        type: String,
+        default: ''
+    },
+    paymentPaidAt: {
+        type: Date,
+        default: null
+    },
     totalPrice: {
         type: Number
     },

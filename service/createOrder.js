@@ -81,6 +81,13 @@ exports.requestCreateOrder = async (fabricToken, title, amount) => {
 };
 
 function createRequestObject(title, amount) {
+  const useMockService = process.env.USE_MOCK_TELEBIRR === 'true' || process.env.USE_MOCK_TELEBIRR === undefined ;
+  const notifyUrl = String(config.notifyUrl || '').trim();
+
+  if (!useMockService && !notifyUrl) {
+    throw new Error('NOTIFY_URL is required for live Telebirr payments');
+  }
+
   let req = {
     timestamp: tools.createTimeStamp(),
     nonce_str: tools.createNonceStr(),
@@ -88,7 +95,7 @@ function createRequestObject(title, amount) {
     version: "1.0",
   };
   let biz = {
-    notify_url: config.notifyUrl || "https://yourdomain.com/api/v1/telebirr/webhook", // ❌ This should be your actual webhook URL
+    notify_url: notifyUrl,
     appid: config.merchantAppId,
     merch_code: config.merchantCode,
     merch_order_id: createMerchantOrderId(),

@@ -1,6 +1,9 @@
 const express = require('express');
 const router = express.Router();
+const crypto = require('crypto');
+const mongoose = require('mongoose');
 const createOrderService = require('../service/createOrder');
+const { Order } = require('../models/order');
 
 const paymentStatusStore = new Map();
 
@@ -15,6 +18,59 @@ const normalizeTelebirrStatus = (rawStatus) => {
   }
   return 'pending';
 };
+
+const mapTelebirrStatusToOrderStatus = (normalizedStatus) => {
+  if (normalizedStatus === 'completed') return 'Paid';
+  if (normalizedStatus === 'failed') return 'Failed';
+  return 'Pending';
+};
+
+function isWebhookAuthorized(req) {
+  const configuredSecret = String(process.env.TELEBIRR_WEBHOOK_SECRET || '').trim();
+
+  // Keep compatibility for existing integrations when no secret is configured.
+  if (!configuredSecret) {
+    return true;
+  }
+
+  const providedSecret = String(req.get('x-telebirr-webhook-secret') || '').trim();
+  if (!providedSecret) {
+    return false;
+  }
+
+  const expected = Buffer.from(configuredSecret, 'utf8');
+  const received = Buffer.from(providedSecret, 'utf8');
+
+  if (expected.length !== received.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(expected, received);
+}
+
+async function persistOrderPaymentStatus(orderId, transactionId, normalizedStatus, amount) {
+  if (!orderId || !mongoose.Types.ObjectId.isValid(orderId)) {
+    return;
+  }
+
+  const update = {
+    status: mapTelebirrStatusToOrderStatus(normalizedStatus),
+    paymentMethod: 'telebirr',
+    paymentProvider: 'telebirr',
+    paymentStatus: normalizedStatus,
+    paymentTransactionId: transactionId || '',
+  };
+
+  if (normalizedStatus === 'completed') {
+    update.paymentPaidAt = new Date();
+  }
+
+  if (typeof amount === 'number' && Number.isFinite(amount) && amount > 0) {
+    update.totalPrice = amount;
+  }
+
+  await Order.findByIdAndUpdate(orderId, { $set: update });
+}
 
 /**
  * @swagger
@@ -388,6 +444,13 @@ router.get('/payment-status/:transactionId', async (req, res) => {
 router.post('/webhook', async (req, res) => {
   try {
     console.log('📨 Telebirr webhook received:', req.body);
+
+    if (!isWebhookAuthorized(req)) {
+      return res.status(401).json({
+        success: false,
+        message: 'Unauthorized webhook request',
+      });
+    }
     
     // Process the webhook data
     const { transactionId, status, amount, orderId, prepay_id, prepayId } = req.body;
@@ -407,6 +470,8 @@ router.post('/webhook', async (req, res) => {
         isMock: false,
       });
     }
+
+    await persistOrderPaymentStatus(orderId, resolvedTransactionId, resolvedStatus, amount);
     
     // Update your database with the payment status
     // Example: await Order.findOneAndUpdate({ orderId }, { paymentStatus: status });

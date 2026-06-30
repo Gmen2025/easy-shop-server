@@ -20,9 +20,17 @@ exports.applyFabricToken = async () => {
       throw new Error("Invalid request object - missing signature");
     }
 
-    // Create axios instance with SSL certificate bypass
+    // Keep TLS verification enabled by default; bypass only when explicitly allowed.
+    const allowInsecureTls =
+      process.env.USE_MOCK_TELEBIRR === 'true' ||
+      process.env.TELEBIRR_ALLOW_INSECURE_TLS === 'true';
+
+    if (allowInsecureTls) {
+      console.warn('[Telebirr] TLS certificate verification is disabled. Do not use this in production.');
+    }
+
     const httpsAgent = new https.Agent({
-      rejectUnauthorized: false, // Bypass SSL certificate validation
+      rejectUnauthorized: !allowInsecureTls,
       requestCert: false,
       agent: false,
     });
