@@ -136,6 +136,11 @@ app.get('/api-docs/swagger.json', (req, res) => {
   res.send(swaggerDocs);
 });
 
+// Public health endpoint for platform probes (Render uses HEAD/GET checks).
+app.get('/', (req, res) => {
+  res.status(200).json({ status: 'ok' });
+});
+
 const swaggerOptions = {
   swaggerOptions: {
     url: '/api-docs/swagger.json',
