@@ -219,6 +219,9 @@ router.post('/create-payment-intent', async (req, res) => {
 
     res.json({
       client_secret: paymentIntent.client_secret,
+      payment_intent_id: paymentIntent.id,
+      stripe_mode: paymentIntent.livemode ? 'live' : 'test',
+      stripe_key_source: resolvedKeyName,
     });
   } catch (error) {
     console.error('Stripe error details:', error); // Log full error
