@@ -359,8 +359,8 @@ router.post(`/`, async (req, res) => {
       subject: "New Order Placed", // Subject line
       text: `A new order has been placed with total price: $${ord.totalPrice}.
               Dear ${recipientName},\n\nThank you for your order #${ord._id}.
-               \n\n if you have any questions, contact us at ${process.env.FROM_EMAIL || "notifications@info.addugeneteshop.com"}
-              and/or call us at +251913303648 
+               \n\n if you have any questions, contact us at ${"girmahalie2026@gmail.com"}
+              and/or call us at +251954141473 
               \n\n we will get back to you as soon as possible!  
               \n\nWe appreciate your business! \n\nBest regards,\nE-Shopping Team
              `, // plain text body
@@ -663,7 +663,10 @@ router.delete("/:id", async (req, res) => {
           {
             to: recipientEmail,
             subject: `Order #${order._id} cancellation notice`,
-            text: `Hello ${recipientName},\n\nYour order #${order._id} has been cancelled and deleted by our admin team.\n\nOrder Date: ${new Date(order.dateOrdered || Date.now()).toLocaleString()}\nTotal Amount: ${Number(order.totalPrice || 0)}\n\nIf you have any questions, contact us at ${process.env.FROM_EMAIL || "notifications@info.addugeneteshop.com"}.\n\nBest regards,\nE-Shopping Team`,
+            text: `Hello ${recipientName},\n\nYour order #${order._id} has been cancelled and deleted by our admin team.
+            \n\nRefunds, if applicable, will be processed automatically.
+            \n\nOrder Date: ${new Date(order.dateOrdered || Date.now()).toLocaleString()}\nTotal Amount: ${Number(order.totalPrice || 0)}
+            \n\nIf you have any questions, contact us at ${"girmahalie2026@gmail.com"}.\n\nBest regards,\nE-Shopping Team`,
           },
           "order_deleted"
         );
