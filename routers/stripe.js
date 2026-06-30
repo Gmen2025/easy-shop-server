@@ -74,6 +74,10 @@ function resolveStripeConfig(dbName) {
   };
 }
 
+function isStripeTestKey(apiKey) {
+  return typeof apiKey === 'string' && apiKey.startsWith('sk_test_');
+}
+
 function getStripe(dbName) {
   const { apiKey, resolvedKeyName, keyCandidates } = resolveStripeConfig(dbName);
 
@@ -135,6 +139,7 @@ function getStripe(dbName) {
 router.post('/create-payment-intent', async (req, res) => {
   try {
     const { stripe: stripeInstance, resolvedKeyName, keyCandidates } = getStripe(req.dbName);
+    const { apiKey } = resolveStripeConfig(req.dbName);
     
     if (!stripeInstance) {
       return res.status(503).json({
@@ -143,6 +148,14 @@ router.post('/create-payment-intent', async (req, res) => {
         canSwitchPaymentMethod: true,
         details: `Stripe is not configured for database "${req.dbName}".`,
         expectedEnv: keyCandidates
+      });
+    }
+
+    if (process.env.NODE_ENV === 'production' && isStripeTestKey(apiKey)) {
+      return res.status(503).json({
+        code: 'STRIPE_LIVE_KEY_REQUIRED',
+        message: 'Stripe live secret key is required in production.',
+        canSwitchPaymentMethod: true,
       });
     }
 

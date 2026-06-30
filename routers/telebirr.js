@@ -2,6 +2,20 @@ const express = require('express');
 const router = express.Router();
 const createOrderService = require('../service/createOrder');
 
+const paymentStatusStore = new Map();
+
+const normalizeTelebirrStatus = (rawStatus) => {
+  const value = String(rawStatus || '').toLowerCase();
+  if (!value) return 'pending';
+  if (['success', 'completed', 'paid', 'succeeded', 'finished'].includes(value)) {
+    return 'completed';
+  }
+  if (['failed', 'cancelled', 'canceled', 'declined'].includes(value)) {
+    return 'failed';
+  }
+  return 'pending';
+};
+
 /**
  * @swagger
  * /api/v1/telebirr/initiate-payment:
@@ -88,6 +102,14 @@ router.post('/initiate-payment', async (req, res) => {
       
       console.log('✅ Mock payment data generated:', mockPaymentData);
       
+      paymentStatusStore.set(mockTransactionId, {
+        transactionId: mockTransactionId,
+        orderId: mockOrderId,
+        status: 'completed',
+        timestamp: new Date().toISOString(),
+        isMock: true,
+      });
+
       return res.json({
         success: true,
         message: 'Payment initiated successfully (MOCK MODE)',
@@ -128,6 +150,17 @@ router.post('/initiate-payment', async (req, res) => {
 
     await createOrderService.createOrder(serviceReq, serviceRes);
 
+    const transactionId = paymentResult.prepay_id;
+    const finalOrderId = orderId || `ORDER_${Date.now()}`;
+
+    paymentStatusStore.set(transactionId, {
+      transactionId,
+      orderId: finalOrderId,
+      status: 'pending',
+      timestamp: new Date().toISOString(),
+      isMock: false,
+    });
+
     // Return success response
     res.json({
       success: true,
@@ -135,11 +168,11 @@ router.post('/initiate-payment', async (req, res) => {
       data: {
         paymentUrl: paymentResult.payment_url,
         prepayId: paymentResult.prepay_id,
-        orderId: orderId || `ORDER_${Date.now()}`,
+        orderId: finalOrderId,
         amount: amount,
         customerName: customerName,
         phoneNumber: phoneNumber,
-        transactionId: `TXN_${Date.now()}`
+        transactionId
       }
     });
 
@@ -221,18 +254,26 @@ router.post('/verify-payment', async (req, res) => {
       });
     }
 
-    // Real verification logic would go here
-    res.json({
+    const lookupKey = transactionId || orderId;
+    const stored = lookupKey ? paymentStatusStore.get(lookupKey) : null;
+
+    if (!stored) {
+      return res.status(202).json({
+        success: true,
+        message: 'Payment is pending confirmation',
+        data: {
+          transactionId,
+          orderId,
+          status: 'pending',
+          timestamp: new Date().toISOString(),
+        },
+      });
+    }
+
+    return res.json({
       success: true,
-      message: 'Payment verification successful',
-      data: {
-        transactionId,
-        orderId,
-        status: 'completed',
-        amount: 100,
-        currency: 'ETB',
-        timestamp: new Date().toISOString()
-      }
+      message: 'Payment verification fetched',
+      data: stored,
     });
 
   } catch (error) {
@@ -288,16 +329,22 @@ router.get('/payment-status/:transactionId', async (req, res) => {
       });
     }
 
-    // Real status check logic would go here
+    const stored = paymentStatusStore.get(transactionId);
+
+    if (!stored) {
+      return res.status(202).json({
+        success: true,
+        data: {
+          transactionId,
+          status: 'pending',
+          timestamp: new Date().toISOString(),
+        },
+      });
+    }
+
     res.json({
       success: true,
-      data: {
-        transactionId,
-        status: 'completed',
-        amount: 100,
-        currency: 'ETB',
-        timestamp: new Date().toISOString()
-      }
+      data: stored
     });
 
   } catch (error) {
@@ -343,7 +390,23 @@ router.post('/webhook', async (req, res) => {
     console.log('📨 Telebirr webhook received:', req.body);
     
     // Process the webhook data
-    const { transactionId, status, amount, orderId } = req.body;
+    const { transactionId, status, amount, orderId, prepay_id, prepayId } = req.body;
+
+    const resolvedTransactionId = transactionId || prepay_id || prepayId;
+    const resolvedStatus = normalizeTelebirrStatus(status);
+
+    if (resolvedTransactionId) {
+      const current = paymentStatusStore.get(resolvedTransactionId) || {};
+      paymentStatusStore.set(resolvedTransactionId, {
+        ...current,
+        transactionId: resolvedTransactionId,
+        orderId: orderId || current.orderId || null,
+        amount: amount || current.amount || null,
+        status: resolvedStatus,
+        timestamp: new Date().toISOString(),
+        isMock: false,
+      });
+    }
     
     // Update your database with the payment status
     // Example: await Order.findOneAndUpdate({ orderId }, { paymentStatus: status });

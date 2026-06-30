@@ -129,8 +129,12 @@ function signRequestObject(requestObject) {
   try {
     console.log("requestObject to sign:", requestObject);
 
-     // Check if we should use mock signing
-    if (process.env.USE_MOCK_SIGNING === 'true') {
+    const mockModeEnabled =
+      process.env.USE_MOCK_SIGNING === 'true' ||
+      process.env.USE_MOCK_TELEBIRR === 'true';
+
+    // Check if we should use mock signing
+    if (mockModeEnabled) {
       console.log("Using mock signing for testing");
       return "MOCK_SIGNATURE_" + Date.now();
     }
@@ -138,9 +142,7 @@ function signRequestObject(requestObject) {
     console.log("Private key found: ", config.privateKey);
     // Check if we have a private key
     if (!config.privateKey) {
-      
-      console.warn("No private key found - using mock signature for testing");
-      return "MOCK_SIGNATURE_" + Date.now();
+      throw new Error("No private key found for Telebirr signing");
     }
 
     // Create the string to sign
@@ -152,11 +154,7 @@ function signRequestObject(requestObject) {
     return signature;
   } catch (error) {
     console.error("Error in signRequestObject:", error);
-    // For testing purposes, return a mock signature if signing fails
-    console.warn("Signing failed - using mock signature for testing");
-
-    //Fall back to mock signature
-    return "MOCK_SIGNATURE_" + Date.now();
+    throw error;
   }
 }
 
