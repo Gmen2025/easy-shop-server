@@ -7,6 +7,53 @@ const { Order } = require('../models/order');
 
 const paymentStatusStore = new Map();
 
+function classifyTelebirrError(error) {
+  const rawMessage = String(error?.message || 'Unknown Telebirr error');
+
+  if (rawMessage.includes('Telebirr is not configured')) {
+    return {
+      status: 503,
+      code: 'TELEBIRR_NOT_CONFIGURED',
+      message: 'Telebirr is not configured on the server.',
+      details: rawMessage,
+    };
+  }
+
+  if (rawMessage.includes('DEPTH_ZERO_SELF_SIGNED_CERT')) {
+    return {
+      status: 503,
+      code: 'TELEBIRR_TLS_ERROR',
+      message: 'Telebirr TLS certificate validation failed.',
+      details: rawMessage,
+    };
+  }
+
+  if (rawMessage.includes('ECONNABORTED') || rawMessage.toLowerCase().includes('timeout')) {
+    return {
+      status: 503,
+      code: 'TELEBIRR_TIMEOUT',
+      message: 'Telebirr gateway did not respond in time.',
+      details: rawMessage,
+    };
+  }
+
+  if (rawMessage.includes('ENOTFOUND') || rawMessage.includes('EAI_AGAIN') || rawMessage.includes('ECONNREFUSED')) {
+    return {
+      status: 503,
+      code: 'TELEBIRR_UNREACHABLE',
+      message: 'Telebirr gateway is unreachable from the server.',
+      details: rawMessage,
+    };
+  }
+
+  return {
+    status: 500,
+    code: 'TELEBIRR_INITIATE_FAILED',
+    message: rawMessage,
+    details: undefined,
+  };
+}
+
 const normalizeTelebirrStatus = (rawStatus) => {
   const value = String(rawStatus || '').toLowerCase();
   if (!value) return 'pending';
@@ -234,9 +281,14 @@ router.post('/initiate-payment', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Telebirr payment initiation error:', error);
-    res.status(500).json({
+    const mapped = classifyTelebirrError(error);
+
+    res.status(mapped.status).json({
       success: false,
-      message: error.message || 'Failed to initiate payment'
+      code: mapped.code,
+      message: mapped.message,
+      details: mapped.details,
+      canSwitchPaymentMethod: mapped.status === 503,
     });
   }
 });

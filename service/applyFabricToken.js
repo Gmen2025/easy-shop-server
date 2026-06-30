@@ -36,6 +36,9 @@ exports.applyFabricToken = async () => {
       console.warn('[Telebirr] TLS certificate verification is disabled. Do not use this in production.');
     }
 
+    const timeoutMsRaw = Number(process.env.TELEBIRR_TIMEOUT_MS || 30000);
+    const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 30000;
+
     const httpsAgent = new https.Agent({
       rejectUnauthorized: !allowInsecureTls,
       requestCert: false,
@@ -52,7 +55,7 @@ exports.applyFabricToken = async () => {
           "Content-Type": "application/json",
           "X-APP-Key": config.fabricAppId,
         },
-        timeout: 30000,
+        timeout: timeoutMs,
         httpsAgent: httpsAgent, // Add this to handle SSL issues
         validateStatus: function (status) {
           return status < 500; // Accept all status codes below 500
@@ -82,8 +85,12 @@ exports.applyFabricToken = async () => {
 
     return response.data;
   } catch (error) {
-    // More detailed error logging
-    console.error("Full error object:", error);
+    // Keep logs concise while preserving actionable diagnostics.
+    console.error("Telebirr token request error:", {
+      message: error?.message,
+      code: error?.code,
+      status: error?.response?.status,
+    });
 
     if (error.response) {
       console.error("API Error Response:", {
@@ -101,7 +108,7 @@ exports.applyFabricToken = async () => {
       console.error("Network Error - No response received:", {
         message: error.message,
         code: error.code,
-        config: error.config,
+        url: error.config?.url,
       });
       throw new Error(
         `Network Error: ${error.message} (Code: ${error.code || "unknown"})`
