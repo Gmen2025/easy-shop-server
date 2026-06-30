@@ -64,13 +64,19 @@ function getStripeKeyCandidates(dbName) {
 
 function resolveStripeConfig(dbName) {
   const keyCandidates = getStripeKeyCandidates(dbName);
-  const resolvedKeyName = keyCandidates.find((name) => !!process.env[name]);
-  const apiKey = resolvedKeyName ? process.env[resolvedKeyName] : null;
+  const configuredEntries = keyCandidates
+    .filter((name) => !!process.env[name])
+    .map((name) => ({ name, value: String(process.env[name]).trim() }));
+
+  // Server-side Stripe SDK requires a secret key (sk_test_* or sk_live_*).
+  const secretEntry = configuredEntries.find((entry) => isStripeSecretKey(entry.value));
+  const selectedEntry = secretEntry || configuredEntries[0] || null;
 
   return {
-    apiKey,
-    resolvedKeyName,
+    apiKey: selectedEntry ? selectedEntry.value : null,
+    resolvedKeyName: selectedEntry ? selectedEntry.name : null,
     keyCandidates,
+    isSecretKey: !!secretEntry,
   };
 }
 
@@ -78,14 +84,28 @@ function isStripeTestKey(apiKey) {
   return typeof apiKey === 'string' && apiKey.startsWith('sk_test_');
 }
 
+function isStripeSecretKey(apiKey) {
+  return typeof apiKey === 'string' && /^sk_(test|live)_/.test(apiKey);
+}
+
 function getStripe(dbName) {
-  const { apiKey, resolvedKeyName, keyCandidates } = resolveStripeConfig(dbName);
+  const { apiKey, resolvedKeyName, keyCandidates, isSecretKey } = resolveStripeConfig(dbName);
 
   if (!apiKey) {
     return {
       stripe: null,
       resolvedKeyName: null,
       keyCandidates,
+      keyInvalidReason: null,
+    };
+  }
+
+  if (!isSecretKey) {
+    return {
+      stripe: null,
+      resolvedKeyName,
+      keyCandidates,
+      keyInvalidReason: 'not_secret_key',
     };
   }
 
@@ -138,8 +158,23 @@ function getStripe(dbName) {
 // Create payment intent
 router.post('/create-payment-intent', async (req, res) => {
   try {
-    const { stripe: stripeInstance, resolvedKeyName, keyCandidates } = getStripe(req.dbName);
+    const {
+      stripe: stripeInstance,
+      resolvedKeyName,
+      keyCandidates,
+      keyInvalidReason,
+    } = getStripe(req.dbName);
     const { apiKey } = resolveStripeConfig(req.dbName);
+
+    if (keyInvalidReason === 'not_secret_key') {
+      return res.status(503).json({
+        code: 'STRIPE_INVALID_SECRET_KEY',
+        message: 'Stripe is misconfigured. Backend requires a secret key (sk_test_* or sk_live_*).',
+        canSwitchPaymentMethod: true,
+        details: `Resolved env ${resolvedKeyName} is not a Stripe secret key. Do not use pk_* values on the backend.`,
+        expectedEnv: keyCandidates,
+      });
+    }
     
     if (!stripeInstance) {
       return res.status(503).json({
@@ -156,6 +191,9 @@ router.post('/create-payment-intent', async (req, res) => {
         code: 'STRIPE_LIVE_KEY_REQUIRED',
         message: 'Stripe live secret key is required in production.',
         canSwitchPaymentMethod: true,
+        details: resolvedKeyName
+          ? `Current key ${resolvedKeyName} is a test key. Set it to an sk_live_* value in production.`
+          : undefined,
       });
     }
 
