@@ -625,8 +625,15 @@ router.delete("/:id", async (req, res) => {
       )
     );
 
+    const skipNotify =
+      isTruthy(req.query.skipNotifyCustomer) || isTruthy(req.body?.skipNotifyCustomer);
+    const explicitNotifyProvided =
+      req.query.notifyCustomer !== undefined || req.body?.notifyCustomer !== undefined;
     const shouldNotify =
-      isTruthy(req.query.notifyCustomer) || isTruthy(req.body?.notifyCustomer);
+      !skipNotify &&
+      (!explicitNotifyProvided ||
+        isTruthy(req.query.notifyCustomer) ||
+        isTruthy(req.body?.notifyCustomer));
 
     const notification = {
       attempted: shouldNotify,
