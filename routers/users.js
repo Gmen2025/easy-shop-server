@@ -1476,6 +1476,39 @@ router.get("/profile", async (req, res) => {
   }
 });
 
+router.get("/me", async (req, res) => {
+  try {
+    const userId = req.auth?.userId;
+
+    if (!userId) {
+      return res.status(401).json({
+        success: false,
+        message: "Unauthorized",
+      });
+    }
+
+    const user = await getUserModel(req).findById(userId).select("-passwordHash");
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "User not found",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      user,
+    });
+  } catch (error) {
+    console.error("Get current user error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "An error occurred while fetching current user",
+    });
+  }
+});
+
 /**
  * @swagger
  * /api/v1/users/profile:

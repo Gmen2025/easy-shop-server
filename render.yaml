@@ -37,5 +37,27 @@ services:
         sync: false
       - key: RESEND_API_KEY
         sync: false
+      - key: TELEBIRR_BASE_URL
+        sync: false
+      - key: TELEBIRR_FABRIC_APP_ID
+        sync: false
+      - key: TELEBIRR_APP_ID
+        sync: false
+      - key: TELEBIRR_MERCHANT_CODE
+        sync: false
+      - key: TELEBIRR_MERCHANT_APP_ID
+        sync: false
+      - key: TELEBIRR_PRIVATE_KEY
+        sync: false
+      - key: TELEBIRR_WEB_BASE_URL
+        sync: false
+      - key: TELEBIRR_ALLOW_INSECURE_TLS
+        sync: false
+      - key: USE_MOCK_TELEBIRR
+        sync: false
+      - key: NOTIFY_URL
+        sync: false
+      - key: REDIRECT_URL
+        sync: false
     # Add your environment variables in Render Dashboard
     # Don't put secrets here - configure them in Render's Environment tab

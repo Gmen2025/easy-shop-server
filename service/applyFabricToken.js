@@ -6,6 +6,13 @@ const config = require("../config/config");
 exports.applyFabricToken = async () => {
   try {
     console.log("Attempting to get fabric token...");
+    const configIssues = config.getTelebirrConfigIssues();
+    if (configIssues.length > 0) {
+      throw new Error(
+        `Telebirr is not configured on this server. Missing or placeholder env vars: ${configIssues.join(', ')}`
+      );
+    }
+
     console.log("Config check:", {
       baseUrl: config.baseUrl,
       fabricAppId: config.fabricAppId,

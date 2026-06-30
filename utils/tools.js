@@ -139,11 +139,12 @@ function signRequestObject(requestObject) {
       return "MOCK_SIGNATURE_" + Date.now();
     }
 
-    console.log("Private key found: ", config.privateKey);
     // Check if we have a private key
     if (!config.privateKey) {
       throw new Error("No private key found for Telebirr signing");
     }
+
+    console.log("Telebirr private key available for signing");
 
     // Create the string to sign
     const signOriginStr = createSignString(requestObject);

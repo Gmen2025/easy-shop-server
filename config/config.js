@@ -1,6 +1,48 @@
 const fs = require('fs');
 const path = require('path');
 
+const PLACEHOLDER_VALUES = new Set([
+  '',
+  'your_fabric_app_id',
+  'your_app_id',
+  'your_merchant_code',
+  'your_merchant_app_id',
+  'your-telebirr-private-key',
+]);
+
+function isPlaceholderValue(value) {
+  return PLACEHOLDER_VALUES.has(String(value || '').trim());
+}
+
+function getTelebirrConfigIssues() {
+  const issues = [];
+
+  if (isPlaceholderValue(process.env.TELEBIRR_BASE_URL)) {
+    issues.push('TELEBIRR_BASE_URL');
+  }
+  if (isPlaceholderValue(process.env.TELEBIRR_FABRIC_APP_ID)) {
+    issues.push('TELEBIRR_FABRIC_APP_ID');
+  }
+  if (isPlaceholderValue(process.env.TELEBIRR_APP_ID)) {
+    issues.push('TELEBIRR_APP_ID');
+  }
+  if (isPlaceholderValue(process.env.TELEBIRR_MERCHANT_CODE)) {
+    issues.push('TELEBIRR_MERCHANT_CODE');
+  }
+  if (isPlaceholderValue(process.env.TELEBIRR_MERCHANT_APP_ID)) {
+    issues.push('TELEBIRR_MERCHANT_APP_ID');
+  }
+
+  const privateKey = String(process.env.TELEBIRR_PRIVATE_KEY || '').trim();
+  const privateKeyPath = path.join(__dirname, 'telebirr_private_key.pem');
+  const privateKeyFileExists = fs.existsSync(privateKeyPath);
+  if (!privateKey && !privateKeyFileExists && process.env.USE_MOCK_TELEBIRR !== 'true') {
+    issues.push('TELEBIRR_PRIVATE_KEY');
+  }
+
+  return issues;
+}
+
 // Check if private key file exists
 // const privateKeyPath = process.env.TELEBIRR_PRIVATE_KEY_PATH || './config/private_key.pem';
 // let privateKey = null;
@@ -18,11 +60,11 @@ const path = require('path');
 
 module.exports = {
   // Telebirr API Configuration
-  baseUrl: process.env.TELEBIRR_BASE_URL || "https://api.telebirr.com", // Replace with actual Telebirr API URL
-  fabricAppId: process.env.TELEBIRR_FABRIC_APP_ID || "your_fabric_app_id",
-  appId: process.env.TELEBIRR_APP_ID || "your_app_id", 
-  merchantCode: process.env.TELEBIRR_MERCHANT_CODE || "your_merchant_code",
-  merchantAppId: process.env.TELEBIRR_MERCHANT_APP_ID || "your_merchant_app_id",
+  baseUrl: process.env.TELEBIRR_BASE_URL || '',
+  fabricAppId: process.env.TELEBIRR_FABRIC_APP_ID || '',
+  appId: process.env.TELEBIRR_APP_ID || '',
+  merchantCode: process.env.TELEBIRR_MERCHANT_CODE || '',
+  merchantAppId: process.env.TELEBIRR_MERCHANT_APP_ID || '',
   
   // Webhook and redirect URLs
   notifyUrl: process.env.NOTIFY_URL || "",
@@ -45,5 +87,7 @@ module.exports = {
       return 'mock_private_key';
     }
     throw new Error('TELEBIRR_PRIVATE_KEY not configured');
-  }
+  },
+  isPlaceholderValue,
+  getTelebirrConfigIssues,
 };
