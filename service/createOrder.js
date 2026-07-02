@@ -3,6 +3,11 @@ const tools = require("../utils/tools");
 const config = require("../config/config");
 const axios = require('axios');
 
+function getTelebirrTimeoutMs() {
+  const timeoutMsRaw = Number(process.env.TELEBIRR_ORDER_TIMEOUT_MS || process.env.TELEBIRR_TIMEOUT_MS || 60000);
+  return Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 60000;
+}
+
 
 exports.createOrder = async (req, res) => {
   try {
@@ -69,7 +74,7 @@ exports.requestCreateOrder = async (fabricToken, title, amount) => {
           "X-APP-Key": config.fabricAppId,
           Authorization: fabricToken,
         },
-        timeout: 30000
+        timeout: getTelebirrTimeoutMs()
       }
     );
 

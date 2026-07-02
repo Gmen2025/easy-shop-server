@@ -14,6 +14,32 @@ function requireAdmin(req, res) {
   return true;
 }
 
+
+/**
+ * @swagger
+ * /api/v1/settings/maintenance:
+ *   get:
+ *     summary: Get maintenance mode status
+ *     description: Returns whether site-wide maintenance mode is currently enabled.
+ *     tags: [Settings]
+ *     responses:
+ *       200:
+ *         description: Current maintenance mode status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MaintenanceSettingResponse'
+ *             example:
+ *               success: true
+ *               enabled: false
+ *               updatedAt: '2026-07-02T12:00:00.000Z'
+ *       500:
+ *         description: Failed to read maintenance setting
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.get('/maintenance', async (req, res) => {
   try {
     const { SiteSetting } = req.dbModels;
@@ -36,6 +62,48 @@ router.get('/maintenance', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/settings/maintenance:
+ *   put:
+ *     summary: Update maintenance mode
+ *     description: Enables or disables site-wide maintenance mode. Admin access required.
+ *     tags: [Settings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/MaintenanceSettingUpdateRequest'
+ *           example:
+ *             enabled: true
+ *     responses:
+ *       200:
+ *         description: Maintenance setting updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/MaintenanceSettingResponse'
+ *             example:
+ *               success: true
+ *               enabled: true
+ *               updatedAt: '2026-07-02T12:00:00.000Z'
+ *               message: Maintenance mode enabled.
+ *       403:
+ *         description: Admin access required
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Failed to update maintenance setting
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.put('/maintenance', async (req, res) => {
   if (!requireAdmin(req, res)) {
     return;

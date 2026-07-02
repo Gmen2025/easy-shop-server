@@ -3,8 +3,66 @@ const https = require("https");
 const tools = require("../utils/tools");
 const config = require("../config/config");
 
+let cachedFabricToken = null;
+let cachedFabricTokenExpiresAt = 0;
+
+function getTelebirrTimeoutMs() {
+  const timeoutMsRaw = Number(process.env.TELEBIRR_TOKEN_TIMEOUT_MS || process.env.TELEBIRR_TIMEOUT_MS || 60000);
+  return Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 60000;
+}
+
+function isRetryableTelebirrTimeout(error) {
+  const message = String(error?.message || '').toLowerCase();
+  const code = String(error?.code || '').toUpperCase();
+
+  return (
+    code === 'ECONNABORTED' ||
+    code === 'ETIMEDOUT' ||
+    message.includes('timeout') ||
+    message.includes('socket hang up')
+  );
+}
+
+async function requestFabricToken(reqObject, timeoutMs) {
+  const allowInsecureTls =
+    process.env.USE_MOCK_TELEBIRR === 'true' ||
+    process.env.TELEBIRR_ALLOW_INSECURE_TLS === 'true';
+
+  if (allowInsecureTls) {
+    console.warn('[Telebirr] TLS certificate verification is disabled. Do not use this in production.');
+  }
+
+  const httpsAgent = new https.Agent({
+    rejectUnauthorized: !allowInsecureTls,
+    requestCert: false,
+    agent: false,
+  });
+
+  console.log('Making request to:', config.baseUrl + '/payment/v1/token', { timeoutMs });
+
+  return axios.post(
+    config.baseUrl + '/payment/v1/token',
+    reqObject,
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-APP-Key': config.fabricAppId,
+      },
+      timeout: timeoutMs,
+      httpsAgent,
+      validateStatus(status) {
+        return status < 500;
+      },
+    }
+  );
+}
+
 exports.applyFabricToken = async () => {
   try {
+    if (cachedFabricToken && Date.now() < cachedFabricTokenExpiresAt) {
+      return cachedFabricToken;
+    }
+
     console.log("Attempting to get fabric token...");
     const configIssues = config.getTelebirrConfigIssues();
     if (configIssues.length > 0) {
@@ -19,7 +77,7 @@ exports.applyFabricToken = async () => {
       appId: config.appId,
     });
 
-    let reqObject = createRequestObject();
+    const reqObject = createRequestObject();
     console.log("Request object:", JSON.stringify(reqObject, null, 2));
 
     // Validate the request object before sending
@@ -27,41 +85,24 @@ exports.applyFabricToken = async () => {
       throw new Error("Invalid request object - missing signature");
     }
 
-    // Keep TLS verification enabled by default; bypass only when explicitly allowed.
-    const allowInsecureTls =
-      process.env.USE_MOCK_TELEBIRR === 'true' ||
-      process.env.TELEBIRR_ALLOW_INSECURE_TLS === 'true';
-
-    if (allowInsecureTls) {
-      console.warn('[Telebirr] TLS certificate verification is disabled. Do not use this in production.');
-    }
-
-    const timeoutMsRaw = Number(process.env.TELEBIRR_TIMEOUT_MS || 30000);
-    const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 30000;
-
-    const httpsAgent = new https.Agent({
-      rejectUnauthorized: !allowInsecureTls,
-      requestCert: false,
-      agent: false,
-    });
-
-    console.log("Making request to:", config.baseUrl + "/payment/v1/token");
-
-    const response = await axios.post(
-      config.baseUrl + "/payment/v1/token",
-      reqObject,
-      {
-        headers: {
-          "Content-Type": "application/json",
-          "X-APP-Key": config.fabricAppId,
-        },
-        timeout: timeoutMs,
-        httpsAgent: httpsAgent, // Add this to handle SSL issues
-        validateStatus: function (status) {
-          return status < 500; // Accept all status codes below 500
-        },
+    const timeoutMs = getTelebirrTimeoutMs();
+    let response;
+    try {
+      response = await requestFabricToken(reqObject, timeoutMs);
+    } catch (error) {
+      if (!isRetryableTelebirrTimeout(error)) {
+        throw error;
       }
-    );
+
+      const retryTimeoutMs = Math.max(timeoutMs, 90000);
+      console.warn('[Telebirr] Retrying fabric token request after timeout', {
+        firstTimeoutMs: timeoutMs,
+        retryTimeoutMs,
+        code: error?.code,
+        message: error?.message,
+      });
+      response = await requestFabricToken(reqObject, retryTimeoutMs);
+    }
 
     console.log("API Response Status:", response.status);
     console.log("API Response Headers:", response.headers);
@@ -82,6 +123,14 @@ exports.applyFabricToken = async () => {
         `No token received from API. Response: ${JSON.stringify(response.data)}`
       );
     }
+
+    const expiresInSeconds = Number(response.data.expires_in || response.data.expiresIn || 3600);
+    const cacheLifetimeMs = Number.isFinite(expiresInSeconds) && expiresInSeconds > 120
+      ? (expiresInSeconds - 60) * 1000
+      : 30 * 60 * 1000;
+
+    cachedFabricToken = response.data;
+    cachedFabricTokenExpiresAt = Date.now() + cacheLifetimeMs;
 
     return response.data;
   } catch (error) {

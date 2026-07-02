@@ -250,6 +250,26 @@ const swaggerOptions = {
             instruction: { type: 'string', example: 'Add header to every request: x-database-name: E_ShopUSA' }
           }
         },
+        MaintenanceSettingResponse: {
+          type: 'object',
+          properties: {
+            success: { type: 'boolean', example: true },
+            enabled: { type: 'boolean', example: false },
+            updatedAt: { type: 'string', format: 'date-time', nullable: true },
+            message: { type: 'string' }
+          }
+        },
+        MaintenanceSettingUpdateRequest: {
+          type: 'object',
+          required: ['enabled'],
+          properties: {
+            enabled: {
+              type: 'boolean',
+              example: true,
+              description: 'Turn maintenance mode on or off'
+            }
+          }
+        },
         Error: {
           type: 'object',
           properties: {
@@ -262,7 +282,8 @@ const swaggerOptions = {
     },
     tags: [
       { name: 'Notifications', description: 'Push notification endpoints for device token management and admin message delivery.' },
-      { name: 'Database', description: 'Multi-database switching endpoints — no authentication required. Use x-database-name header on all subsequent requests after switching.' }
+      { name: 'Database', description: 'Multi-database switching endpoints — no authentication required. Use x-database-name header on all subsequent requests after switching.' },
+      { name: 'Settings', description: 'Site-wide configuration endpoints for maintenance mode and other admin-only settings.' }
     ],
     security: [{
       bearerAuth: []

@@ -28,7 +28,12 @@ function classifyTelebirrError(error) {
     };
   }
 
-  if (rawMessage.includes('ECONNABORTED') || rawMessage.toLowerCase().includes('timeout')) {
+  if (
+    rawMessage.includes('ECONNABORTED') ||
+    rawMessage.includes('ETIMEDOUT') ||
+    rawMessage.includes('socket hang up') ||
+    rawMessage.toLowerCase().includes('timeout')
+  ) {
     return {
       status: 503,
       code: 'TELEBIRR_TIMEOUT',
