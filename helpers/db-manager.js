@@ -4,6 +4,7 @@ const { productSchema } = require('../models/product');
 const { orderSchema } = require('../models/order');
 const { orderItemSchema } = require('../models/order-item');
 const { userSchema } = require('../models/user');
+const { siteSettingSchema } = require('../models/site-setting');
 
 const DEFAULT_DB_NAME = process.env.DEFAULT_DB_NAME || 'E_Shopping';
 
@@ -54,6 +55,7 @@ function getModelsForDb(dbName) {
     Order: db.models.Order || db.model('Order', orderSchema),
     OrderItem: db.models.OrderItem || db.model('OrderItem', orderItemSchema),
     User: db.models.User || db.model('User', userSchema),
+    SiteSetting: db.models.SiteSetting || db.model('SiteSetting', siteSettingSchema),
   };
 }
 
