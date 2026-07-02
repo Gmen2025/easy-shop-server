@@ -6,6 +6,7 @@ const createOrderService = require('../service/createOrder');
 const { Order } = require('../models/order');
 
 const paymentStatusStore = new Map();
+const pendingTelebirrRequests = new Map();
 
 function classifyTelebirrError(error) {
   const rawMessage = String(error?.message || 'Unknown Telebirr error');
@@ -183,6 +184,9 @@ router.post('/initiate-payment', async (req, res) => {
 
     console.log('Initiating payment for:', { amount, phoneNumber, customerName });
 
+    const finalOrderId = orderId || `ORDER_${Date.now()}`;
+    const requestId = `${finalOrderId}-${Date.now()}`;
+
     // CHECK FOR MOCK MODE FIRST
     const useMockService = process.env.USE_MOCK_TELEBIRR === 'true';
     console.log('USE_MOCK_TELEBIRR:', useMockService);
@@ -193,7 +197,7 @@ router.post('/initiate-payment', async (req, res) => {
       // Simulate processing delay
       await new Promise(resolve => setTimeout(resolve, 1000));
       
-      const mockOrderId = orderId || `ORDER_${Date.now()}`;
+      const mockOrderId = finalOrderId;
       const mockTransactionId = `TXN_${Date.now()}`;
       const mockPrepayId = `PREPAY_${Date.now()}`;
       
@@ -227,61 +231,95 @@ router.post('/initiate-payment', async (req, res) => {
 
     // REAL TELEBIRR SERVICE (only runs if USE_MOCK_TELEBIRR=false)
     console.log('🔄 Using REAL Telebirr service...');
-    
-    const orderData = {
-      title: description || `Payment for ${customerName}`,
-      amount: amount,
-      platform: 'mobile'
-    };
 
-    // Create request for createOrder service
-    const serviceReq = {
-      body: {
-        title: orderData.title,
-        amount: orderData.amount,
-        platform: orderData.platform
-      }
-    };
-
-    // Call the createOrder service
-    let paymentResult = null;
-    const serviceRes = {
-      json: (data) => {
-        paymentResult = data;
-      },
-      status: (code) => ({
-        json: (data) => {
-          throw new Error(data.error || 'Payment creation failed');
-        }
-      })
-    };
-
-    await createOrderService.createOrder(serviceReq, serviceRes);
-
-    const transactionId = paymentResult.prepay_id;
-    const finalOrderId = orderId || `ORDER_${Date.now()}`;
-
-    paymentStatusStore.set(transactionId, {
-      transactionId,
+    pendingTelebirrRequests.set(requestId, {
+      requestId,
       orderId: finalOrderId,
-      status: 'pending',
-      timestamp: new Date().toISOString(),
-      isMock: false,
+      amount,
+      phoneNumber,
+      customerName,
+      description,
+      status: 'processing',
+      createdAt: new Date().toISOString(),
     });
 
-    // Return success response
-    res.json({
-      success: true,
-      message: 'Payment initiated successfully',
-      data: {
-        paymentUrl: paymentResult.payment_url,
-        prepayId: paymentResult.prepay_id,
-        orderId: finalOrderId,
-        amount: amount,
-        customerName: customerName,
-        phoneNumber: phoneNumber,
-        transactionId
+    setImmediate(async () => {
+      try {
+        const orderData = {
+          title: description || `Payment for ${customerName}`,
+          amount: amount,
+          platform: 'mobile'
+        };
+
+        const serviceReq = {
+          body: {
+            title: orderData.title,
+            amount: orderData.amount,
+            platform: orderData.platform
+          }
+        };
+
+        let paymentResult = null;
+        const serviceRes = {
+          json: (data) => {
+            paymentResult = data;
+          },
+          status: (code) => ({
+            json: (data) => {
+              throw new Error(data.error || 'Payment creation failed');
+            }
+          })
+        };
+
+        await createOrderService.createOrder(serviceReq, serviceRes);
+
+        const transactionId = paymentResult.prepay_id;
+
+        paymentStatusStore.set(transactionId, {
+          transactionId,
+          orderId: finalOrderId,
+          status: 'pending',
+          timestamp: new Date().toISOString(),
+          isMock: false,
+        });
+
+        pendingTelebirrRequests.set(requestId, {
+          requestId,
+          orderId: finalOrderId,
+          amount,
+          phoneNumber,
+          customerName,
+          description,
+          status: 'ready',
+          createdAt: pendingTelebirrRequests.get(requestId)?.createdAt || new Date().toISOString(),
+          paymentUrl: paymentResult.payment_url,
+          prepayId: paymentResult.prepay_id,
+          transactionId,
+        });
+      } catch (error) {
+        console.error('❌ Background Telebirr initiation error:', error);
+        pendingTelebirrRequests.set(requestId, {
+          requestId,
+          orderId: finalOrderId,
+          amount,
+          phoneNumber,
+          customerName,
+          description,
+          status: 'failed',
+          createdAt: pendingTelebirrRequests.get(requestId)?.createdAt || new Date().toISOString(),
+          error: error?.message || 'Payment creation failed',
+        });
       }
+    });
+
+    return res.status(202).json({
+      success: true,
+      message: 'Payment is being prepared. Please retry in a few seconds.',
+      data: {
+        requestId,
+        orderId: finalOrderId,
+        status: 'processing',
+      },
     });
 
   } catch (error) {
@@ -396,6 +434,42 @@ router.post('/verify-payment', async (req, res) => {
       message: 'Failed to verify payment'
     });
   }
+});
+
+/**
+ * @swagger
+ * /api/v1/telebirr/initiation-status/{requestId}:
+ *   get:
+ *     summary: Check Telebirr payment preparation status
+ *     tags: [Telebirr]
+ *     parameters:
+ *       - in: path
+ *         name: requestId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Request ID returned from initiate-payment
+ *     responses:
+ *       200:
+ *         description: Current preparation status
+ *       404:
+ *         description: Request not found
+ */
+router.get('/initiation-status/:requestId', async (req, res) => {
+  const { requestId } = req.params;
+  const requestState = pendingTelebirrRequests.get(requestId);
+
+  if (!requestState) {
+    return res.status(404).json({
+      success: false,
+      message: 'Telebirr initiation request not found.',
+    });
+  }
+
+  return res.status(200).json({
+    success: true,
+    data: requestState,
+  });
 });
 
 /**
