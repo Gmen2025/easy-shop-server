@@ -7,8 +7,9 @@ let cachedFabricToken = null;
 let cachedFabricTokenExpiresAt = 0;
 
 function getTelebirrTimeoutMs() {
-  const timeoutMsRaw = Number(process.env.TELEBIRR_TOKEN_TIMEOUT_MS || process.env.TELEBIRR_TIMEOUT_MS || 60000);
-  return Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 60000;
+  const timeoutMsRaw = Number(process.env.TELEBIRR_TOKEN_TIMEOUT_MS || process.env.TELEBIRR_TIMEOUT_MS || 120000);
+  const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 120000;
+  return Math.max(timeoutMs, 120000);
 }
 
 function isRetryableTelebirrTimeout(error) {
@@ -94,7 +95,7 @@ exports.applyFabricToken = async () => {
         throw error;
       }
 
-      const retryTimeoutMs = Math.max(timeoutMs, 90000);
+      const retryTimeoutMs = Math.max(timeoutMs, 180000);
       console.warn('[Telebirr] Retrying fabric token request after timeout', {
         firstTimeoutMs: timeoutMs,
         retryTimeoutMs,
