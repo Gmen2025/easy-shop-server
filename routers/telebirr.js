@@ -36,6 +36,21 @@ function findPendingByOrderId(orderId) {
   return null;
 }
 
+function getInitiationTimeoutMs() {
+  const timeoutMsRaw = Number(process.env.TELEBIRR_INITIATE_TIMEOUT_MS || 6500);
+  const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 6500;
+  return Math.min(Math.max(timeoutMs, 3000), 20000);
+}
+
+function withTimeout(promise, timeoutMs, timeoutMessage) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+    }),
+  ]);
+}
+
 function classifyTelebirrError(error) {
   const rawMessage = String(error?.message || 'Unknown Telebirr error');
 
@@ -288,7 +303,11 @@ router.post('/initiate-payment', async (req, res) => {
       })
     };
 
-    await createOrderService.createOrder(serviceReq, serviceRes);
+    await withTimeout(
+      createOrderService.createOrder(serviceReq, serviceRes),
+      getInitiationTimeoutMs(),
+      'Telebirr initiate-payment timed out while preparing checkout URL'
+    );
 
     const transactionId = paymentResult.prepay_id;
     const urls = toTelebirrLinks(paymentResult);

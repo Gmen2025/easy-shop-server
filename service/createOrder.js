@@ -4,9 +4,9 @@ const config = require("../config/config");
 const axios = require('axios');
 
 function getTelebirrTimeoutMs() {
-  const timeoutMsRaw = Number(process.env.TELEBIRR_ORDER_TIMEOUT_MS || process.env.TELEBIRR_TIMEOUT_MS || 120000);
-  const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 120000;
-  return Math.max(timeoutMs, 120000);
+  const timeoutMsRaw = Number(process.env.TELEBIRR_ORDER_TIMEOUT_MS || process.env.TELEBIRR_TIMEOUT_MS || 7000);
+  const timeoutMs = Number.isFinite(timeoutMsRaw) && timeoutMsRaw > 0 ? timeoutMsRaw : 7000;
+  return Math.min(Math.max(timeoutMs, 3000), 20000);
 }
 
 
