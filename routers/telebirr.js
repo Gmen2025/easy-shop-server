@@ -76,6 +76,7 @@ function classifyTelebirrError(error) {
     rawMessage.includes('ECONNABORTED') ||
     rawMessage.includes('ETIMEDOUT') ||
     rawMessage.includes('socket hang up') ||
+    rawMessage.toLowerCase().includes('timed out') ||
     rawMessage.toLowerCase().includes('timeout')
   ) {
     return {
@@ -291,72 +292,130 @@ router.post('/initiate-payment', async (req, res) => {
       }
     };
 
-    let paymentResult = null;
-    const serviceRes = {
-      json: (data) => {
-        paymentResult = data;
-      },
-      status: () => ({
-        json: (data) => {
-          throw new Error(data.error || 'Payment creation failed');
-        }
-      })
-    };
-
-    await withTimeout(
-      createOrderService.createOrder(serviceReq, serviceRes),
-      getInitiationTimeoutMs(),
-      'Telebirr initiate-payment timed out while preparing checkout URL'
-    );
-
-    const transactionId = paymentResult.prepay_id;
-    const urls = toTelebirrLinks(paymentResult);
-
-    const readyState = {
+    const processingState = {
       requestId,
       orderId: finalOrderId,
       amount,
       phoneNumber,
       customerName,
       description,
-      status: 'ready',
+      status: 'processing',
       createdAt: new Date().toISOString(),
-      prepayId: paymentResult.prepay_id,
-      transactionId,
-      ...urls,
     };
+    pendingTelebirrRequests.set(requestId, processingState);
 
-    pendingTelebirrRequests.set(requestId, readyState);
+    const initiationTask = (async () => {
+      try {
+        let paymentResult = null;
+        const serviceRes = {
+          json: (data) => {
+            paymentResult = data;
+          },
+          status: () => ({
+            json: (data) => {
+              throw new Error(data.error || 'Payment creation failed');
+            }
+          })
+        };
 
-    paymentStatusStore.set(transactionId, {
-      transactionId,
-      orderId: finalOrderId,
-      status: 'pending',
-      timestamp: new Date().toISOString(),
-      isMock: false,
-      prepayId: paymentResult.prepay_id,
-      requestId,
-      ...urls,
-    });
+        await createOrderService.createOrder(serviceReq, serviceRes);
 
-    paymentStatusStore.set(finalOrderId, {
-      transactionId,
-      orderId: finalOrderId,
-      status: 'pending',
-      timestamp: new Date().toISOString(),
-      isMock: false,
-      prepayId: paymentResult.prepay_id,
-      requestId,
-      ...urls,
-    });
+        const transactionId = paymentResult.prepay_id;
+        const urls = toTelebirrLinks(paymentResult);
+
+        const readyState = {
+          ...processingState,
+          status: 'ready',
+          prepayId: paymentResult.prepay_id,
+          transactionId,
+          ...urls,
+        };
+
+        pendingTelebirrRequests.set(requestId, readyState);
+
+        paymentStatusStore.set(transactionId, {
+          transactionId,
+          orderId: finalOrderId,
+          status: 'pending',
+          timestamp: new Date().toISOString(),
+          isMock: false,
+          prepayId: paymentResult.prepay_id,
+          requestId,
+          ...urls,
+        });
+
+        paymentStatusStore.set(finalOrderId, {
+          transactionId,
+          orderId: finalOrderId,
+          status: 'pending',
+          timestamp: new Date().toISOString(),
+          isMock: false,
+          prepayId: paymentResult.prepay_id,
+          requestId,
+          ...urls,
+        });
+
+        return readyState;
+      } catch (err) {
+        const failedState = {
+          ...processingState,
+          status: 'failed',
+          error: err?.message || 'Payment creation failed',
+        };
+
+        pendingTelebirrRequests.set(requestId, failedState);
+        paymentStatusStore.set(finalOrderId, {
+          orderId: finalOrderId,
+          status: 'failed',
+          timestamp: new Date().toISOString(),
+          requestId,
+          error: failedState.error,
+        });
+        return failedState;
+      }
+    })();
+
+    let readyOrFailedState;
+    try {
+      readyOrFailedState = await withTimeout(
+        initiationTask,
+        getInitiationTimeoutMs(),
+        'Telebirr initiate-payment timed out while preparing checkout URL'
+      );
+    } catch (timeoutError) {
+      if (String(timeoutError?.message || '').includes('timed out while preparing checkout URL')) {
+        return res.status(202).json({
+          success: true,
+          code: 'TELEBIRR_PROCESSING',
+          message: 'Payment is still being prepared. Please check status shortly.',
+          data: processingState,
+        });
+      }
+      throw timeoutError;
+    }
+
+    if (readyOrFailedState.status === 'failed') {
+      const mappedError = classifyTelebirrError(new Error(readyOrFailedState.error));
+      return res.status(mappedError.status).json({
+        success: false,
+        code: mappedError.code,
+        message: mappedError.message,
+        details: mappedError.details,
+        canSwitchPaymentMethod: mappedError.status === 503,
+        data: readyOrFailedState,
+      });
+    }
+
+    const readyState = readyOrFailedState;
+    const urls = toTelebirrLinks(readyState);
 
     return res.status(200).json({
       success: true,
       message: 'Payment initiated successfully',
       data: readyState,
       ...urls,
-      prepay_id: paymentResult.prepay_id,
-      transactionId,
+      prepay_id: readyState.prepayId,
+      transactionId: readyState.transactionId,
       requestId,
       orderId: finalOrderId,
       status: 'pending',
