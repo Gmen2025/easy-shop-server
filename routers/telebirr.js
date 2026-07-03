@@ -8,6 +8,29 @@ const { Order } = require('../models/order');
 const paymentStatusStore = new Map();
 const pendingTelebirrRequests = new Map();
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForInitiationResult(requestId, timeoutMs = 8000, pollIntervalMs = 250) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    const current = pendingTelebirrRequests.get(requestId);
+    if (!current) {
+      return null;
+    }
+
+    if (current.status === 'ready' || current.status === 'failed') {
+      return current;
+    }
+
+    await delay(pollIntervalMs);
+  }
+
+  return pendingTelebirrRequests.get(requestId) || null;
+}
+
 function classifyTelebirrError(error) {
   const rawMessage = String(error?.message || 'Unknown Telebirr error');
 
@@ -203,6 +226,8 @@ router.post('/initiate-payment', async (req, res) => {
       
       const mockPaymentData = {
         paymentUrl: `https://mock-telebirr.com/pay?amount=${amount}&phone=${phoneNumber}&order=${mockOrderId}`,
+        payment_url: `https://mock-telebirr.com/pay?amount=${amount}&phone=${phoneNumber}&order=${mockOrderId}`,
+        checkout_url: `https://mock-telebirr.com/pay?amount=${amount}&phone=${phoneNumber}&order=${mockOrderId}`,
         orderId: mockOrderId,
         amount: amount,
         customerName: customerName,
@@ -292,7 +317,9 @@ router.post('/initiate-payment', async (req, res) => {
           description,
           status: 'ready',
           createdAt: pendingTelebirrRequests.get(requestId)?.createdAt || new Date().toISOString(),
-          paymentUrl: paymentResult.payment_url,
+          paymentUrl: paymentResult.payment_url || paymentResult.checkout_url || paymentResult.paymentUrl,
+          payment_url: paymentResult.payment_url || paymentResult.checkout_url || paymentResult.paymentUrl,
+          checkout_url: paymentResult.checkout_url || paymentResult.payment_url || paymentResult.paymentUrl,
           prepayId: paymentResult.prepay_id,
           transactionId,
         });
@@ -311,6 +338,28 @@ router.post('/initiate-payment', async (req, res) => {
         });
       }
     });
+
+    const readyState = await waitForInitiationResult(requestId);
+
+    if (readyState?.status === 'ready') {
+      return res.status(200).json({
+        success: true,
+        message: 'Payment initiated successfully',
+        data: readyState,
+      });
+    }
+
+    if (readyState?.status === 'failed') {
+      return res.status(500).json({
+        success: false,
+        message: readyState.error || 'Payment creation failed',
+        data: {
+          requestId,
+          orderId: finalOrderId,
+          status: 'failed',
+        },
+      });
+    }
 
     return res.status(202).json({
       success: true,

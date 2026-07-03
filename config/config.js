@@ -68,7 +68,9 @@ module.exports = {
   
   // Webhook and redirect URLs
   notifyUrl: process.env.NOTIFY_URL || "",
-  redirectUrl: process.env.REDIRECT_URL || "https://yourdomain.com/payment/success",
+  redirectUrl: process.env.REDIRECT_URL || "https://addugeneteshop.com/payment/success",
+  mobileRedirectUrl: process.env.MOBILE_REDIRECT_URL || "easyshopping://payment-success",
+  webRedirectUrl: process.env.WEB_REDIRECT_URL || process.env.REDIRECT_URL || "https://addugeneteshop.com/payment/success",
   webBaseUrl: process.env.TELEBIRR_WEB_BASE_URL || "https://telebirr.com/payment/checkout",
   
   // Private key for signing (path to your private key file)

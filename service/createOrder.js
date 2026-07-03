@@ -12,7 +12,7 @@ function getTelebirrTimeoutMs() {
 
 exports.createOrder = async (req, res) => {
   try {
-    const { title, amount } = req.body;
+    const { title, amount, clientType, platform } = req.body;
     
     // Validate inputs
     if (!title || typeof title !== 'string' || title.trim().length === 0) {
@@ -35,7 +35,8 @@ exports.createOrder = async (req, res) => {
     let createOrderResult = await exports.requestCreateOrder(
       fabricToken,
       title,
-      amount
+      amount,
+      clientType || platform
     );
     
     if (!createOrderResult || !createOrderResult.biz_content || !createOrderResult.biz_content.prepay_id) {
@@ -50,6 +51,8 @@ exports.createOrder = async (req, res) => {
     res.json({
       success: true,
       payment_url: finalUrl,
+      checkout_url: finalUrl,
+      paymentUrl: finalUrl,
       prepay_id: prepayId
     });
     
@@ -62,9 +65,9 @@ exports.createOrder = async (req, res) => {
   }
 };
 
-exports.requestCreateOrder = async (fabricToken, title, amount) => {
+exports.requestCreateOrder = async (fabricToken, title, amount, clientType) => {
  try {
-    let reqObject = createRequestObject(title, amount);
+  let reqObject = createRequestObject(title, amount, clientType);
     
     const response = await axios.post(
       config.baseUrl + "/payment/v1/merchant/preOrder",
@@ -86,7 +89,7 @@ exports.requestCreateOrder = async (fabricToken, title, amount) => {
   }
 };
 
-function createRequestObject(title, amount) {
+function createRequestObject(title, amount, clientType) {
   const useMockService = process.env.USE_MOCK_TELEBIRR === 'true' || process.env.USE_MOCK_TELEBIRR === undefined ;
   const notifyUrl = String(config.notifyUrl || '').trim();
 
@@ -114,9 +117,7 @@ function createRequestObject(title, amount) {
     payee_identifier: config.merchantCode,
     payee_identifier_type: "04",
     payee_type: "5000",
-    //redirect_url: "easyshopping://payment-success", // Deep link to your app
-    //redirect_url: "https://www.bing.com/", // ❌ This should redirect back to your app
-    //redirect_url: config.redirectUrl || "https://yourdomain.com/payment/success",
+    redirect_url: getRedirectUrlForClient(clientType),
     callback_info: `Mobile payment for ${title}`,
   };
   req.biz_content = biz;
@@ -124,6 +125,17 @@ function createRequestObject(title, amount) {
   req.sign_type = "SHA256WithRSA";
   //console.log(req);
   return req;
+}
+
+function getRedirectUrlForClient(clientType) {
+  const normalizedClientType = String(clientType || '').trim().toLowerCase();
+  const isMobileClient = normalizedClientType === 'mobile' || normalizedClientType === 'app';
+
+  if (isMobileClient) {
+    return config.mobileRedirectUrl || "easyshopping://payment-success";
+  }
+
+  return config.webRedirectUrl || config.redirectUrl || "https://addugeneteshop.com/payment/success";
 }
 
 function createMerchantOrderId() {
