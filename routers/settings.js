@@ -1,4 +1,5 @@
 const router = require('express').Router();
+const mongoose = require('mongoose');
 
 const MAINTENANCE_SETTING_KEY = 'maintenance-mode';
 const BANK_ACCOUNT_SETTING_KEY = 'bank-account-info';
@@ -277,7 +278,7 @@ router.put('/bank-account', async (req, res) => {
 
     if (action === 'add') {
       const newBank = {
-        _id: new require('mongoose').Types.ObjectId(),
+        _id: new mongoose.Types.ObjectId(),
         bankName: bankAccount?.bankName || '',
         accountNumber: bankAccount?.accountNumber || '',
         accountHolderName: bankAccount?.accountHolderName || '',
