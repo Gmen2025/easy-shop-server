@@ -33,6 +33,7 @@ function authJwt() {
       { url: /\/sign$/, methods: ["POST", "OPTIONS"] },
       { url: /\/api\/v1\/database(.*)/, methods: ["GET", "POST", "OPTIONS"] },
       { url: /\/api\/v1\/settings\/maintenance$/, methods: ["GET", "OPTIONS"] },
+      { url: /\/api\/v1\/settings\/bank-account$/, methods: ["GET", "OPTIONS"] },
       { url: /\/api\/v1\/notifications\/health$/, methods: ["GET", "OPTIONS"] },
     ],
   });
