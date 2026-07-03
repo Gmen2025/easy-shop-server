@@ -251,6 +251,18 @@ router.get(`/:id`, async (req, res) => {
  *               status:
  *                 type: string
  *                 default: Pending
+ *               paymentMethod:
+ *                 type: string
+ *               methodName:
+ *                 type: string
+ *               cardType:
+ *                 type: string
+ *               bankName:
+ *                 type: string
+ *               transferReference:
+ *                 type: string
+ *               senderName:
+ *                 type: string
  *               user:
  *                 type: string
  *     responses:
@@ -318,6 +330,10 @@ router.post(`/`, async (req, res) => {
 
   const paymentMethod =
     req.body.paymentMethod || incomingPaymentMeta.paymentMethod || "";
+  const methodName =
+    req.body.methodName || incomingPaymentMeta.methodName || "";
+  const cardType =
+    req.body.cardType || incomingPaymentMeta.cardType || "";
   const bankName =
     req.body.bankName ||
     incomingPaymentMeta.bankName ||
@@ -346,6 +362,8 @@ router.post(`/`, async (req, res) => {
     customerEmail,
     status: req.body.status,
     paymentMethod,
+    methodName,
+    cardType,
     paymentMeta: {
       bankName,
       senderName,
@@ -479,7 +497,7 @@ router.post(`/`, async (req, res) => {
  * @swagger
  * /api/v1/orders/{id}:
  *   put:
- *     summary: Update order status
+ *     summary: Update order (status and payment information)
  *     tags: [Orders]
  *     security:
  *       - bearerAuth: []
@@ -496,26 +514,57 @@ router.post(`/`, async (req, res) => {
  *         application/json:
  *           schema:
  *             type: object
- *             required:
- *               - status
  *             properties:
  *               status:
  *                 type: string
  *                 enum: [Pending, Processing, Shipped, Delivered, Cancelled]
+ *               paymentMethod:
+ *                 type: string
+ *               methodName:
+ *                 type: string
+ *               cardType:
+ *                 type: string
+ *               bankName:
+ *                 type: string
+ *               transferReference:
+ *                 type: string
+ *               senderName:
+ *                 type: string
+ *               paymentNote:
+ *                 type: string
+ *               paymentProvider:
+ *                 type: string
+ *               paymentStatus:
+ *                 type: string
  *     responses:
  *       200:
- *         description: Order status updated successfully
+ *         description: Order updated successfully
  *       400:
  *         description: Order cannot be updated
  */
 //updating order status
 router.put("/:id", async (req, res) => {
   const { Order, User } = req.dbModels;
+  
+  // Build update object with allowed fields
+  const updateFields = {
+    status: req.body.status,
+  };
+  
+  // Include payment-related fields if provided
+  if (req.body.paymentMethod !== undefined) updateFields.paymentMethod = req.body.paymentMethod;
+  if (req.body.methodName !== undefined) updateFields.methodName = req.body.methodName;
+  if (req.body.cardType !== undefined) updateFields.cardType = req.body.cardType;
+  if (req.body.bankName !== undefined) updateFields.bankName = req.body.bankName;
+  if (req.body.transferReference !== undefined) updateFields.transferReference = req.body.transferReference;
+  if (req.body.senderName !== undefined) updateFields.senderName = req.body.senderName;
+  if (req.body.paymentNote !== undefined) updateFields.paymentNote = req.body.paymentNote;
+  if (req.body.paymentProvider !== undefined) updateFields.paymentProvider = req.body.paymentProvider;
+  if (req.body.paymentStatus !== undefined) updateFields.paymentStatus = req.body.paymentStatus;
+  
   let order = await Order.findByIdAndUpdate(
     req.params.id,
-    {
-      status: req.body.status,
-    },
+    updateFields,
     {
       new: true,
     }

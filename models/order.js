@@ -47,6 +47,14 @@ const orderSchema = new mongoose.Schema({
         type: String,
         default: ''
     },
+    methodName: {
+        type: String,
+        default: ''
+    },
+    cardType: {
+        type: String,
+        default: ''
+    },
     paymentMeta: {
         bankName: {
             type: String,
