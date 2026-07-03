@@ -122,9 +122,9 @@ router.post("/login", async (req, res) => {
       { expiresIn: "1d" }
     );
     return res.send({
-      user: user.email,
       _id: user._id,
       name: user.name,
+      email: user.email,
       phone: user.phone,
       isAdmin: user.isAdmin,
       isEmailVerified: user.isEmailVerified,
