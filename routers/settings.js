@@ -152,12 +152,12 @@ router.put('/maintenance', async (req, res) => {
  * @swagger
  * /api/v1/settings/bank-account:
  *   get:
- *     summary: Get bank account information
- *     description: Returns bank account details for bank transfers
+ *     summary: Get all bank accounts
+ *     description: Returns all configured bank accounts for bank transfers
  *     tags: [Settings]
  *     responses:
  *       200:
- *         description: Bank account information
+ *         description: Bank accounts information
  *         content:
  *           application/json:
  *             schema:
@@ -165,42 +165,30 @@ router.put('/maintenance', async (req, res) => {
  *               properties:
  *                 success:
  *                   type: boolean
- *                 bankName:
- *                   type: string
- *                 accountNumber:
- *                   type: string
- *                 accountHolderName:
- *                   type: string
- *                 bankCode:
- *                   type: string
- *                 additionalInfo:
- *                   type: string
+ *                 hasData:
+ *                   type: boolean
+ *                 bankAccounts:
+ *                   type: array
  *       500:
- *         description: Failed to fetch bank account info
+ *         description: Failed to fetch bank accounts
  */
 router.get('/bank-account', async (req, res) => {
   try {
     const { SiteSetting } = req.dbModels;
 
     const setting = await SiteSetting.findOne({ key: BANK_ACCOUNT_SETTING_KEY })
-      .select('bankAccountInfo updatedAt')
+      .select('bankAccounts updatedAt')
       .lean();
 
-    // Check if bank account info has any actual data
-    const hasData = !!(
-      setting?.bankAccountInfo?.bankName ||
-      setting?.bankAccountInfo?.accountNumber ||
-      setting?.bankAccountInfo?.accountHolderName
-    );
+    // Check if bank accounts has any actual data
+    const bankAccounts = setting?.bankAccounts || [];
+    const activeBankAccounts = bankAccounts.filter(bank => bank.isActive !== false);
+    const hasData = activeBankAccounts.length > 0;
 
     return res.status(200).json({
       success: true,
       hasData: hasData,
-      bankName: setting?.bankAccountInfo?.bankName || '',
-      accountNumber: setting?.bankAccountInfo?.accountNumber || '',
-      accountHolderName: setting?.bankAccountInfo?.accountHolderName || '',
-      bankCode: setting?.bankAccountInfo?.bankCode || '',
-      additionalInfo: setting?.bankAccountInfo?.additionalInfo || '',
+      bankAccounts: activeBankAccounts,
       updatedAt: setting?.updatedAt || null,
     });
   } catch (error) {
@@ -216,8 +204,8 @@ router.get('/bank-account', async (req, res) => {
  * @swagger
  * /api/v1/settings/bank-account:
  *   put:
- *     summary: Update bank account information
- *     description: Updates bank account details for bank transfers. Admin access required.
+ *     summary: Add, update, or delete bank accounts
+ *     description: Manages bank account details for bank transfers. Admin access required.
  *     tags: [Settings]
  *     security:
  *       - bearerAuth: []
@@ -228,28 +216,33 @@ router.get('/bank-account', async (req, res) => {
  *           schema:
  *             type: object
  *             properties:
- *               bankName:
+ *               action:
  *                 type: string
- *                 example: "Commercial Bank of Ethiopia"
- *               accountNumber:
- *                 type: string
- *                 example: "1234567890"
- *               accountHolderName:
- *                 type: string
- *                 example: "Easy Shopping"
- *               bankCode:
- *                 type: string
- *                 example: "CBE"
- *               additionalInfo:
- *                 type: string
- *                 example: "Swift code or reference"
+ *                 enum: [add, update, delete]
+ *                 description: The action to perform
+ *               bankAccount:
+ *                 type: object
+ *                 properties:
+ *                   _id:
+ *                     type: string
+ *                     description: Bank account ID (required for update/delete)
+ *                   bankName:
+ *                     type: string
+ *                   accountNumber:
+ *                     type: string
+ *                   accountHolderName:
+ *                     type: string
+ *                   bankCode:
+ *                     type: string
+ *                   additionalInfo:
+ *                     type: string
  *     responses:
  *       200:
- *         description: Bank account updated successfully
+ *         description: Operation successful
  *       403:
  *         description: Admin access required
  *       500:
- *         description: Failed to update bank account info
+ *         description: Failed to perform operation
  */
 router.put('/bank-account', async (req, res) => {
   if (!requireAdmin(req, res)) {
@@ -259,39 +252,86 @@ router.put('/bank-account', async (req, res) => {
   try {
     const { SiteSetting } = req.dbModels;
     const userId = req.auth?.userId || null;
+    const { action, bankAccount } = req.body;
 
-    const bankAccountInfo = {
-      bankName: req.body?.bankName || '',
-      accountNumber: req.body?.accountNumber || '',
-      accountHolderName: req.body?.accountHolderName || '',
-      bankCode: req.body?.bankCode || '',
-      additionalInfo: req.body?.additionalInfo || '',
-    };
+    if (!action || !['add', 'update', 'delete'].includes(action)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid action. Must be add, update, or delete.',
+      });
+    }
 
-    const setting = await SiteSetting.findOneAndUpdate(
-      { key: BANK_ACCOUNT_SETTING_KEY },
-      {
-        $set: {
-          key: BANK_ACCOUNT_SETTING_KEY,
-          bankAccountInfo,
-          updatedBy: userId,
-        },
-      },
-      {
-        upsert: true,
-        new: true,
-        setDefaultsOnInsert: true,
-      },
-    );
+    let setting = await SiteSetting.findOne({ key: BANK_ACCOUNT_SETTING_KEY });
+
+    if (!setting) {
+      setting = new SiteSetting({
+        key: BANK_ACCOUNT_SETTING_KEY,
+        bankAccounts: [],
+        updatedBy: userId,
+      });
+    }
+
+    if (!Array.isArray(setting.bankAccounts)) {
+      setting.bankAccounts = [];
+    }
+
+    if (action === 'add') {
+      const newBank = {
+        _id: new require('mongoose').Types.ObjectId(),
+        bankName: bankAccount?.bankName || '',
+        accountNumber: bankAccount?.accountNumber || '',
+        accountHolderName: bankAccount?.accountHolderName || '',
+        bankCode: bankAccount?.bankCode || '',
+        additionalInfo: bankAccount?.additionalInfo || '',
+        isActive: true,
+      };
+      setting.bankAccounts.push(newBank);
+    } else if (action === 'update') {
+      if (!bankAccount?._id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Bank account ID is required for update action.',
+        });
+      }
+      const bankIndex = setting.bankAccounts.findIndex(
+        (b) => b._id.toString() === bankAccount._id.toString()
+      );
+      if (bankIndex === -1) {
+        return res.status(404).json({
+          success: false,
+          message: 'Bank account not found.',
+        });
+      }
+      setting.bankAccounts[bankIndex] = {
+        ...setting.bankAccounts[bankIndex],
+        bankName: bankAccount?.bankName || setting.bankAccounts[bankIndex].bankName,
+        accountNumber: bankAccount?.accountNumber || setting.bankAccounts[bankIndex].accountNumber,
+        accountHolderName: bankAccount?.accountHolderName || setting.bankAccounts[bankIndex].accountHolderName,
+        bankCode: bankAccount?.bankCode || setting.bankAccounts[bankIndex].bankCode,
+        additionalInfo: bankAccount?.additionalInfo || setting.bankAccounts[bankIndex].additionalInfo,
+        isActive: bankAccount?.isActive !== undefined ? bankAccount.isActive : setting.bankAccounts[bankIndex].isActive,
+      };
+    } else if (action === 'delete') {
+      if (!bankAccount?._id) {
+        return res.status(400).json({
+          success: false,
+          message: 'Bank account ID is required for delete action.',
+        });
+      }
+      setting.bankAccounts = setting.bankAccounts.filter(
+        (b) => b._id.toString() !== bankAccount._id.toString()
+      );
+    }
+
+    setting.updatedBy = userId;
+    await setting.save();
+
+    const activeBankAccounts = setting.bankAccounts.filter(bank => bank.isActive !== false);
 
     return res.status(200).json({
       success: true,
-      message: 'Bank account information updated successfully.',
-      bankName: setting.bankAccountInfo?.bankName || '',
-      accountNumber: setting.bankAccountInfo?.accountNumber || '',
-      accountHolderName: setting.bankAccountInfo?.accountHolderName || '',
-      bankCode: setting.bankAccountInfo?.bankCode || '',
-      additionalInfo: setting.bankAccountInfo?.additionalInfo || '',
+      message: `Bank account ${action}ed successfully.`,
+      bankAccounts: activeBankAccounts,
       updatedAt: setting.updatedAt,
     });
   } catch (error) {
