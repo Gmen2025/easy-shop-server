@@ -47,6 +47,52 @@ const orderSchema = new mongoose.Schema({
         type: String,
         default: ''
     },
+    paymentMeta: {
+        bankName: {
+            type: String,
+            default: ''
+        },
+        senderName: {
+            type: String,
+            default: ''
+        },
+        transferReference: {
+            type: String,
+            default: ''
+        },
+        submittedAt: {
+            type: Date,
+            default: null
+        },
+        provider: {
+            type: String,
+            default: ''
+        },
+        paymentStatus: {
+            type: String,
+            default: ''
+        },
+        transactionId: {
+            type: String,
+            default: ''
+        }
+    },
+    bankName: {
+        type: String,
+        default: ''
+    },
+    senderName: {
+        type: String,
+        default: ''
+    },
+    transferReference: {
+        type: String,
+        default: ''
+    },
+    paymentNote: {
+        type: String,
+        default: ''
+    },
     paymentProvider: {
         type: String,
         default: ''

@@ -44,6 +44,32 @@ const isValidEmail = (value) => {
   return email.includes("@") && !email.includes(" ");
 };
 
+const buildPaymentDetailsEmailLines = (order) => {
+  const lines = [];
+  const paymentMethod = String(order?.paymentMethod || "").trim();
+
+  if (paymentMethod) {
+    lines.push(`Payment Method: ${paymentMethod}`);
+  }
+
+  if (String(paymentMethod).toLowerCase() === "bank transfer") {
+    if (order?.bankName) {
+      lines.push(`Bank Name: ${order.bankName}`);
+    }
+    if (order?.senderName) {
+      lines.push(`Sender Name: ${order.senderName}`);
+    }
+    if (order?.transferReference) {
+      lines.push(`Transfer Reference: ${order.transferReference}`);
+    }
+    if (order?.paymentNote) {
+      lines.push(`Payment Note: ${order.paymentNote}`);
+    }
+  }
+
+  return lines.length > 0 ? lines.join("\n") : "Payment details unavailable.";
+};
+
 const buildOrderItemsEmailLines = (orderItems = []) => {
   if (!Array.isArray(orderItems) || orderItems.length === 0) {
     return "No item details available.";
@@ -285,6 +311,29 @@ router.post(`/`, async (req, res) => {
     totalPrice += product.price * orderItem.quantity;
   }
 
+  const incomingPaymentMeta =
+    req.body.paymentMeta && typeof req.body.paymentMeta === "object"
+      ? req.body.paymentMeta
+      : {};
+
+  const paymentMethod =
+    req.body.paymentMethod || incomingPaymentMeta.paymentMethod || "";
+  const bankName =
+    req.body.bankName ||
+    incomingPaymentMeta.bankName ||
+    incomingPaymentMeta.bank ||
+    "";
+  const senderName =
+    req.body.senderName ||
+    incomingPaymentMeta.senderName ||
+    incomingPaymentMeta.sender ||
+    "";
+  const transferReference =
+    req.body.transferReference ||
+    incomingPaymentMeta.transferReference ||
+    incomingPaymentMeta.reference ||
+    "";
+
   // Create a new Order document with the resolved OrderItem IDs
   const order = new Order({
     orderItems: orderItemsIDSResolved,
@@ -296,6 +345,23 @@ router.post(`/`, async (req, res) => {
     phone: req.body.phone,
     customerEmail,
     status: req.body.status,
+    paymentMethod,
+    paymentMeta: {
+      bankName,
+      senderName,
+      transferReference,
+      submittedAt: incomingPaymentMeta.submittedAt || null,
+      provider:
+        incomingPaymentMeta.provider || req.body.paymentProvider || paymentMethod || "",
+      paymentStatus: incomingPaymentMeta.paymentStatus || "",
+      transactionId: incomingPaymentMeta.transactionId || "",
+    },
+    bankName,
+    senderName,
+    transferReference,
+    paymentNote: req.body.paymentNote || "",
+    paymentProvider:
+      req.body.paymentProvider || incomingPaymentMeta.provider || paymentMethod || "",
     totalPrice: totalPrice,
     user: orderUserId,
   });
@@ -339,6 +405,7 @@ router.post(`/`, async (req, res) => {
       req.body.email ||
       null;
     const recipientName = orderUser?.name || "Customer";
+    const paymentDetailsText = buildPaymentDetailsEmailLines(ord);
 
     if (!recipientEmail) {
       console.warn("[Order:Created] Email skipped: missing user email", {
@@ -359,6 +426,7 @@ router.post(`/`, async (req, res) => {
       subject: "New Order Placed", // Subject line
       text: `A new order has been placed with total price: $${ord.totalPrice}.
               Dear ${recipientName},\n\nThank you for your order #${ord._id}.
+              \n\n${paymentDetailsText}
                \n\n if you have any questions, contact us at ${"girmahalie2026@gmail.com"}
               and/or call us at +251954141473 
               \n\n we will get back to you as soon as possible!  
