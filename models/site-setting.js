@@ -13,6 +13,16 @@ const siteSettingSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    bankAccountInfo: {
+      type: {
+        bankName: String,
+        accountNumber: String,
+        accountHolderName: String,
+        bankCode: String,
+        additionalInfo: String,
+      },
+      default: {},
+    },
     updatedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',
