@@ -186,8 +186,16 @@ router.get('/bank-account', async (req, res) => {
       .select('bankAccountInfo updatedAt')
       .lean();
 
+    // Check if bank account info has any actual data
+    const hasData = !!(
+      setting?.bankAccountInfo?.bankName ||
+      setting?.bankAccountInfo?.accountNumber ||
+      setting?.bankAccountInfo?.accountHolderName
+    );
+
     return res.status(200).json({
       success: true,
+      hasData: hasData,
       bankName: setting?.bankAccountInfo?.bankName || '',
       accountNumber: setting?.bankAccountInfo?.accountNumber || '',
       accountHolderName: setting?.bankAccountInfo?.accountHolderName || '',
