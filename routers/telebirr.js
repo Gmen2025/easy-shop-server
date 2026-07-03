@@ -8,27 +8,32 @@ const { Order } = require('../models/order');
 const paymentStatusStore = new Map();
 const pendingTelebirrRequests = new Map();
 
-function delay(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function toTelebirrLinks(value) {
+  const url = value?.checkout_url || value?.payment_url || value?.paymentUrl || '';
+  if (!url) {
+    return {
+      paymentUrl: '',
+      payment_url: '',
+      checkout_url: '',
+    };
+  }
+  return {
+    paymentUrl: url,
+    payment_url: url,
+    checkout_url: url,
+  };
 }
 
-async function waitForInitiationResult(requestId, timeoutMs = 8000, pollIntervalMs = 250) {
-  const startedAt = Date.now();
-
-  while (Date.now() - startedAt < timeoutMs) {
-    const current = pendingTelebirrRequests.get(requestId);
-    if (!current) {
-      return null;
-    }
-
-    if (current.status === 'ready' || current.status === 'failed') {
-      return current;
-    }
-
-    await delay(pollIntervalMs);
+function findPendingByOrderId(orderId) {
+  if (!orderId) {
+    return null;
   }
-
-  return pendingTelebirrRequests.get(requestId) || null;
+  for (const entry of pendingTelebirrRequests.values()) {
+    if (entry?.orderId === orderId) {
+      return entry;
+    }
+  }
+  return null;
 }
 
 function classifyTelebirrError(error) {
@@ -187,7 +192,7 @@ async function persistOrderPaymentStatus(orderId, transactionId, normalizedStatu
 // Create/Initiate Telebirr payment
 router.post('/initiate-payment', async (req, res) => {
   try {
-    const { amount, phoneNumber, orderId, customerName, description } = req.body;
+    const { amount, phoneNumber, orderId, customerName, description, clientType, platform } = req.body;
 
     // Validate required fields
     if (!amount || !phoneNumber || !customerName) {
@@ -257,118 +262,85 @@ router.post('/initiate-payment', async (req, res) => {
     // REAL TELEBIRR SERVICE (only runs if USE_MOCK_TELEBIRR=false)
     console.log('🔄 Using REAL Telebirr service...');
 
-    pendingTelebirrRequests.set(requestId, {
+    const orderData = {
+      title: description || `Payment for ${customerName}`,
+      amount: amount,
+      clientType: clientType || platform || 'web',
+    };
+
+    const serviceReq = {
+      body: {
+        title: orderData.title,
+        amount: orderData.amount,
+        clientType: orderData.clientType,
+      }
+    };
+
+    let paymentResult = null;
+    const serviceRes = {
+      json: (data) => {
+        paymentResult = data;
+      },
+      status: () => ({
+        json: (data) => {
+          throw new Error(data.error || 'Payment creation failed');
+        }
+      })
+    };
+
+    await createOrderService.createOrder(serviceReq, serviceRes);
+
+    const transactionId = paymentResult.prepay_id;
+    const urls = toTelebirrLinks(paymentResult);
+
+    const readyState = {
       requestId,
       orderId: finalOrderId,
       amount,
       phoneNumber,
       customerName,
       description,
-      status: 'processing',
+      status: 'ready',
       createdAt: new Date().toISOString(),
+      prepayId: paymentResult.prepay_id,
+      transactionId,
+      ...urls,
+    };
+
+    pendingTelebirrRequests.set(requestId, readyState);
+
+    paymentStatusStore.set(transactionId, {
+      transactionId,
+      orderId: finalOrderId,
+      status: 'pending',
+      timestamp: new Date().toISOString(),
+      isMock: false,
+      prepayId: paymentResult.prepay_id,
+      requestId,
+      ...urls,
     });
 
-    setImmediate(async () => {
-      try {
-        const orderData = {
-          title: description || `Payment for ${customerName}`,
-          amount: amount,
-          platform: 'mobile'
-        };
-
-        const serviceReq = {
-          body: {
-            title: orderData.title,
-            amount: orderData.amount,
-            platform: orderData.platform
-          }
-        };
-
-        let paymentResult = null;
-        const serviceRes = {
-          json: (data) => {
-            paymentResult = data;
-          },
-          status: (code) => ({
-            json: (data) => {
-              throw new Error(data.error || 'Payment creation failed');
-            }
-          })
-        };
-
-        await createOrderService.createOrder(serviceReq, serviceRes);
-
-        const transactionId = paymentResult.prepay_id;
-
-        paymentStatusStore.set(transactionId, {
-          transactionId,
-          orderId: finalOrderId,
-          status: 'pending',
-          timestamp: new Date().toISOString(),
-          isMock: false,
-        });
-
-        pendingTelebirrRequests.set(requestId, {
-          requestId,
-          orderId: finalOrderId,
-          amount,
-          phoneNumber,
-          customerName,
-          description,
-          status: 'ready',
-          createdAt: pendingTelebirrRequests.get(requestId)?.createdAt || new Date().toISOString(),
-          paymentUrl: paymentResult.payment_url || paymentResult.checkout_url || paymentResult.paymentUrl,
-          payment_url: paymentResult.payment_url || paymentResult.checkout_url || paymentResult.paymentUrl,
-          checkout_url: paymentResult.checkout_url || paymentResult.payment_url || paymentResult.paymentUrl,
-          prepayId: paymentResult.prepay_id,
-          transactionId,
-        });
-      } catch (error) {
-        console.error('❌ Background Telebirr initiation error:', error);
-        pendingTelebirrRequests.set(requestId, {
-          requestId,
-          orderId: finalOrderId,
-          amount,
-          phoneNumber,
-          customerName,
-          description,
-          status: 'failed',
-          createdAt: pendingTelebirrRequests.get(requestId)?.createdAt || new Date().toISOString(),
-          error: error?.message || 'Payment creation failed',
-        });
-      }
+    paymentStatusStore.set(finalOrderId, {
+      transactionId,
+      orderId: finalOrderId,
+      status: 'pending',
+      timestamp: new Date().toISOString(),
+      isMock: false,
+      prepayId: paymentResult.prepay_id,
+      requestId,
+      ...urls,
     });
 
-    const readyState = await waitForInitiationResult(requestId);
-
-    if (readyState?.status === 'ready') {
-      return res.status(200).json({
-        success: true,
-        message: 'Payment initiated successfully',
-        data: readyState,
-      });
-    }
-
-    if (readyState?.status === 'failed') {
-      return res.status(500).json({
-        success: false,
-        message: readyState.error || 'Payment creation failed',
-        data: {
-          requestId,
-          orderId: finalOrderId,
-          status: 'failed',
-        },
-      });
-    }
-
-    return res.status(202).json({
+    return res.status(200).json({
       success: true,
-      message: 'Payment is being prepared. Please retry in a few seconds.',
-      data: {
-        requestId,
-        orderId: finalOrderId,
-        status: 'processing',
-      },
+      message: 'Payment initiated successfully',
+      data: readyState,
+      ...urls,
+      prepay_id: paymentResult.prepay_id,
+      transactionId,
+      requestId,
+      orderId: finalOrderId,
+      status: 'pending',
     });
 
   } catch (error) {
@@ -411,12 +383,15 @@ router.post('/initiate-payment', async (req, res) => {
  *         description: Verification failed
  */
 // Verify payment status
-router.post('/verify-payment', async (req, res) => {
+async function verifyPaymentHandler(req, res) {
   try {
     console.log('📋 Verify payment request body:', req.body);
     console.log('📋 Verify payment headers:', req.headers);
-    
-    const { transactionId, orderId } = req.body;
+
+    const payload = req.body?.payload || {};
+    const requestId = req.body?.requestId || payload.requestId;
+    const transactionId = req.body?.transactionId || payload.transactionId;
+    const orderId = req.body?.orderId || payload.orderId;
 
     if (!transactionId && !orderId) {
       console.log('❌ Missing required fields:', { transactionId, orderId });
@@ -455,7 +430,10 @@ router.post('/verify-payment', async (req, res) => {
     }
 
     const lookupKey = transactionId || orderId;
-    const stored = lookupKey ? paymentStatusStore.get(lookupKey) : null;
+    const storedByDirectKey = lookupKey ? paymentStatusStore.get(lookupKey) : null;
+    const storedByRequest = requestId ? pendingTelebirrRequests.get(requestId) : null;
+    const storedByOrder = orderId ? findPendingByOrderId(orderId) : null;
+    const stored = storedByDirectKey || storedByRequest || storedByOrder;
 
     if (!stored) {
       return res.status(202).json({
@@ -464,16 +442,23 @@ router.post('/verify-payment', async (req, res) => {
         data: {
           transactionId,
           orderId,
+          requestId,
           status: 'pending',
           timestamp: new Date().toISOString(),
         },
       });
     }
 
+    const urls = toTelebirrLinks(stored);
+
     return res.json({
       success: true,
       message: 'Payment verification fetched',
-      data: stored,
+      data: {
+        ...stored,
+        ...urls,
+      },
+      ...urls,
     });
 
   } catch (error) {
@@ -483,6 +468,16 @@ router.post('/verify-payment', async (req, res) => {
       message: 'Failed to verify payment'
     });
   }
+}
+
+router.post('/verify-payment', verifyPaymentHandler);
+router.post('/verify', verifyPaymentHandler);
+router.post('/check-status', verifyPaymentHandler);
+router.post('/payment-status', verifyPaymentHandler);
+
+router.get('/verify/:transactionId', (req, res) => {
+  req.body = { ...(req.body || {}), transactionId: req.params.transactionId };
+  return verifyPaymentHandler(req, res);
 });
 
 /**
