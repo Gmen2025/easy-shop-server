@@ -538,7 +538,7 @@ router.get("/verify-email", async (req, res) => {
           <h1>❌ Verification Failed</h1>
           <p>Verification token is required.</p>
           <a href="${
-            getFrontendBaseUrl()
+            getFrontendBaseUrl(req)
           }" class="button">Go to Homepage</a>
         </div>
       </body>
@@ -803,7 +803,8 @@ router.post("/forgot-password", async (req, res) => {
     const baseUrl = (process.env.BACKEND_URL || `${protocol}://${host}`).replace(/\/$/, "");
     const apiBase = (process.env.API_URL || "/api/v1").trim();
 
-    const resetUrl = `${baseUrl}${apiBase}/users/reset-password?token=${resetToken}&email=${encodeURIComponent(email)}`;
+    const dbQuery = req.dbName ? `&db=${encodeURIComponent(req.dbName)}` : "";
+    const resetUrl = `${baseUrl}${apiBase}/users/reset-password?token=${resetToken}&email=${encodeURIComponent(email)}${dbQuery}`;
 
     console.log('Generated reset URL:', resetUrl);
     console.log('Request host:', host);
@@ -1068,7 +1069,7 @@ router.post("/reset-password", async (req, res) => {
               <p>Your password has been successfully reset.</p>
               <p>You can now log in to your account with your new password.</p>
               <a href="${
-                getFrontendBaseUrl()
+                getFrontendBaseUrl(req)
               }/login" class="button">Go to Login</a>
               <p><strong>If you didn't reset your password, please contact our support team immediately.</strong></p>
             </div>
@@ -1105,6 +1106,7 @@ router.post("/reset-password", async (req, res) => {
 // GET /users/reset-password - HTML page for password reset
 router.get("/reset-password", async (req, res) => {
   const { token, email } = req.query;
+  const dbName = req.dbName;
 
   console.log("Reset password GET request:", { token, email });
 
@@ -1169,7 +1171,7 @@ router.get("/reset-password", async (req, res) => {
           <div class="error">
             <h1>⏰ Reset Link Expired</h1>
             <p>This password reset link has expired or is invalid.</p>
-            <a href="${getFrontendBaseUrl()}/forgot-password" class="button">Request New Reset Link</a>
+            <a href="${getFrontendBaseUrl(req)}/forgot-password" class="button">Request New Reset Link</a>
           </div>
         </body>
         </html>
@@ -1180,7 +1182,7 @@ router.get("/reset-password", async (req, res) => {
 
     // Use a same-origin relative API path to avoid mixed-content issues behind proxies.
     const apiBase = (process.env.API_URL || "/api/v1").trim();
-    const apiUrl = `${apiBase}/users/reset-password`;
+    const apiUrl = `${apiBase}/users/reset-password${dbName ? `?db=${encodeURIComponent(dbName)}` : ""}`;
 
     res.send(`
       <!DOCTYPE html>
@@ -1382,7 +1384,7 @@ router.get("/reset-password", async (req, res) => {
                 
                 // Redirect to login after 2 seconds
                 setTimeout(() => {
-                  window.location.href = '${getFrontendBaseUrl()}/login';
+                  window.location.href = '${getFrontendBaseUrl(req)}/login';
                 }, 2000);
               } else {
                 showMessage('❌ ' + (data.message || 'Failed to reset password. Please try again.'), 'error');

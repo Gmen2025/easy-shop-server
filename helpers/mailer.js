@@ -374,8 +374,17 @@ async function verifyMailerConnection(context = "startup") {
   }
 }
 
-function getFrontendBaseUrl() {
-  const raw = envValue("FRONTEND_PUBLIC_URL") || envValue("FRONTEND_URL") || "http://localhost:3000";
+function getFrontendBaseUrl(req) {
+  const protocol = req?.protocol || "http";
+  const host = req?.get?.("host") || "";
+  const requestOrigin = host ? `${protocol}://${host}` : "";
+
+  const raw =
+    envValue("FRONTEND_PUBLIC_URL") ||
+    envValue("FRONTEND_URL") ||
+    envValue("BACKEND_URL") ||
+    requestOrigin ||
+    "http://localhost:3000";
 
   return raw
     .replace(/\/api\/v\d+\/users\/?$/i, "")
