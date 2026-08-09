@@ -118,6 +118,44 @@ const orderSchema = new mongoose.Schema({
         type: Date,
         default: null
     },
+    deliveryMode: {
+        type: String,
+        enum: ['SAME_DAY', 'NEXT_DAY', 'SCHEDULED'],
+        default: 'SAME_DAY'
+    },
+    deliveryFee: {
+        type: Number,
+        default: 0
+    },
+    deliveryDistanceKm: {
+        type: Number,
+        default: 0
+    },
+    scheduledFor: {
+        type: Date,
+        default: null
+    },
+    deliveryWindowStart: {
+        type: Date,
+        default: null
+    },
+    deliveryWindowEnd: {
+        type: Date,
+        default: null
+    },
+    dispatchStatus: {
+        type: String,
+        enum: ['pending_assignment', 'scheduled', 'driver_assigned', 'pickup_in_progress', 'on_the_way', 'delivered', 'assignment_failed'],
+        default: 'pending_assignment'
+    },
+    dispatchPriority: {
+        type: Number,
+        default: 100
+    },
+    itemsSubtotal: {
+        type: Number,
+        default: 0
+    },
     totalPrice: {
         type: Number
     },
