@@ -121,6 +121,8 @@ const cloudinaryRouter = require('./routers/cloudinary');
 const databaseRouter = require('./routers/database');
 const notificationsRouter = require('./routers/notifications');
 const settingsRouter = require('./routers/settings');
+const storesRouter = require('./routers/stores');
+const driversRouter = require('./routers/drivers');
 
 
 //Middleware
@@ -165,6 +167,8 @@ app.use(`${api}/telebirr`, telebirrRouter);
 app.use(`${api}/cloudinary`, cloudinaryRouter);
 app.use(`${api}/database`, databaseRouter);
 app.use(`${api}/settings`, settingsRouter);
+app.use(`${api}/stores`, storesRouter);
+app.use(`${api}/drivers`, driversRouter);
 // Notifications: push-token sub-routes live under /users, send/health under /notifications
 app.use(`${api}/notifications`, notificationsRouter);
 app.use(`${api}/users`, notificationsRouter);

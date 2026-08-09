@@ -90,7 +90,9 @@ router.get(`/`, async(req, res) => {
         
         console.log('Products filter:', filter);
         
-        const productList = await Product.find(filter).populate('category');
+        const productList = await Product.find(filter)
+            .populate('category')
+            .populate('store', 'name address location');
         
         if (!productList) {
             res.status(500).json({ success: false });
@@ -123,7 +125,9 @@ router.get(`/`, async(req, res) => {
  */
  router.get('/:id', async(req, res) => {
      const { Product } = req.dbModels;
-    const product = await Product.findById(req.params.id).populate('category');
+        const product = await Product.findById(req.params.id)
+            .populate('category')
+            .populate('store', 'name address location');
  
     if(!product) {
         res.status(500).json({message: 'The product with the given ID was not found.'})
@@ -188,7 +192,7 @@ router.get(`/`, async(req, res) => {
  */
 //Create a new product
 router.post(`/`, uploadOptions.single('image'), async(req, res) => {
-const { Product, Category } = req.dbModels;
+const { Product, Category, Store } = req.dbModels;
 
 const category = await Category.findById(req.body.category);
 if(!category) return res.status(400).send('Invalid Category');
@@ -199,6 +203,17 @@ const imagePath = getUploadedFileUrl(file) || bodyImage;
 
 if(!imagePath) return res.status(400).send('No image in the request');
 
+if (req.body.store) {
+    if (!mongoose.isValidObjectId(req.body.store)) {
+        return res.status(400).send('Invalid Store');
+    }
+
+    const store = await Store.findById(req.body.store);
+    if (!store) {
+        return res.status(400).send('Store not found');
+    }
+}
+
     const product = new Product({
         name: req.body.name,
         description: req.body.description,
@@ -208,6 +223,7 @@ if(!imagePath) return res.status(400).send('No image in the request');
         brand: req.body.brand,
         price: req.body.price,
         category: req.body.category,
+        store: req.body.store || null,
         countInStock: req.body.countInStock,
         rating: req.body.rating,
         numReviews: req.body.numReviews,
@@ -283,7 +299,7 @@ if(!imagePath) return res.status(400).send('No image in the request');
  */
 //Update a product
 router.put('/:id', uploadOptions.single('image'), async(req, res) => {
-    const { Product, Category } = req.dbModels;
+    const { Product, Category, Store } = req.dbModels;
     if(!mongoose.isValidObjectId(req.params.id)) {
         return res.status(400).send('Invalid Product Id')
     }
@@ -298,6 +314,19 @@ router.put('/:id', uploadOptions.single('image'), async(req, res) => {
     const bodyImage = normalizeImageInput(req.body.image);
     const imagePath = getUploadedFileUrl(file) || bodyImage || product.image;
 
+    if (req.body.store !== undefined && req.body.store !== null && req.body.store !== '') {
+        if (!mongoose.isValidObjectId(req.body.store)) {
+            return res.status(400).send('Invalid Store');
+        }
+
+        const store = await Store.findById(req.body.store);
+        if (!store) {
+            return res.status(400).send('Store not found');
+        }
+    }
+
+    const resolvedStore = req.body.store === '' ? null : (req.body.store !== undefined ? req.body.store : product.store);
+
     const updatedProduct = await Product.findByIdAndUpdate(req.params.id, {
         name: req.body.name,
         description: req.body.description,
@@ -307,6 +336,7 @@ router.put('/:id', uploadOptions.single('image'), async(req, res) => {
         brand: req.body.brand,
         price: req.body.price,
         category: req.body.category,
+        store: resolvedStore,
         countInStock: req.body.countInStock,
         rating: req.body.rating,
         numReviews: req.body.numReviews,

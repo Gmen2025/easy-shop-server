@@ -1,5 +1,6 @@
 const express = require("express");
 const router = require("express").Router();
+const mongoose = require("mongoose");
 
 // For sending emails and SMS
 //const Preview = require('twilio/lib/rest/Preview');
@@ -9,6 +10,8 @@ const { sendMailSafe } = require("../helpers/mailer");
 const { resolveDeliveryPlan } = require("../helpers/delivery");
 
 const expo = new Expo();
+
+const ALLOWED_DELIVERY_STATUSES = ["Pending", "Driver Assigned", "Picked Up", "Delivered"];
 
 const STATUS_LABELS = {
   0: 'Pending',
@@ -169,6 +172,9 @@ router.get(`/`, async (req, res) => {
   const { Order } = req.dbModels;
   const orderList = await Order.find()
     .populate("user", "name email phone")
+    .populate("customer", "name email phone")
+    .populate("store", "name address location")
+    .populate("driver", "name isAvailable vehicleType location")
     .populate({
       path: "orderItems",
       populate: {
@@ -211,6 +217,9 @@ router.get(`/:id`, async (req, res) => {
   const { Order } = req.dbModels;
   const order = await Order.findById(req.params.id)
     .populate("user", "name")
+    .populate("customer", "name email phone")
+    .populate("store", "name address location")
+    .populate("driver", "name isAvailable vehicleType location")
     .populate({
       path: "orderItems",
       populate: {
@@ -308,7 +317,7 @@ router.get(`/:id`, async (req, res) => {
  */
 // Create a new order
 router.post(`/`, async (req, res) => {
-  const { Order, OrderItem, Product, User } = req.dbModels;
+  const { Order, OrderItem, Product, User, Store, Driver } = req.dbModels;
   const authenticatedUserId = req.auth?.userId;
   const orderUserId = authenticatedUserId || req.body.user;
 
@@ -317,6 +326,56 @@ router.post(`/`, async (req, res) => {
       success: false,
       message: "User is required to create an order.",
     });
+  }
+
+  const requestedStoreId = req.body.store;
+  const requestedDriverId = req.body.driver;
+  const requestedDeliveryStatus = req.body.deliveryStatus;
+
+  if (
+    requestedDeliveryStatus !== undefined &&
+    !ALLOWED_DELIVERY_STATUSES.includes(String(requestedDeliveryStatus))
+  ) {
+    return res.status(400).json({
+      success: false,
+      message: `deliveryStatus must be one of: ${ALLOWED_DELIVERY_STATUSES.join(", ")}`,
+    });
+  }
+
+  let validatedStore = null;
+  if (requestedStoreId !== undefined && requestedStoreId !== null && requestedStoreId !== "") {
+    if (!mongoose.isValidObjectId(requestedStoreId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid store id.",
+      });
+    }
+
+    validatedStore = await Store.findById(requestedStoreId).select("_id");
+    if (!validatedStore) {
+      return res.status(400).json({
+        success: false,
+        message: "Store not found.",
+      });
+    }
+  }
+
+  let validatedDriver = null;
+  if (requestedDriverId !== undefined && requestedDriverId !== null && requestedDriverId !== "") {
+    if (!mongoose.isValidObjectId(requestedDriverId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid driver id.",
+      });
+    }
+
+    validatedDriver = await Driver.findById(requestedDriverId).select("_id");
+    if (!validatedDriver) {
+      return res.status(400).json({
+        success: false,
+        message: "Driver not found.",
+      });
+    }
   }
 
   const orderUserRecord = await User.findById(orderUserId).select("email");
@@ -356,6 +415,7 @@ router.post(`/`, async (req, res) => {
 
   // Calculate total price
   let itemsSubtotal = 0;
+  let inferredStoreId = null;
   for (const orderItem of orderItemsDocs) {
     const product = await Product.findById(orderItem.product);
     if (!product) {
@@ -364,7 +424,13 @@ router.post(`/`, async (req, res) => {
         .send(`Product not found for order item: ${orderItem._id}`);
     }
     itemsSubtotal += product.price * orderItem.quantity;
+
+    if (!inferredStoreId && product.store) {
+      inferredStoreId = product.store;
+    }
   }
+
+  const resolvedStoreId = validatedStore?._id || inferredStoreId || null;
 
   const totalPrice = Number(itemsSubtotal) + Number(deliveryPlan.deliveryFee || 0);
 
@@ -433,9 +499,13 @@ router.post(`/`, async (req, res) => {
     deliveryWindowEnd: deliveryPlan.deliveryWindowEnd,
     dispatchStatus: deliveryPlan.dispatchStatus,
     dispatchPriority: deliveryPlan.dispatchPriority,
+    deliveryStatus: requestedDeliveryStatus || "Pending",
     itemsSubtotal,
     totalPrice: totalPrice,
     user: orderUserId,
+    customer: orderUserId,
+    store: resolvedStoreId,
+    driver: validatedDriver?._id || null,
   });
 
   // Save the Order document
@@ -624,6 +694,63 @@ router.put("/:id", async (req, res) => {
   // Build update object with allowed fields
   const updateFields = {};
   if (req.body.status !== undefined) updateFields.status = req.body.status;
+  if (req.body.customer !== undefined) updateFields.customer = req.body.customer;
+
+  if (req.body.deliveryStatus !== undefined) {
+    if (!ALLOWED_DELIVERY_STATUSES.includes(String(req.body.deliveryStatus))) {
+      return res.status(400).json({
+        success: false,
+        message: `deliveryStatus must be one of: ${ALLOWED_DELIVERY_STATUSES.join(", ")}`,
+      });
+    }
+    updateFields.deliveryStatus = req.body.deliveryStatus;
+  }
+
+  if (req.body.store !== undefined) {
+    if (req.body.store === null || req.body.store === "") {
+      updateFields.store = null;
+    } else {
+      if (!mongoose.isValidObjectId(req.body.store)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid store id.",
+        });
+      }
+
+      const storeRecord = await req.dbModels.Store.findById(req.body.store).select("_id");
+      if (!storeRecord) {
+        return res.status(400).json({
+          success: false,
+          message: "Store not found.",
+        });
+      }
+
+      updateFields.store = storeRecord._id;
+    }
+  }
+
+  if (req.body.driver !== undefined) {
+    if (req.body.driver === null || req.body.driver === "") {
+      updateFields.driver = null;
+    } else {
+      if (!mongoose.isValidObjectId(req.body.driver)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid driver id.",
+        });
+      }
+
+      const driverRecord = await req.dbModels.Driver.findById(req.body.driver).select("_id");
+      if (!driverRecord) {
+        return res.status(400).json({
+          success: false,
+          message: "Driver not found.",
+        });
+      }
+
+      updateFields.driver = driverRecord._id;
+    }
+  }
 
   // Include payment-related fields if provided
   if (req.body.paymentMethod !== undefined) updateFields.paymentMethod = req.body.paymentMethod;
@@ -708,6 +835,9 @@ router.put("/:id", async (req, res) => {
 
   order = await Order.findById(order._id)
     .populate("user", "name email phone")
+    .populate("customer", "name email phone")
+    .populate("store", "name address location")
+    .populate("driver", "name isAvailable vehicleType location")
     .populate({
       path: "orderItems",
       populate: {
@@ -1044,8 +1174,13 @@ router.get(`/get/count`, async (req, res) => {
 //User orders history
 router.get(`/get/userorders/:userid`, async (req, res) => {
   const { Order } = req.dbModels;
-  const userOrderList = await Order.find({ user: req.params.userid })
+  const userOrderList = await Order.find({
+    $or: [{ user: req.params.userid }, { customer: req.params.userid }],
+  })
     .populate("user", "name email phone")
+    .populate("customer", "name email phone")
+    .populate("store", "name address location")
+    .populate("driver", "name isAvailable vehicleType location")
     .populate({
       path: "orderItems",
       populate: {

@@ -30,6 +30,23 @@ const swaggerOptions = {
         }
       },
       schemas: {
+        GeoPoint: {
+          type: 'object',
+          properties: {
+            type: {
+              type: 'string',
+              enum: ['Point'],
+              default: 'Point'
+            },
+            coordinates: {
+              type: 'array',
+              minItems: 2,
+              maxItems: 2,
+              items: { type: 'number' },
+              description: '[longitude, latitude]'
+            }
+          }
+        },
         Product: {
           type: 'object',
           properties: {
@@ -50,11 +67,42 @@ const swaggerOptions = {
                 { $ref: '#/components/schemas/Category' }
               ]
             },
+            store: {
+              oneOf: [
+                { type: 'string' },
+                { $ref: '#/components/schemas/Store' }
+              ]
+            },
             countInStock: { type: 'number', minimum: 0, maximum: 255 },
             rating: { type: 'number', default: 0 },
             numReviews: { type: 'number', default: 0 },
             isFeatured: { type: 'boolean', default: false },
             dateCreated: { type: 'string', format: 'date-time' }
+          }
+        },
+        Store: {
+          type: 'object',
+          required: ['name', 'address'],
+          properties: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            address: { type: 'string' },
+            location: {
+              $ref: '#/components/schemas/GeoPoint'
+            }
+          }
+        },
+        Driver: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            id: { type: 'string' },
+            name: { type: 'string' },
+            isAvailable: { type: 'boolean', default: true },
+            vehicleType: { type: 'string' },
+            location: {
+              $ref: '#/components/schemas/GeoPoint'
+            }
           }
         },
         Category: {
@@ -94,6 +142,29 @@ const swaggerOptions = {
                 { type: 'string' },
                 { $ref: '#/components/schemas/User' }
               ]
+            },
+            customer: {
+              oneOf: [
+                { type: 'string' },
+                { $ref: '#/components/schemas/User' }
+              ]
+            },
+            store: {
+              oneOf: [
+                { type: 'string' },
+                { $ref: '#/components/schemas/Store' }
+              ]
+            },
+            driver: {
+              oneOf: [
+                { type: 'string' },
+                { $ref: '#/components/schemas/Driver' }
+              ]
+            },
+            deliveryStatus: {
+              type: 'string',
+              enum: ['Pending', 'Driver Assigned', 'Picked Up', 'Delivered'],
+              default: 'Pending'
             },
             dateOrdered: { type: 'string', format: 'date-time' }
           }
@@ -281,6 +352,8 @@ const swaggerOptions = {
       }
     },
     tags: [
+      { name: 'Stores', description: 'Store management endpoints with GeoJSON coordinates for delivery dispatching.' },
+      { name: 'Drivers', description: 'Driver management endpoints with availability and live GPS location.' },
       { name: 'Notifications', description: 'Push notification endpoints for device token management and admin message delivery.' },
       { name: 'Database', description: 'Multi-database switching endpoints — no authentication required. Use x-database-name header on all subsequent requests after switching.' },
       { name: 'Settings', description: 'Site-wide configuration endpoints for maintenance mode and other admin-only settings.' }

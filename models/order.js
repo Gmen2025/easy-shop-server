@@ -163,6 +163,26 @@ const orderSchema = new mongoose.Schema({
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
     },
+    customer: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        default: null
+    },
+    store: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Store',
+        default: null
+    },
+    driver: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Driver',
+        default: null
+    },
+    deliveryStatus: {
+        type: String,
+        enum: ['Pending', 'Driver Assigned', 'Picked Up', 'Delivered'],
+        default: 'Pending'
+    },
     dateOrdered: {
         type: Date,
         default: Date.now
