@@ -6,6 +6,7 @@ const router = require("express").Router();
 //const twilio = require("twilio");
 const { Expo } = require("expo-server-sdk");
 const { sendMailSafe } = require("../helpers/mailer");
+const { resolveDeliveryPlan } = require("../helpers/delivery");
 
 const expo = new Expo();
 
@@ -84,6 +85,27 @@ const buildOrderItemsEmailLines = (orderItems = []) => {
       return `${index + 1}. ${product?.name || "Unnamed item"}\n   Qty: ${quantity}\n   Price: ${price}\n   Subtotal: ${subtotal}`;
     })
     .join("\n\n");
+};
+
+const buildDeliveryDetailsEmailLines = (order) => {
+  const modeLabel = String(order?.deliveryMode || "SAME_DAY").replace(/_/g, " ");
+  const lines = [
+    `Delivery Mode: ${modeLabel}`,
+    `Delivery Fee: ${Number(order?.deliveryFee || 0)}`,
+  ];
+
+  if (order?.scheduledFor) {
+    lines.push(`Scheduled For: ${new Date(order.scheduledFor).toLocaleString()}`);
+  }
+  if (order?.deliveryWindowStart && order?.deliveryWindowEnd) {
+    lines.push(
+      `Delivery Window: ${new Date(order.deliveryWindowStart).toLocaleString()} - ${new Date(
+        order.deliveryWindowEnd
+      ).toLocaleString()}`
+    );
+  }
+
+  return lines.join("\n");
 };
 
 const sendPushToUser = async ({ User, userId, title, body, data = {} }) => {
@@ -263,6 +285,19 @@ router.get(`/:id`, async (req, res) => {
  *                 type: string
  *               senderName:
  *                 type: string
+ *               deliveryMode:
+ *                 type: string
+ *                 enum: [SAME_DAY, NEXT_DAY, SCHEDULED]
+ *                 default: SAME_DAY
+ *               deliveryDistanceKm:
+ *                 type: number
+ *               deliveryFee:
+ *                 type: number
+ *                 description: Optional override. If omitted, backend computes fee by delivery mode and distance.
+ *               scheduledFor:
+ *                 type: string
+ *                 format: date-time
+ *                 description: Required when deliveryMode is SCHEDULED.
  *               user:
  *                 type: string
  *     responses:
@@ -287,6 +322,16 @@ router.post(`/`, async (req, res) => {
   const orderUserRecord = await User.findById(orderUserId).select("email");
   const customerEmail =
     orderUserRecord?.email || req.body.customerEmail || req.body.email || "";
+
+  const deliveryPlanResult = resolveDeliveryPlan(req.body);
+  if (!deliveryPlanResult.ok) {
+    return res.status(400).json({
+      success: false,
+      message: deliveryPlanResult.error,
+    });
+  }
+  const deliveryPlan = deliveryPlanResult.value;
+
   // Create an array of promises for creating OrderItem documents
   const orderItemsIDS = Promise.all(
     req.body.orderItems.map(async (orderItem) => {
@@ -304,15 +349,13 @@ router.post(`/`, async (req, res) => {
   // Wait for all OrderItem documents to be created and get their IDs
   const orderItemsIDSResolved = await orderItemsIDS;
 
-  const orderItemsResolved = await orderItemsIDS;
-
   // Fetch all OrderItem documents by their IDs
   const orderItemsDocs = await OrderItem.find({
     _id: { $in: orderItemsIDSResolved },
   });
 
   // Calculate total price
-  let totalPrice = 0;
+  let itemsSubtotal = 0;
   for (const orderItem of orderItemsDocs) {
     const product = await Product.findById(orderItem.product);
     if (!product) {
@@ -320,8 +363,10 @@ router.post(`/`, async (req, res) => {
         .status(400)
         .send(`Product not found for order item: ${orderItem._id}`);
     }
-    totalPrice += product.price * orderItem.quantity;
+    itemsSubtotal += product.price * orderItem.quantity;
   }
+
+  const totalPrice = Number(itemsSubtotal) + Number(deliveryPlan.deliveryFee || 0);
 
   const incomingPaymentMeta =
     req.body.paymentMeta && typeof req.body.paymentMeta === "object"
@@ -380,6 +425,15 @@ router.post(`/`, async (req, res) => {
     paymentNote: req.body.paymentNote || "",
     paymentProvider:
       req.body.paymentProvider || incomingPaymentMeta.provider || paymentMethod || "",
+    deliveryMode: deliveryPlan.deliveryMode,
+    deliveryFee: deliveryPlan.deliveryFee,
+    deliveryDistanceKm: deliveryPlan.deliveryDistanceKm,
+    scheduledFor: deliveryPlan.scheduledFor,
+    deliveryWindowStart: deliveryPlan.deliveryWindowStart,
+    deliveryWindowEnd: deliveryPlan.deliveryWindowEnd,
+    dispatchStatus: deliveryPlan.dispatchStatus,
+    dispatchPriority: deliveryPlan.dispatchPriority,
+    itemsSubtotal,
     totalPrice: totalPrice,
     user: orderUserId,
   });
@@ -424,6 +478,7 @@ router.post(`/`, async (req, res) => {
       null;
     const recipientName = orderUser?.name || "Customer";
     const paymentDetailsText = buildPaymentDetailsEmailLines(ord);
+    const deliveryDetailsText = buildDeliveryDetailsEmailLines(ord);
 
     if (!recipientEmail) {
       console.warn("[Order:Created] Email skipped: missing user email", {
@@ -445,6 +500,7 @@ router.post(`/`, async (req, res) => {
       text: `A new order has been placed with total price: $${ord.totalPrice}.
               Dear ${recipientName},\n\nThank you for your order #${ord._id}.
               \n\n${paymentDetailsText}
+              \n\n${deliveryDetailsText}
                \n\n if you have any questions, contact us at ${"girmahalie2026@gmail.com"}
               and/or call us at +251954141473 
               \n\n we will get back to you as soon as possible!  
@@ -536,6 +592,20 @@ router.post(`/`, async (req, res) => {
  *                 type: string
  *               paymentStatus:
  *                 type: string
+ *               deliveryMode:
+ *                 type: string
+ *                 enum: [SAME_DAY, NEXT_DAY, SCHEDULED]
+ *               deliveryDistanceKm:
+ *                 type: number
+ *               deliveryFee:
+ *                 type: number
+ *               scheduledFor:
+ *                 type: string
+ *                 format: date-time
+ *               dispatchStatus:
+ *                 type: string
+ *               dispatchPriority:
+ *                 type: number
  *     responses:
  *       200:
  *         description: Order updated successfully
@@ -545,12 +615,16 @@ router.post(`/`, async (req, res) => {
 //updating order status
 router.put("/:id", async (req, res) => {
   const { Order, User } = req.dbModels;
-  
+
+  const existingOrder = await Order.findById(req.params.id);
+  if (!existingOrder) {
+    return res.status(400).send("the order cannot be updated!");
+  }
+
   // Build update object with allowed fields
-  const updateFields = {
-    status: req.body.status,
-  };
-  
+  const updateFields = {};
+  if (req.body.status !== undefined) updateFields.status = req.body.status;
+
   // Include payment-related fields if provided
   if (req.body.paymentMethod !== undefined) updateFields.paymentMethod = req.body.paymentMethod;
   if (req.body.methodName !== undefined) updateFields.methodName = req.body.methodName;
@@ -561,7 +635,66 @@ router.put("/:id", async (req, res) => {
   if (req.body.paymentNote !== undefined) updateFields.paymentNote = req.body.paymentNote;
   if (req.body.paymentProvider !== undefined) updateFields.paymentProvider = req.body.paymentProvider;
   if (req.body.paymentStatus !== undefined) updateFields.paymentStatus = req.body.paymentStatus;
-  
+
+  const hasDeliveryUpdate =
+    req.body.deliveryMode !== undefined ||
+    req.body.deliveryDistanceKm !== undefined ||
+    req.body.deliveryFee !== undefined ||
+    req.body.scheduledFor !== undefined;
+
+  if (hasDeliveryUpdate) {
+    const deliveryPlanResult = resolveDeliveryPlan(req.body, { currentOrder: existingOrder });
+    if (!deliveryPlanResult.ok) {
+      return res.status(400).json({
+        success: false,
+        message: deliveryPlanResult.error,
+      });
+    }
+
+    const deliveryPlan = deliveryPlanResult.value;
+    updateFields.deliveryMode = deliveryPlan.deliveryMode;
+    updateFields.deliveryFee = deliveryPlan.deliveryFee;
+    updateFields.deliveryDistanceKm = deliveryPlan.deliveryDistanceKm;
+    updateFields.scheduledFor = deliveryPlan.scheduledFor;
+    updateFields.deliveryWindowStart = deliveryPlan.deliveryWindowStart;
+    updateFields.deliveryWindowEnd = deliveryPlan.deliveryWindowEnd;
+    updateFields.dispatchStatus = deliveryPlan.dispatchStatus;
+    updateFields.dispatchPriority = deliveryPlan.dispatchPriority;
+
+    const persistedSubtotal = Number(existingOrder.itemsSubtotal || existingOrder.totalPrice || 0);
+    updateFields.totalPrice = persistedSubtotal + Number(deliveryPlan.deliveryFee || 0);
+  }
+
+  const allowedDispatchStatuses = [
+    "pending_assignment",
+    "scheduled",
+    "driver_assigned",
+    "pickup_in_progress",
+    "on_the_way",
+    "delivered",
+    "assignment_failed",
+  ];
+  if (req.body.dispatchStatus !== undefined) {
+    if (!allowedDispatchStatuses.includes(String(req.body.dispatchStatus))) {
+      return res.status(400).json({
+        success: false,
+        message: `dispatchStatus must be one of: ${allowedDispatchStatuses.join(", ")}`,
+      });
+    }
+    updateFields.dispatchStatus = req.body.dispatchStatus;
+  }
+
+  if (req.body.dispatchPriority !== undefined) {
+    const dispatchPriority = Number(req.body.dispatchPriority);
+    if (!Number.isFinite(dispatchPriority) || dispatchPriority < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "dispatchPriority must be a non-negative number.",
+      });
+    }
+    updateFields.dispatchPriority = dispatchPriority;
+  }
+
   let order = await Order.findByIdAndUpdate(
     req.params.id,
     updateFields,
@@ -610,11 +743,12 @@ router.put("/:id", async (req, res) => {
     const recipientEmail = orderUser?.email || order.customerEmail || null;
     if (recipientEmail) {
       const itemLines = buildOrderItemsEmailLines(order.orderItems);
+      const deliveryDetailsText = buildDeliveryDetailsEmailLines(order);
       const statusEmailResult = await sendMailSafe(
         {
           to: recipientEmail,
           subject: `Order #${order._id} status updated to ${statusText}`,
-          text: `Hello ${orderUser?.name || "Customer"},\n\nYour order #${order._id} status has been updated to: ${statusText}.\n\nOrder Date: ${new Date(order.dateOrdered || Date.now()).toLocaleString()}\n\nOrder Summary\nUser: ${orderUser?.name || "Customer"}\nEmail: ${recipientEmail || "N/A"}\nPhone: ${order.phone || orderUser?.phone || "N/A"}\nAddress 1: ${order.shippingAddress1 || "N/A"}\nAddress 2: ${order.shippingAddress2 || "N/A"}\nCity: ${order.city || "N/A"}\nZip: ${order.zip || "N/A"}\nCountry: ${order.country || "N/A"}\n\nItems\n${itemLines}\n\nTotal Subtotal: ${Number(order.totalPrice || 0)}\n\nThank you for shopping with us.`,
+          text: `Hello ${orderUser?.name || "Customer"},\n\nYour order #${order._id} status has been updated to: ${statusText}.\n\nOrder Date: ${new Date(order.dateOrdered || Date.now()).toLocaleString()}\n\nOrder Summary\nUser: ${orderUser?.name || "Customer"}\nEmail: ${recipientEmail || "N/A"}\nPhone: ${order.phone || orderUser?.phone || "N/A"}\nAddress 1: ${order.shippingAddress1 || "N/A"}\nAddress 2: ${order.shippingAddress2 || "N/A"}\nCity: ${order.city || "N/A"}\nZip: ${order.zip || "N/A"}\nCountry: ${order.country || "N/A"}\n\nItems\n${itemLines}\n\n${deliveryDetailsText}\n\nTotal Subtotal: ${Number(order.itemsSubtotal || 0)}\nTotal Price: ${Number(order.totalPrice || 0)}\n\nThank you for shopping with us.`,
         },
         "order_status_changed"
       );
