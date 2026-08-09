@@ -26,6 +26,7 @@
     "multer-storage-cloudinary": "^4.0.0",
     "nodemailer": "^7.0.7",
     "nodemon": "^3.1.9",
+    "socket.io": "^4.8.3",
     "stripe": "^19.1.0",
     "swagger-jsdoc": "^6.2.8",
     "swagger-ui-express": "^5.0.1",

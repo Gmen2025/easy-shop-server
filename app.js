@@ -3,6 +3,7 @@ const app = express();
 const morgan = require('morgan');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const { Server } = require('socket.io');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const authJwt = require('./helpers/jwt');
@@ -10,6 +11,7 @@ const errorHandler = require('./helpers/error-handler');
 const dbSelector = require('./helpers/db-selector');
 const { connectDefaultDatabase } = require('./helpers/db-manager');
 const { verifyMailerConnection } = require('./helpers/mailer');
+const { DRIVER_RESPONSE_EVENT } = require('./service/dispatchService');
 
 // Respect x-forwarded-* headers when running behind Render/reverse proxies.
 app.set('trust proxy', 1);
@@ -178,6 +180,8 @@ app.use(errorHandler);
 
 const PORT = process.env.PORT || 3001;
 
+app.set('io', null);
+
 function getConfiguredStripeEnvNames() {
   const stripeEnvPrefixes = ['STRIPE_KEY', 'STRIPE_SECRET_KEY', 'STRIPE_API_KEY'];
 
@@ -222,6 +226,50 @@ connectDefaultDatabase().then(() => {
         verifyMailerConnection('startup').catch((error) => {
           console.error('[Mail:startup] Unexpected verification error:', error?.message || error);
         });
+    });
+
+    const io = new Server(server, {
+      cors: {
+        origin(origin, callback) {
+          if (!origin || isOriginAllowed(origin)) {
+            return callback(null, true);
+          }
+          return callback(new Error('Not allowed by CORS'));
+        },
+        methods: ['GET', 'POST'],
+        credentials: true,
+      },
+    });
+
+    io.driverSocketMap = new Map();
+    app.set('io', io);
+
+    io.on('connection', (socket) => {
+      socket.on('register_driver', (payload = {}) => {
+        const driverId = String(payload.driverId || payload.userId || '').trim();
+        if (!driverId) return;
+
+        io.driverSocketMap.set(driverId, socket.id);
+        socket.data.driverId = driverId;
+        socket.join(`driver:${driverId}`);
+      });
+
+      socket.on(DRIVER_RESPONSE_EVENT, (payload = {}) => {
+        io.emit(DRIVER_RESPONSE_EVENT, {
+          ...payload,
+          socketId: socket.id,
+        });
+      });
+
+      socket.on('disconnect', () => {
+        const driverId = socket.data?.driverId;
+        if (!driverId) return;
+
+        const mappedSocketId = io.driverSocketMap.get(driverId);
+        if (mappedSocketId === socket.id) {
+          io.driverSocketMap.delete(driverId);
+        }
+      });
     });
     
     server.on('error', (err) => {

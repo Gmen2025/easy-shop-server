@@ -8,6 +8,7 @@ const mongoose = require("mongoose");
 const { Expo } = require("expo-server-sdk");
 const { sendMailSafe } = require("../helpers/mailer");
 const { resolveDeliveryPlan } = require("../helpers/delivery");
+const { assignDriverToOrder } = require("../service/dispatchService");
 
 const expo = new Expo();
 
@@ -109,6 +110,17 @@ const buildDeliveryDetailsEmailLines = (order) => {
   }
 
   return lines.join("\n");
+};
+
+const shouldAutoDispatchOrder = (order) => {
+  if (!order) return false;
+
+  const hasDriver = Boolean(order.driver);
+  if (hasDriver) return false;
+
+  const mode = String(order.deliveryMode || "");
+  const dispatchStatus = String(order.dispatchStatus || "");
+  return mode === "SAME_DAY" || dispatchStatus === "pending_assignment";
 };
 
 const sendPushToUser = async ({ User, userId, title, body, data = {} }) => {
@@ -510,6 +522,19 @@ router.post(`/`, async (req, res) => {
 
   // Save the Order document
   const ord = await order.save();
+
+  if (shouldAutoDispatchOrder(ord)) {
+    const io = req.app.get("io");
+    if (io) {
+      setImmediate(async () => {
+        try {
+          await assignDriverToOrder(String(ord._id), io, { dbName: req.dbName });
+        } catch (dispatchError) {
+          console.error("[Dispatch] Driver assignment failed:", dispatchError?.message || dispatchError);
+        }
+      });
+    }
+  }
 
   await sendPushToUser({
     User,
