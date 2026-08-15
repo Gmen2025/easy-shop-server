@@ -1,5 +1,6 @@
 const mongoose = require("mongoose");
 const { getModelsForDb, DEFAULT_DB_NAME } = require("../helpers/db-manager");
+const { sendPushToUser } = require("../helpers/push-notify");
 
 const DRIVER_RESPONSE_EVENT = "delivery_request_response";
 const DRIVER_REQUEST_EVENT = "new_delivery_request";
@@ -141,7 +142,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
   }
 
   const dbName = options.dbName || DEFAULT_DB_NAME;
-  const { Order, Driver, Store, Product } = getModelsForDb(dbName);
+  const { Order, Driver, Store, Product, User } = getModelsForDb(dbName);
 
   const attemptedDriverIds = new Set();
 
@@ -268,6 +269,17 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
     });
 
     if (decision.accepted) {
+      await sendPushToUser({
+        User,
+        userId: updatedOrder.user,
+        title: "Delivery started",
+        body: `Your order #${updatedOrder._id} is out for delivery.`,
+        data: {
+          type: "delivery_started",
+          orderId: String(updatedOrder._id),
+        },
+      });
+
       return {
         success: true,
         orderId: String(updatedOrder._id),

@@ -5,12 +5,10 @@ const mongoose = require("mongoose");
 // For sending emails and SMS
 //const Preview = require('twilio/lib/rest/Preview');
 //const twilio = require("twilio");
-const { Expo } = require("expo-server-sdk");
 const { sendMailSafe } = require("../helpers/mailer");
 const { resolveDeliveryPlan } = require("../helpers/delivery");
+const { sendPushToUser } = require("../helpers/push-notify");
 const { assignDriverToOrder } = require("../service/dispatchService");
-
-const expo = new Expo();
 
 const ALLOWED_DELIVERY_STATUSES = ["Pending", "Driver Assigned", "Picked Up", "Delivered"];
 
@@ -121,49 +119,6 @@ const shouldAutoDispatchOrder = (order) => {
   const mode = String(order.deliveryMode || "");
   const dispatchStatus = String(order.dispatchStatus || "");
   return mode === "SAME_DAY" || dispatchStatus === "pending_assignment";
-};
-
-const sendPushToUser = async ({ User, userId, title, body, data = {} }) => {
-  try {
-    if (!User || !userId || !title || !body) {
-      return { sent: 0 };
-    }
-
-    const user = await User.findById(userId).select("pushTokens expoPushTokens");
-    const tokens = [
-      ...(Array.isArray(user?.pushTokens) ? user.pushTokens : []),
-      ...(Array.isArray(user?.expoPushTokens) ? user.expoPushTokens : []),
-    ];
-
-    const uniqueTokens = [...new Set(tokens)].filter((token) => Expo.isExpoPushToken(token));
-
-    if (!user || uniqueTokens.length === 0) {
-      return { sent: 0 };
-    }
-
-    const messages = uniqueTokens.map((token) => ({
-      to: token,
-      sound: "default",
-      title,
-      body,
-      data,
-      priority: "high",
-    }));
-
-    if (messages.length === 0) {
-      return { sent: 0 };
-    }
-
-    const chunks = expo.chunkPushNotifications(messages);
-    for (const chunk of chunks) {
-      await expo.sendPushNotificationsAsync(chunk);
-    }
-
-    return { sent: messages.length };
-  } catch (error) {
-    console.error("Automatic push send failed:", error?.message || error);
-    return { sent: 0 };
-  }
 };
 
 /**
@@ -547,6 +502,22 @@ router.post(`/`, async (req, res) => {
     },
   });
 
+  if (ord.dispatchStatus === "scheduled") {
+    const scheduleLabel = ord.scheduledFor
+      ? ` for ${new Date(ord.scheduledFor).toLocaleString()}`
+      : "";
+    await sendPushToUser({
+      User,
+      userId: ord.user,
+      title: "Delivery scheduled",
+      body: `Your order #${ord._id} delivery has been scheduled${scheduleLabel}.`,
+      data: {
+        type: "delivery_scheduled",
+        orderId: String(ord._id),
+      },
+    });
+  }
+
   // Handle the case where the order could not be created
   if (!ord) {
     return res.status(404).send("the order cannot be created!");
@@ -889,6 +860,24 @@ router.put("/:id", async (req, res) => {
         status: statusText,
       },
     });
+
+    const deliveryStartedStatuses = ["Driver Assigned", "Picked Up"];
+    if (
+      updateFields.deliveryStatus !== undefined &&
+      deliveryStartedStatuses.includes(updateFields.deliveryStatus) &&
+      existingOrder.deliveryStatus !== updateFields.deliveryStatus
+    ) {
+      await sendPushToUser({
+        User,
+        userId: orderUserId,
+        title: "Delivery started",
+        body: `Your order #${order._id} is out for delivery.`,
+        data: {
+          type: "delivery_started",
+          orderId: String(order._id),
+        },
+      });
+    }
 
     const orderUser =
       typeof order.user === "object" && order.user?.email
