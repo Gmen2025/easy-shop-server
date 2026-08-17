@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 const { getModelsForDb, DEFAULT_DB_NAME } = require("../helpers/db-manager");
-const { sendPushToUser } = require("../helpers/push-notify");
+const { sendPushToUser, sendPushToTokens } = require("../helpers/push-notify");
 
 const DRIVER_RESPONSE_EVENT = "delivery_request_response";
 const DRIVER_REQUEST_EVENT = "new_delivery_request";
@@ -260,6 +260,18 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
       driverId: String(lockDriver._id),
       storeLocation: updatedOrder?.store?.location || null,
       customerLocation,
+    });
+
+    await sendPushToTokens({
+      tokens: Array.isArray(lockDriver.pushTokens) ? lockDriver.pushTokens : [],
+      title: "New delivery assigned",
+      body: `Order #${updatedOrder._id} is ready for pickup.`,
+      data: {
+        type: "delivery_assigned",
+        orderId: String(updatedOrder._id),
+        deliveryStatus: "Driver Assigned",
+        order: updatedOrder,
+      },
     });
 
     const decision = await waitForDriverDecision(ioInstance, {

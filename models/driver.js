@@ -15,6 +15,10 @@ const driverSchema = new mongoose.Schema({
     default: "",
     trim: true,
   },
+  pushTokens: {
+    type: [String],
+    default: [],
+  },
   location: {
     type: {
       type: String,

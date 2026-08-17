@@ -5,6 +5,7 @@ const { Expo } = require('expo-server-sdk');
 const expo = new Expo();
 
 const getUserModel = (req) => req.dbModels?.User;
+const getDriverModel = (req) => req.dbModels?.Driver;
 
 const getAuthUser = (req) => req.auth || {};
 
@@ -82,6 +83,44 @@ const getUserTokens = (user) => {
 
   return [...new Set(tokens)].filter((token) => Expo.isExpoPushToken(token));
 };
+
+const getDriverTokens = (driver) =>
+  [...new Set(Array.isArray(driver?.pushTokens) ? driver.pushTokens : [])].filter((token) =>
+    Expo.isExpoPushToken(token)
+  );
+
+router.put('/drivers/:driverId/push-token', async (req, res) => {
+  const Driver = getDriverModel(req);
+  const { driverId } = req.params;
+  const { pushToken } = req.body || {};
+
+  if (!Driver) {
+    return res.status(500).json({ message: 'Driver model is not available' });
+  }
+
+  if (!pushToken || !Expo.isExpoPushToken(pushToken)) {
+    return res.status(400).json({ message: 'A valid Expo pushToken is required' });
+  }
+
+  const driver = await Driver.findById(driverId);
+  if (!driver) {
+    return res.status(404).json({ message: 'Driver not found' });
+  }
+
+  if (!Array.isArray(driver.pushTokens)) {
+    driver.pushTokens = [];
+  }
+  if (!driver.pushTokens.includes(pushToken)) {
+    driver.pushTokens.push(pushToken);
+    await driver.save();
+  }
+
+  return res.json({
+    message: 'Driver push token saved',
+    driverId,
+    totalTokens: driver.pushTokens.length,
+  });
+});
 
 // ── User push-token routes ────────────────────────────────────────────────────
 /**
