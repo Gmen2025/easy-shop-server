@@ -172,6 +172,43 @@ router.post('/register-owner', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /mine — resolve the authenticated owner's store (used right after login).
+// ---------------------------------------------------------------------------
+router.get('/mine/by-owner', async (req, res) => {
+  try {
+    const { Store } = req.dbModels;
+    const userId = req.auth?.userId;
+    if (!userId) return res.status(401).json({ success: false, message: 'Not authenticated.' });
+
+    const store = await Store.findOne({ owner: userId });
+    if (!store) return res.status(404).json({ success: false, message: 'No store found for this account.' });
+
+    return res.json({
+      success: true,
+      store: {
+        id: store.id,
+        name: store.name,
+        address: store.address,
+        phone: store.phone,
+        email: store.email,
+        category: store.category,
+        city: store.city,
+        country: store.country,
+        description: store.description,
+        bankAccount: store.bankAccount,
+        openHour: store.openHour,
+        closeHour: store.closeHour,
+        isOpen: store.isOpen,
+        latitude: store.location?.coordinates?.[1] ?? null,
+        longitude: store.location?.coordinates?.[0] ?? null,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /:id/dashboard — headline metrics for the store dashboard.
 // ---------------------------------------------------------------------------
 router.get('/:id/dashboard', async (req, res) => {
