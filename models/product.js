@@ -42,7 +42,19 @@ const productSchema = new mongoose.Schema({
     type: Number,
     required: true,
     min: 0,
-    max: 255
+    max: 100000
+  },
+  minStock: {
+    type: Number,
+    default: 0
+  },
+  sku: {
+    type: String,
+    default: ''
+  },
+  soldCount: {
+    type: Number,
+    default: 0
   },
   rating: {
     type: Number,

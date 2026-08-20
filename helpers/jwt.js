@@ -9,6 +9,7 @@ function authJwt() {
     path: [
       "/api/v1/users/login",
       "/api/v1/users/register",
+      "/api/v1/stores/register-owner",
       "/api/v1/users/resend-verification",
       "/api/v1/users/forgot-password",
       "/api/v1/users/reset-password",

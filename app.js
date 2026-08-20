@@ -124,6 +124,7 @@ const databaseRouter = require('./routers/database');
 const notificationsRouter = require('./routers/notifications');
 const settingsRouter = require('./routers/settings');
 const storesRouter = require('./routers/stores');
+const storeOwnerRouter = require('./routers/storeOwner');
 const driversRouter = require('./routers/drivers');
 
 
@@ -170,6 +171,7 @@ app.use(`${api}/cloudinary`, cloudinaryRouter);
 app.use(`${api}/database`, databaseRouter);
 app.use(`${api}/settings`, settingsRouter);
 app.use(`${api}/stores`, storesRouter);
+app.use(`${api}/stores`, storeOwnerRouter);
 app.use(`${api}/drivers`, driversRouter);
 // Notifications: push-token sub-routes live under /users, send/health under /notifications
 app.use(`${api}/notifications`, notificationsRouter);
