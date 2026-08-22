@@ -12,6 +12,8 @@ const dbSelector = require('./helpers/db-selector');
 const { connectDefaultDatabase } = require('./helpers/db-manager');
 const { verifyMailerConnection } = require('./helpers/mailer');
 const { DRIVER_RESPONSE_EVENT } = require('./service/dispatchService');
+const { saveDriverLocation } = require('./helpers/driver-location');
+const jwt = require('jsonwebtoken');
 
 // Respect x-forwarded-* headers when running behind Render/reverse proxies.
 app.set('trust proxy', 1);
@@ -126,7 +128,7 @@ const settingsRouter = require('./routers/settings');
 const storesRouter = require('./routers/stores');
 const storeOwnerRouter = require('./routers/storeOwner');
 const driversRouter = require('./routers/drivers');
-
+const serviceRequestsRouter = require('./routers/service-requests');
 
 //Middleware
 app.use(express.json());
@@ -173,6 +175,7 @@ app.use(`${api}/settings`, settingsRouter);
 app.use(`${api}/stores`, storesRouter);
 app.use(`${api}/stores`, storeOwnerRouter);
 app.use(`${api}/drivers`, driversRouter);
+app.use(`${api}/service-requests`, serviceRequestsRouter);
 // Notifications: push-token sub-routes live under /users, send/health under /notifications
 app.use(`${api}/notifications`, notificationsRouter);
 app.use(`${api}/users`, notificationsRouter);
@@ -249,11 +252,41 @@ connectDefaultDatabase().then(() => {
     io.on('connection', (socket) => {
       socket.on('register_driver', (payload = {}) => {
         const driverId = String(payload.driverId || payload.userId || '').trim();
-        if (!driverId) return;
+        const token = socket.handshake.auth?.token;
+        let authUserId = '';
+
+        try {
+          authUserId = String(jwt.verify(token, process.env.secret)?.userId || '');
+        } catch (error) {
+          return;
+        }
+
+        if (!driverId || !authUserId || driverId !== authUserId) return;
 
         io.driverSocketMap.set(driverId, socket.id);
         socket.data.driverId = driverId;
+        socket.data.authUserId = authUserId;
         socket.join(`driver:${driverId}`);
+      });
+
+      socket.on('driver_location_updated', async (payload = {}) => {
+        const registeredDriverId = String(socket.data?.driverId || '');
+        const payloadDriverId = String(payload.driverId || '');
+        if (!registeredDriverId || payloadDriverId !== registeredDriverId
+          || socket.data?.authUserId !== registeredDriverId) {
+          return;
+        }
+
+        try {
+          await saveDriverLocation({
+            driverId: registeredDriverId,
+            latitude: payload.latitude,
+            longitude: payload.longitude,
+            recordedAt: payload.recordedAt,
+          });
+        } catch (error) {
+          console.error('[Redis] Unable to save driver location:', error?.message || error);
+        }
       });
 
       socket.on(DRIVER_RESPONSE_EVENT, (payload = {}) => {

@@ -9,6 +9,7 @@ const { storeSchema } = require('../models/store');
 const { driverSchema } = require('../models/driver');
 const { reviewSchema } = require('../models/review');
 const { payoutSchema } = require('../models/payout');
+const { serviceRequestSchema } = require('../models/service-request');
 
 const DEFAULT_DB_NAME = process.env.DEFAULT_DB_NAME || 'E_Shopping';
 
@@ -64,6 +65,7 @@ function getModelsForDb(dbName) {
     Driver: db.models.Driver || db.model('Driver', driverSchema),
     Review: db.models.Review || db.model('Review', reviewSchema),
     Payout: db.models.Payout || db.model('Payout', payoutSchema),
+    ServiceRequest: db.models.ServiceRequest || db.model('ServiceRequest', serviceRequestSchema),
   };
 }
 
