@@ -3,6 +3,7 @@ const mongoose = require("mongoose");
 const { getNearbyDrivers } = require("../helpers/driver-location");
 const { sendPushToUser } = require("../helpers/push-notify");
 const { sendMailSafe } = require("../helpers/mailer");
+const { getAllowedDatabaseNames, getModelsForDb } = require("../helpers/db-manager");
 
 const requireAdmin = (req, res, next) => {
   if (!req.auth?.isAdmin) {
@@ -62,10 +63,23 @@ const parsePointFromBody = (body) => {
  */
 
 router.get(`/`, requireAdmin, async (req, res) => {
-  const { Driver } = req.dbModels;
   const filter = ["pending", "approved"].includes(req.query.approvalStatus)
     ? { approvalStatus: req.query.approvalStatus }
     : {};
+
+  if (req.query.allDatabases === "true") {
+    const driverGroups = await Promise.all(
+      getAllowedDatabaseNames().map(async (databaseName) => {
+        const { Driver } = getModelsForDb(databaseName);
+        const drivers = await Driver.find(filter).sort({ approvalStatus: 1, name: 1 }).lean();
+        return drivers.map((driver) => ({ ...driver, databaseName }));
+      })
+    );
+
+    return res.status(200).send(driverGroups.flat());
+  }
+
+  const { Driver } = req.dbModels;
   const drivers = await Driver.find(filter).sort({ approvalStatus: 1, name: 1 });
 
   if (!drivers) {
@@ -77,7 +91,12 @@ router.get(`/`, requireAdmin, async (req, res) => {
 
 router.put("/:id/approve", requireAdmin, async (req, res) => {
   try {
-    const { Driver, User } = req.dbModels;
+    const requestedDatabaseName = String(req.body?.databaseName || req.dbName || "").trim();
+    if (!getAllowedDatabaseNames().includes(requestedDatabaseName)) {
+      return res.status(400).json({ success: false, message: "Invalid driver database." });
+    }
+
+    const { Driver, User } = getModelsForDb(requestedDatabaseName);
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ success: false, message: "Invalid Driver Id" });
     }
@@ -120,6 +139,7 @@ router.put("/:id/approve", requireAdmin, async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Driver approved and notified.",
+      databaseName: requestedDatabaseName,
       driver,
     });
   } catch (error) {
@@ -222,6 +242,46 @@ router.get(`/nearby`, async (req, res) => {
   });
 });
 
+router.put("/me", async (req, res) => {
+  try {
+    const userId = req.auth?.userId;
+    const { Driver } = req.dbModels;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const vehicle = req.body?.vehicle;
+    if (!vehicle || typeof vehicle !== "object") {
+      return res.status(400).json({ success: false, message: "Vehicle details are required." });
+    }
+
+    const updatedDriver = await Driver.findOneAndUpdate(
+      { user: userId },
+      {
+        $set: {
+          vehicle: {
+            make: String(vehicle.make || "").trim(),
+            model: String(vehicle.model || "").trim(),
+            plateNumber: String(vehicle.plateNumber || "").trim(),
+            color: String(vehicle.color || "").trim(),
+          },
+          vehicleType: [vehicle.make, vehicle.model].filter(Boolean).join(" ").trim(),
+        },
+      },
+      { new: true }
+    );
+
+    if (!updatedDriver) {
+      return res.status(404).json({ success: false, message: "Driver application not found." });
+    }
+
+    return res.status(200).json({ success: true, driver: updatedDriver });
+  } catch (error) {
+    console.error("Driver vehicle update error:", error);
+    return res.status(500).json({ success: false, message: "Unable to save vehicle details right now." });
+  }
+});
+
 /**
  * @swagger
  * /api/v1/drivers/{id}:
@@ -308,10 +368,16 @@ router.get(`/:id`, async (req, res) => {
  */
 
 router.post(`/`, async (req, res) => {
-  const { Driver } = req.dbModels;
+  const { Driver, User } = req.dbModels;
+  const userId = req.auth?.isAdmin && req.body.userId ? req.body.userId : req.auth?.userId;
 
-  if (!req.body.name) {
-    return res.status(400).json({ success: false, message: "name is required." });
+  if (!userId || !mongoose.isValidObjectId(userId)) {
+    return res.status(400).json({ success: false, message: "A valid authenticated user is required." });
+  }
+
+  const user = await User.findById(userId);
+  if (!user) {
+    return res.status(404).json({ success: false, message: "User not found." });
   }
 
   const parsedPoint = parsePointFromBody(req.body);
@@ -320,8 +386,12 @@ router.post(`/`, async (req, res) => {
   }
 
   const driver = new Driver({
-    name: req.body.name,
-    isAvailable: req.body.isAvailable !== undefined ? Boolean(req.body.isAvailable) : true,
+    user: user._id,
+    name: req.body.name || user.name,
+    email: user.email,
+    phone: user.phone,
+    approvalStatus: "pending",
+    isAvailable: false,
     vehicleType: req.body.vehicleType || "",
     location: parsedPoint.value || undefined,
   });

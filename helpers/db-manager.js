@@ -46,6 +46,10 @@ function normalizeDatabaseName(dbName) {
   return normalized;
 }
 
+function getAllowedDatabaseNames() {
+  return [...allowedDatabases];
+}
+
 function getDbConnection(dbName) {
   const resolvedDbName = normalizeDatabaseName(dbName);
   return mongoose.connection.useDb(resolvedDbName, { useCache: true });
@@ -78,6 +82,7 @@ async function connectDefaultDatabase() {
 module.exports = {
   DEFAULT_DB_NAME,
   normalizeDatabaseName,
+  getAllowedDatabaseNames,
   getDbConnection,
   getModelsForDb,
   connectDefaultDatabase,

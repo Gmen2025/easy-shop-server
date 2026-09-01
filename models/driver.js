@@ -43,6 +43,12 @@ const driverSchema = new mongoose.Schema({
     default: "",
     trim: true,
   },
+  vehicle: {
+    make: { type: String, default: "", trim: true },
+    model: { type: String, default: "", trim: true },
+    plateNumber: { type: String, default: "", trim: true },
+    color: { type: String, default: "", trim: true },
+  },
   pushTokens: {
     type: [String],
     default: [],
