@@ -21,6 +21,14 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  isDriver: {
+    type: Boolean,
+    default: false,
+  },
+  role: {
+    type: String,
+    default: "customer",
+  },
   street: {
     type: String,
     default: "",

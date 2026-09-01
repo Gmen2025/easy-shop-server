@@ -1511,6 +1511,75 @@ router.get("/me", async (req, res) => {
   }
 });
 
+router.post("/upgrade-role", async (req, res) => {
+  try {
+    const userId = req.auth?.userId;
+    const roleType = String(req.body?.roleType || "").trim().toLowerCase();
+
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    if (roleType !== "driver") {
+      return res.status(400).json({ success: false, message: "Only the driver role can be requested." });
+    }
+
+    const User = getUserModel(req);
+    const user = await User.findById(userId);
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    if (req.body?.email && String(req.body.email).trim().toLowerCase() !== String(user.email).trim().toLowerCase()) {
+      return res.status(403).json({ success: false, message: "You can only upgrade your own account." });
+    }
+
+    const { Driver } = req.dbModels;
+    user.isDriver = true;
+    user.role = "driver";
+    await user.save();
+
+    const driver = await Driver.findOneAndUpdate(
+      { user: user._id },
+      {
+        $set: { name: user.name },
+        $setOnInsert: { user: user._id, isAvailable: true },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    const token = jwt.sign(
+      { userId: user.id, isAdmin: user.isAdmin, isDriver: true, role: "driver" },
+      process.env.secret,
+      { expiresIn: "1d" }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: "Your account is now registered as a driver.",
+      needsSetup: true,
+      token,
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        isAdmin: user.isAdmin,
+        isDriver: user.isDriver,
+        role: user.role,
+      },
+      driverId: driver._id,
+    });
+  } catch (error) {
+    console.error("Role upgrade error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Unable to upgrade the account to driver right now.",
+    });
+  }
+});
+
 /**
  * @swagger
  * /api/v1/users/profile:
