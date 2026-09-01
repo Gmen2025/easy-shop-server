@@ -13,6 +13,7 @@ const { connectDefaultDatabase } = require('./helpers/db-manager');
 const { verifyMailerConnection } = require('./helpers/mailer');
 const { DRIVER_RESPONSE_EVENT } = require('./service/dispatchService');
 const { saveDriverLocation } = require('./helpers/driver-location');
+const { getModelsForDb, DEFAULT_DB_NAME } = require('./helpers/db-manager');
 const jwt = require('jsonwebtoken');
 
 // Respect x-forwarded-* headers when running behind Render/reverse proxies.
@@ -277,6 +278,18 @@ connectDefaultDatabase().then(() => {
           return;
         }
 
+        // Broadcast live GPS to customers tracking this order.
+        const orderId = String(payload.orderId || '').trim();
+        if (orderId) {
+          io.to(`order:${orderId}`).emit('driver_location', {
+            orderId,
+            driverId: registeredDriverId,
+            latitude: Number(payload.latitude),
+            longitude: Number(payload.longitude),
+            recordedAt: payload.recordedAt || new Date().toISOString(),
+          });
+        }
+
         try {
           await saveDriverLocation({
             driverId: registeredDriverId,
@@ -287,6 +300,47 @@ connectDefaultDatabase().then(() => {
         } catch (error) {
           console.error('[Redis] Unable to save driver location:', error?.message || error);
         }
+      });
+
+      // Customers subscribe to live updates for their own order.
+      socket.on('track_order', async (payload = {}) => {
+        const orderId = String(payload.orderId || '').trim();
+        const token = socket.handshake.auth?.token || payload.token;
+        if (!orderId || !token) return;
+
+        let auth;
+        try {
+          auth = jwt.verify(token, process.env.secret) || {};
+        } catch (error) {
+          return;
+        }
+
+        try {
+          const { Order } = getModelsForDb(DEFAULT_DB_NAME);
+          const order = await Order.findById(orderId).select('user customer');
+          if (!order) return;
+
+          const authUserId = String(auth.userId || '');
+          const isAdmin = Boolean(auth.isAdmin);
+          const ownerIds = [order.user, order.customer].map((id) => String(id || ''));
+          if (!isAdmin && !ownerIds.includes(authUserId)) return;
+
+          socket.join(`order:${orderId}`);
+          if (!socket.data.trackedOrders) {
+            socket.data.trackedOrders = new Set();
+          }
+          socket.data.trackedOrders.add(orderId);
+          socket.emit('order_tracking_subscribed', { orderId });
+        } catch (error) {
+          console.error('[Socket] track_order failed:', error?.message || error);
+        }
+      });
+
+      socket.on('untrack_order', (payload = {}) => {
+        const orderId = String(payload.orderId || '').trim();
+        if (!orderId) return;
+        socket.leave(`order:${orderId}`);
+        socket.data?.trackedOrders?.delete(orderId);
       });
 
       socket.on(DRIVER_RESPONSE_EVENT, (payload = {}) => {

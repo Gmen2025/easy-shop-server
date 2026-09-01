@@ -4,6 +4,7 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
 const { getFrontendBaseUrl, sendMailSafe } = require("../helpers/mailer");
+const { sendPushToUser } = require("../helpers/push-notify");
 
 const getUserModel = (req) => req.dbModels.User;
 
@@ -127,11 +128,61 @@ router.post("/login", async (req, res) => {
       email: user.email,
       phone: user.phone,
       isAdmin: user.isAdmin,
+      isDriver: user.isDriver,
+      role: user.role,
       isEmailVerified: user.isEmailVerified,
       token: token,
     });
   } else {
     return res.status(400).send("password is wrong");
+  }
+});
+
+router.post("/driver-login", async (req, res) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const password = req.body?.password;
+    const User = getUserModel(req);
+    const user = await User.findOne({ email });
+
+    if (!user || !password || !bcrypt.compareSync(password, user.passwordHash)) {
+      return res.status(400).json({ success: false, message: "Invalid email or password" });
+    }
+
+    if (!user.isEmailVerified) {
+      return res.status(400).json({ success: false, message: "Please verify your email before logging in" });
+    }
+
+    const { Driver } = req.dbModels;
+    const driver = await Driver.findOne({ user: user._id });
+    if (!user.isDriver || !driver) {
+      return res.status(403).json({ success: false, message: "This account is not registered as a driver." });
+    }
+
+    if (driver.approvalStatus !== "approved") {
+      return res.status(403).json({ success: false, message: "Your driver application is pending admin approval." });
+    }
+
+    const token = jwt.sign(
+      { userId: user.id, isAdmin: user.isAdmin, isDriver: true, role: "driver" },
+      process.env.secret,
+      { expiresIn: "1d" }
+    );
+
+    return res.status(200).json({
+      _id: user._id,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      isAdmin: user.isAdmin,
+      isDriver: true,
+      role: "driver",
+      driverId: driver._id,
+      token,
+    });
+  } catch (error) {
+    console.error("Driver login error:", error);
+    return res.status(500).json({ success: false, message: "Unable to sign in to the driver app right now." });
   }
 });
 
@@ -1543,8 +1594,8 @@ router.post("/upgrade-role", async (req, res) => {
     const driver = await Driver.findOneAndUpdate(
       { user: user._id },
       {
-        $set: { name: user.name },
-        $setOnInsert: { user: user._id, isAvailable: true },
+        $set: { name: user.name, email: user.email, phone: user.phone },
+        $setOnInsert: { user: user._id, approvalStatus: "pending", isAvailable: false },
       },
       { new: true, upsert: true, setDefaultsOnInsert: true }
     );
@@ -1557,7 +1608,7 @@ router.post("/upgrade-role", async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Your account is now registered as a driver.",
+      message: "Your driver application was submitted for admin approval.",
       needsSetup: true,
       token,
       user: {

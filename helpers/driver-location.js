@@ -66,7 +66,71 @@ const saveDriverLocation = async ({ driverId, latitude, longitude, recordedAt })
   return { saved: true, driverId: normalizedDriverId, recordedAt: timestamp };
 };
 
+const getDriverLocation = async (driverId) => {
+  const normalizedDriverId = String(driverId || '').trim();
+  if (!normalizedDriverId) {
+    return null;
+  }
+
+  const client = await getRedisClient();
+  if (!client) {
+    return null;
+  }
+
+  const data = await client.hGetAll(`${LOCATION_HASH_PREFIX}${normalizedDriverId}`);
+  if (!data || data.latitude === undefined || data.longitude === undefined) {
+    return null;
+  }
+
+  const latitude = Number(data.latitude);
+  const longitude = Number(data.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return null;
+  }
+
+  return {
+    driverId: normalizedDriverId,
+    latitude,
+    longitude,
+    recordedAt: data.recordedAt || null,
+  };
+};
+
+const getNearbyDrivers = async ({ latitude, longitude, radiusKm = 5, count = 20 }) => {
+  const client = await getRedisClient();
+  if (!client) {
+    return [];
+  }
+
+  const normalizedLatitude = Number(latitude);
+  const normalizedLongitude = Number(longitude);
+  const normalizedRadius = Number(radiusKm);
+
+  if (!Number.isFinite(normalizedLatitude) || !Number.isFinite(normalizedLongitude)
+    || !Number.isFinite(normalizedRadius) || normalizedRadius <= 0) {
+    return [];
+  }
+
+  const results = await client.geoSearch(
+    LOCATION_GEO_KEY,
+    { longitude: normalizedLongitude, latitude: normalizedLatitude },
+    { radius: normalizedRadius, unit: 'km' },
+    { WITHCOORD: true, WITHDIST: true, COUNT: count }
+  );
+
+  return (results || [])
+    .map((entry) => ({
+      driverId: entry.member,
+      distanceKm: Math.round(Number(entry.distance) * 1000) / 1000,
+      latitude: Number(entry.coordinates?.latitude),
+      longitude: Number(entry.coordinates?.longitude),
+    }))
+    .filter((entry) => Number.isFinite(entry.latitude) && Number.isFinite(entry.longitude));
+};
+
 module.exports = {
   LOCATION_GEO_KEY,
   saveDriverLocation,
+  getDriverLocation,
+  getNearbyDrivers,
 };

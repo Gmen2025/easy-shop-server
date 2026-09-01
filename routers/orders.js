@@ -9,6 +9,7 @@ const { sendMailSafe } = require("../helpers/mailer");
 const { resolveDeliveryPlan } = require("../helpers/delivery");
 const { sendPushToUser } = require("../helpers/push-notify");
 const { assignDriverToOrder } = require("../service/dispatchService");
+const { getDriverLocation } = require("../helpers/driver-location");
 
 const ALLOWED_DELIVERY_STATUSES = ["Pending", "Driver Assigned", "Picked Up", "Delivered"];
 
@@ -200,6 +201,115 @@ router.get(`/:id`, async (req, res) => {
   }
 
   res.send(order);
+});
+
+/**
+ * @swagger
+ * /api/v1/orders/{id}/tracking:
+ *   get:
+ *     summary: Get live delivery tracking info for an order (driver location, pickup, dropoff)
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Order ID
+ *     responses:
+ *       200:
+ *         description: Tracking payload with driver location, pickup and dropoff
+ *       403:
+ *         description: Not allowed to track this order
+ *       404:
+ *         description: Order not found
+ */
+// Live delivery tracking for the customer (order owner or admin only)
+router.get(`/:id/tracking`, async (req, res) => {
+  const { Order } = req.dbModels;
+
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    return res.status(400).json({ success: false, message: "Invalid order id." });
+  }
+
+  const order = await Order.findById(req.params.id)
+    .populate("store", "name address location")
+    .populate("driver", "name isAvailable vehicleType location")
+    .populate("user", "_id")
+    .populate("customer", "_id");
+
+  if (!order) {
+    return res.status(404).json({ success: false, message: "Order not found." });
+  }
+
+  const authUserId = String(req.auth?.userId || "");
+  const isAdmin = Boolean(req.auth?.isAdmin);
+  const ownerIds = [order.user?._id, order.customer?._id].map((id) => String(id || ""));
+  if (!isAdmin && !ownerIds.includes(authUserId)) {
+    return res
+      .status(403)
+      .json({ success: false, message: "You are not allowed to track this order." });
+  }
+
+  const driver = order.driver || null;
+  const driverId = driver?._id ? String(driver._id) : null;
+
+  // Live location from the Redis geo index; fall back to the last persisted Mongo location.
+  let driverLocation = null;
+  if (driverId) {
+    driverLocation = await getDriverLocation(driverId);
+    if (
+      !driverLocation &&
+      Array.isArray(driver?.location?.coordinates) &&
+      driver.location.coordinates.length === 2
+    ) {
+      const [lng, lat] = driver.location.coordinates;
+      if (Number.isFinite(lat) && Number.isFinite(lng) && (lat !== 0 || lng !== 0)) {
+        driverLocation = { driverId, latitude: lat, longitude: lng, recordedAt: null };
+      }
+    }
+  }
+
+  const storeCoords = order.store?.location?.coordinates;
+  const pickup =
+    order.store && Array.isArray(storeCoords) && storeCoords.length === 2
+      ? {
+          storeId: String(order.store._id),
+          name: order.store.name || "",
+          address: order.store.address || "",
+          latitude: Number(storeCoords[1]),
+          longitude: Number(storeCoords[0]),
+        }
+      : null;
+
+  res.send({
+    success: true,
+    orderId: String(order._id),
+    status: order.status,
+    deliveryStatus: order.deliveryStatus,
+    dispatchStatus: order.dispatchStatus,
+    driver: driver
+      ? {
+          driverId,
+          name: driver.name || "",
+          vehicleType: driver.vehicleType || "",
+          isAvailable: Boolean(driver.isAvailable),
+        }
+      : null,
+    driverLocation,
+    pickup,
+    dropoff: {
+      address1: order.shippingAddress1 || "",
+      address2: order.shippingAddress2 || "",
+      city: order.city || "",
+      zip: order.zip || "",
+      country: order.country || "",
+      latitude: null,
+      longitude: null,
+    },
+  });
 });
 
 /**
@@ -478,6 +588,11 @@ router.post(`/`, async (req, res) => {
   // Save the Order document
   const ord = await order.save();
 
+  // Handle the case where the order could not be created
+  if (!ord) {
+    return res.status(404).send("the order cannot be created!");
+  }
+
   if (shouldAutoDispatchOrder(ord)) {
     const io = req.app.get("io");
     if (io) {
@@ -491,79 +606,75 @@ router.post(`/`, async (req, res) => {
     }
   }
 
-  await sendPushToUser({
-    User,
-    userId: ord.user,
-    title: "Purchase successful",
-    body: `Your order #${ord._id} was placed successfully.`,
-    data: {
-      type: "order_placed",
-      orderId: String(ord._id),
-    },
+  // Respond immediately so the customer app is never blocked by slow
+  // push/SMTP providers (awaiting these made the "Place Order" button look dead).
+  res.status(201).json({
+    success: true,
+    message: "Order created",
+    order: ord,
   });
 
-  if (ord.dispatchStatus === "scheduled") {
-    const scheduleLabel = ord.scheduledFor
-      ? ` for ${new Date(ord.scheduledFor).toLocaleString()}`
-      : "";
-    await sendPushToUser({
-      User,
-      userId: ord.user,
-      title: "Delivery scheduled",
-      body: `Your order #${ord._id} delivery has been scheduled${scheduleLabel}.`,
-      data: {
-        type: "delivery_scheduled",
-        orderId: String(ord._id),
-      },
-    });
-  }
-
-  // Handle the case where the order could not be created
-  if (!ord) {
-    return res.status(404).send("the order cannot be created!");
-  }
-
-  // Send the created order as the response
-  //res.send(ord);
-
-  // Prepare email message
-
-  try {
-    // Populate order user; fallback query if population is missing/incomplete.
-    await ord.populate("user", "name email");
-    let orderUser = ord.user;
-
-    if (!orderUser || !orderUser.email) {
-      orderUser = await User.findById(ord.user).select("name email");
-    }
-
-    const recipientEmail =
-      orderUser?.email ||
-      req.body.customerEmail ||
-      req.body.email ||
-      null;
-    const recipientName = orderUser?.name || "Customer";
-    const paymentDetailsText = buildPaymentDetailsEmailLines(ord);
-    const deliveryDetailsText = buildDeliveryDetailsEmailLines(ord);
-
-    if (!recipientEmail) {
-      console.warn("[Order:Created] Email skipped: missing user email", {
-        orderId: String(ord._id),
-        userId: String(ord.user),
+  // Push + email notifications run after the response (fire-and-forget).
+  setImmediate(async () => {
+    try {
+      await sendPushToUser({
+        User,
+        userId: ord.user,
+        title: "Purchase successful",
+        body: `Your order #${ord._id} was placed successfully.`,
+        data: {
+          type: "order_placed",
+          orderId: String(ord._id),
+        },
       });
 
-      return res.status(201).json({
-        success: true,
-        message: "Order created; customer email is missing.",
-        order: ord,
-      });
-    }
+      if (ord.dispatchStatus === "scheduled") {
+        const scheduleLabel = ord.scheduledFor
+          ? ` for ${new Date(ord.scheduledFor).toLocaleString()}`
+          : "";
+        await sendPushToUser({
+          User,
+          userId: ord.user,
+          title: "Delivery scheduled",
+          body: `Your order #${ord._id} delivery has been scheduled${scheduleLabel}.`,
+          data: {
+            type: "delivery_scheduled",
+            orderId: String(ord._id),
+          },
+        });
+      }
 
-    // Send email notification
-    const mailOptions = {
-      to: recipientEmail,
-      subject: "New Order Placed", // Subject line
-      text: `A new order has been placed with total price: $${ord.totalPrice}.
+      // Populate order user; fallback query if population is missing/incomplete.
+      await ord.populate("user", "name email");
+      let orderUser = ord.user;
+
+      if (!orderUser || !orderUser.email) {
+        orderUser = await User.findById(ord.user).select("name email");
+      }
+
+      const recipientEmail =
+        orderUser?.email ||
+        req.body.customerEmail ||
+        req.body.email ||
+        null;
+
+      if (!recipientEmail) {
+        console.warn("[Order:Created] Email skipped: missing user email", {
+          orderId: String(ord._id),
+          userId: String(ord.user),
+        });
+        return;
+      }
+
+      const recipientName = orderUser?.name || "Customer";
+      const paymentDetailsText = buildPaymentDetailsEmailLines(ord);
+      const deliveryDetailsText = buildDeliveryDetailsEmailLines(ord);
+
+      // Send email notification
+      const mailOptions = {
+        to: recipientEmail,
+        subject: "New Order Placed", // Subject line
+        text: `A new order has been placed with total price: $${ord.totalPrice}.
               Dear ${recipientName},\n\nThank you for your order #${ord._id}.
               \n\n${paymentDetailsText}
               \n\n${deliveryDetailsText}
@@ -572,47 +683,21 @@ router.post(`/`, async (req, res) => {
               \n\n we will get back to you as soon as possible!  
               \n\nWe appreciate your business! \n\nBest regards,\nE-Shopping Team
              `, // plain text body
-      //html: '<b>Hello world?</b>' // html body
-    };
-    // Send email notification
-    const emailResult = await sendMailSafe(mailOptions, "order_created");
+        //html: '<b>Hello world?</b>' // html body
+      };
+      const emailResult = await sendMailSafe(mailOptions, "order_created");
 
-    // Respond with success message
-    if (emailResult.ok) {
-      console.log("[Order:Created] Email sent to:", recipientEmail);
-    } else if (emailResult.skipped) {
-      console.warn("[Order:Created] Email skipped:", emailResult.reason);
-    } else {
-      console.error("[Order:Created] Email failed:", emailResult.error?.message);
+      if (emailResult.ok) {
+        console.log("[Order:Created] Email sent to:", recipientEmail);
+      } else if (emailResult.skipped) {
+        console.warn("[Order:Created] Email skipped:", emailResult.reason);
+      } else {
+        console.error("[Order:Created] Email failed:", emailResult.error?.message);
+      }
+    } catch (err) {
+      console.error("[Order:Created] Post-response notification error:", err?.message || err);
     }
-
-    return res.status(201).json({
-      success: true,
-      message: emailResult.ok
-        ? "Order created and email sent successfully"
-        : "Order created; email delivery skipped or failed",
-      order: ord,
-      info: emailResult.info,
-    });
-
-    // Send SMS notification using Twilio
-    // const smsMessage = `A new order has been placed with total price: $${totalPrice}.`;
-    // await twilioClient.messages.create({
-    //   body: smsMessage,
-    //   from: process.env.TWILIO_PHONE_NUMBER,
-    //   to: process.env.TO_PHONE_NUMBER,
-    // });
-    // console.log('SMS sent successfully.');
-  } catch (err) {
-    console.error("Error sending email or SMS:", err);
-    return res.status(201).json({
-      success: true,
-      message: "Order created, but failed to send email",
-      order: ord,
-      error: err.message,
-    });
-    console.error("Error sending email or SMS:", err);
-  }
+  });
 });
 
 /**
@@ -844,6 +929,17 @@ router.put("/:id", async (req, res) => {
 
   if (!order) {
     return res.status(404).send("order not found after update");
+  }
+
+  // Notify customers watching the live tracking screen about delivery progress.
+  const ioInstance = req.app.get("io");
+  if (ioInstance && updateFields.deliveryStatus !== undefined) {
+    ioInstance.to(`order:${order._id}`).emit("order_status_updated", {
+      orderId: String(order._id),
+      deliveryStatus: order.deliveryStatus,
+      dispatchStatus: order.dispatchStatus,
+      driverId: order.driver?._id ? String(order.driver._id) : null,
+    });
   }
 
   if (order.user) {

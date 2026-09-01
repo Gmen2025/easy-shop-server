@@ -1,5 +1,15 @@
 const router = require("express").Router();
 const mongoose = require("mongoose");
+const { getNearbyDrivers } = require("../helpers/driver-location");
+const { sendPushToUser } = require("../helpers/push-notify");
+const { sendMailSafe } = require("../helpers/mailer");
+
+const requireAdmin = (req, res, next) => {
+  if (!req.auth?.isAdmin) {
+    return res.status(403).json({ success: false, message: "Admin access required" });
+  }
+  next();
+};
 
 const toNumberOrNull = (value) => {
   if (value === undefined || value === null || value === "") return null;
@@ -51,15 +61,165 @@ const parsePointFromBody = (body) => {
  *         description: Server error
  */
 
-router.get(`/`, async (req, res) => {
+router.get(`/`, requireAdmin, async (req, res) => {
   const { Driver } = req.dbModels;
-  const drivers = await Driver.find().sort({ name: 1 });
+  const filter = ["pending", "approved"].includes(req.query.approvalStatus)
+    ? { approvalStatus: req.query.approvalStatus }
+    : {};
+  const drivers = await Driver.find(filter).sort({ approvalStatus: 1, name: 1 });
 
   if (!drivers) {
     return res.status(500).json({ success: false });
   }
 
   res.status(200).send(drivers);
+});
+
+router.put("/:id/approve", requireAdmin, async (req, res) => {
+  try {
+    const { Driver, User } = req.dbModels;
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid Driver Id" });
+    }
+
+    const driver = await Driver.findById(req.params.id);
+    if (!driver) {
+      return res.status(404).json({ success: false, message: "Driver not found." });
+    }
+
+    const user = await User.findById(driver.user);
+    if (!user) {
+      return res.status(404).json({ success: false, message: "Driver account not found." });
+    }
+
+    driver.approvalStatus = "approved";
+    driver.approvedAt = new Date();
+    driver.approvedBy = req.auth.userId;
+    driver.isAvailable = true;
+    await driver.save();
+
+    await Promise.allSettled([
+      sendPushToUser({
+        User,
+        userId: user._id,
+        title: "Driver application approved",
+        body: "Your driver account is active. You can now sign in to the AGES Driver app.",
+        data: { type: "driver_approved", driverId: String(driver._id) },
+      }),
+      sendMailSafe(
+        {
+          to: user.email,
+          subject: "Your AGES Driver account is approved",
+          text: `Hello ${user.name}, your driver application has been approved. You can now sign in to the AGES Driver app.`,
+          html: `<p>Hello ${user.name},</p><p>Your driver application has been approved. You can now sign in to the AGES Driver app.</p>`,
+        },
+        "driver_approval"
+      ),
+    ]);
+
+    return res.status(200).json({
+      success: true,
+      message: "Driver approved and notified.",
+      driver,
+    });
+  } catch (error) {
+    console.error("Driver approval error:", error);
+    return res.status(500).json({ success: false, message: "Unable to approve the driver right now." });
+  }
+});
+
+/**
+ * @swagger
+ * /api/v1/drivers/nearby:
+ *   get:
+ *     summary: Get available drivers near a location (live Redis geo index with Mongo fallback)
+ *     tags: [Drivers]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: latitude
+ *         required: true
+ *         schema:
+ *           type: number
+ *       - in: query
+ *         name: longitude
+ *         required: true
+ *         schema:
+ *           type: number
+ *       - in: query
+ *         name: radiusKm
+ *         schema:
+ *           type: number
+ *           default: 5
+ *     responses:
+ *       200:
+ *         description: List of nearby available drivers with distance
+ *       400:
+ *         description: Missing latitude/longitude
+ */
+// NOTE: must stay above /:id so "nearby" is not treated as a driver id.
+router.get(`/nearby`, async (req, res) => {
+  const { Driver } = req.dbModels;
+  const latitude = toNumberOrNull(req.query.latitude ?? req.query.lat);
+  const longitude = toNumberOrNull(req.query.longitude ?? req.query.lng);
+  const radiusKm = toNumberOrNull(req.query.radiusKm) ?? 5;
+
+  if (latitude === null || longitude === null) {
+    return res
+      .status(400)
+      .json({ success: false, message: "latitude and longitude query params are required." });
+  }
+
+  // Live locations from the Redis geo index (drivers actively reporting GPS).
+  const liveDrivers = await getNearbyDrivers({ latitude, longitude, radiusKm });
+
+  if (liveDrivers.length > 0) {
+    const validIds = liveDrivers.map((d) => d.driverId).filter((id) => mongoose.isValidObjectId(id));
+    const driverDocs = validIds.length
+      ? await Driver.find({ _id: { $in: validIds } }).select("name vehicleType isAvailable")
+      : [];
+    const byId = new Map(driverDocs.map((doc) => [String(doc._id), doc]));
+
+    const enriched = liveDrivers
+      .map((entry) => {
+        const doc = byId.get(String(entry.driverId));
+        return {
+          ...entry,
+          name: doc?.name || "Driver",
+          vehicleType: doc?.vehicleType || "",
+          isAvailable: doc ? Boolean(doc.isAvailable) : true,
+        };
+      })
+      .filter((entry) => entry.isAvailable);
+
+    return res.send({ success: true, count: enriched.length, drivers: enriched });
+  }
+
+  // Fallback: last persisted driver locations in Mongo.
+  const mongoDrivers = await Driver.find({
+    isAvailable: true,
+    location: {
+      $near: {
+        $geometry: { type: "Point", coordinates: [longitude, latitude] },
+        $maxDistance: radiusKm * 1000,
+      },
+    },
+  }).select("name vehicleType isAvailable location");
+
+  return res.send({
+    success: true,
+    count: mongoDrivers.length,
+    drivers: mongoDrivers.map((doc) => ({
+      driverId: String(doc._id),
+      name: doc.name,
+      vehicleType: doc.vehicleType || "",
+      isAvailable: Boolean(doc.isAvailable),
+      latitude: doc.location?.coordinates?.[1] ?? null,
+      longitude: doc.location?.coordinates?.[0] ?? null,
+      distanceKm: null,
+    })),
+  });
 });
 
 /**
