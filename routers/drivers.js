@@ -63,8 +63,10 @@ const parsePointFromBody = (body) => {
  */
 
 router.get(`/`, requireAdmin, async (req, res) => {
-  const filter = ["pending", "approved"].includes(req.query.approvalStatus)
-    ? { approvalStatus: req.query.approvalStatus }
+  const filter = req.query.approvalStatus === "pending"
+    ? { $or: [{ approvalStatus: "pending" }, { approvalStatus: { $exists: false } }, { approvalStatus: null }] }
+    : req.query.approvalStatus === "approved"
+    ? { approvalStatus: "approved" }
     : {};
 
   if (req.query.allDatabases === "true") {
