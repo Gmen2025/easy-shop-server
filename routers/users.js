@@ -160,7 +160,7 @@ router.post("/driver-login", async (req, res) => {
     }
 
     if (driver.approvalStatus !== "approved") {
-      return res.status(403).json({ success: false, message: "Your driver application is pending admin approval." });
+      return res.status(403).json({ success: false, message: driver.approvalStatus === "denied" ? "Driver access has been denied." : "Your driver application is pending admin approval." });
     }
 
     const token = jwt.sign(
@@ -183,6 +183,31 @@ router.post("/driver-login", async (req, res) => {
   } catch (error) {
     console.error("Driver login error:", error);
     return res.status(500).json({ success: false, message: "Unable to sign in to the driver app right now." });
+  }
+});
+
+router.post("/store-owner-login", async (req, res) => {
+  try {
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const password = req.body?.password;
+    const User = getUserModel(req);
+    const user = await User.findOne({ email });
+    if (!user || !password || !bcrypt.compareSync(password, user.passwordHash)) {
+      return res.status(400).json({ success: false, message: "Invalid email or password" });
+    }
+
+    const { Store } = req.dbModels;
+    const store = await Store.findOne({ owner: user._id });
+    if (!store) return res.status(403).json({ success: false, message: "This account is not registered as a store owner." });
+    if (store.approvalStatus !== "approved") {
+      return res.status(403).json({ success: false, message: store.approvalStatus === "denied" ? "Store owner access has been denied." : "Your store application is pending admin approval." });
+    }
+
+    const token = jwt.sign({ userId: user.id, isAdmin: user.isAdmin, role: "store_owner" }, process.env.secret, { expiresIn: "1d" });
+    return res.json({ _id: user._id, name: user.name, email: user.email, phone: user.phone, role: "store_owner", storeId: store._id, token });
+  } catch (error) {
+    console.error("Store owner login error:", error);
+    return res.status(500).json({ success: false, message: "Unable to sign in to the store app right now." });
   }
 });
 
@@ -1571,8 +1596,8 @@ router.post("/upgrade-role", async (req, res) => {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
-    if (roleType !== "driver") {
-      return res.status(400).json({ success: false, message: "Only the driver role can be requested." });
+    if (!["driver", "store_owner", "storeowner"].includes(roleType)) {
+      return res.status(400).json({ success: false, message: "Only the driver or store owner role can be requested." });
     }
 
     const User = getUserModel(req);
@@ -1584,6 +1609,26 @@ router.post("/upgrade-role", async (req, res) => {
 
     if (req.body?.email && String(req.body.email).trim().toLowerCase() !== String(user.email).trim().toLowerCase()) {
       return res.status(403).json({ success: false, message: "You can only upgrade your own account." });
+    }
+
+    if (roleType === "store_owner" || roleType === "storeowner") {
+      user.isStoreOwner = true;
+      user.storeOwnerApprovalStatus = "pending";
+      await user.save();
+
+      return res.status(200).json({
+        success: true,
+        message: "Your store owner application is pending. Complete your store details in the AGES Store app before admin review.",
+        needsStoreSetup: true,
+        user: {
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          isStoreOwner: true,
+          storeOwnerApprovalStatus: "pending",
+        },
+      });
     }
 
     const { Driver } = req.dbModels;

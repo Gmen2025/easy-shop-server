@@ -16,6 +16,16 @@ const storeSchema = new mongoose.Schema({
     ref: "User",
     default: null,
   },
+  approvalStatus: {
+    type: String,
+    enum: ["pending", "approved", "denied"],
+    default: "pending",
+  },
+  approvedAt: Date,
+  approvedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+  },
   phone: { type: String, default: "" },
   email: { type: String, default: "" },
   category: { type: String, default: "" },

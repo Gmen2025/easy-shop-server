@@ -114,11 +114,14 @@ router.post('/register-owner', async (req, res) => {
     }
 
     const existing = await User.findOne({ email });
-    if (existing) {
-      return res.status(400).json({ success: false, message: 'A user with this email already exists.' });
+    if (existing && !bcrypt.compareSync(password, existing.passwordHash)) {
+      return res.status(400).json({ success: false, message: 'An account with this email already exists. Enter its correct password to upgrade it.' });
+    }
+    if (existing && await Store.findOne({ owner: existing._id })) {
+      return res.status(400).json({ success: false, message: 'This account already has a store application.' });
     }
 
-    const user = new User({
+    const savedUser = existing || await new User({
       name: fullName,
       email,
       passwordHash: bcrypt.hashSync(password, 10),
@@ -126,11 +129,12 @@ router.post('/register-owner', async (req, res) => {
       city: city || '',
       country: country || '',
       street: address || '',
-      // Store owners self-register; skip email verification gate for owner accounts
-      // unless you want them to verify — flip to false to enforce verification.
       isEmailVerified: true,
-    });
-    const savedUser = await user.save();
+    }).save();
+
+    savedUser.isStoreOwner = true;
+    savedUser.storeOwnerApprovalStatus = 'pending';
+    await savedUser.save();
 
     const store = new Store({
       name: storeName,
@@ -145,6 +149,8 @@ router.post('/register-owner', async (req, res) => {
       bankAccount: bankAccount || '',
       openHour: openHour || '',
       closeHour: closeHour || '',
+      approvalStatus: 'pending',
+      isVerified: false,
       location: { type: 'Point', coordinates: [toNum(longitude), toNum(latitude)] },
     });
     const savedStore = await store.save();
@@ -164,6 +170,7 @@ router.post('/register-owner', async (req, res) => {
         storeName: savedStore.name,
         latitude: toNum(latitude),
         longitude: toNum(longitude),
+        approvalStatus: savedStore.approvalStatus,
       },
     });
   } catch (err) {
@@ -199,6 +206,7 @@ router.get('/mine/by-owner', async (req, res) => {
         openHour: store.openHour,
         closeHour: store.closeHour,
         isOpen: store.isOpen,
+        approvalStatus: store.approvalStatus,
         latitude: store.location?.coordinates?.[1] ?? null,
         longitude: store.location?.coordinates?.[0] ?? null,
       },

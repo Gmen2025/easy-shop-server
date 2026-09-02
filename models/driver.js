@@ -26,7 +26,7 @@ const driverSchema = new mongoose.Schema({
   },
   approvalStatus: {
     type: String,
-    enum: ["pending", "approved"],
+    enum: ["pending", "approved", "denied"],
     default: "pending",
   },
   approvedAt: Date,
@@ -44,10 +44,15 @@ const driverSchema = new mongoose.Schema({
     trim: true,
   },
   vehicle: {
+    type: { type: String, default: "", trim: true },
     make: { type: String, default: "", trim: true },
     model: { type: String, default: "", trim: true },
+    year: { type: Number, min: 1886, max: 2100, default: null },
     plateNumber: { type: String, default: "", trim: true },
     color: { type: String, default: "", trim: true },
+    insuranceProvider: { type: String, default: "", trim: true },
+    insurancePolicyNumber: { type: String, default: "", trim: true },
+    insuranceExpiresAt: { type: Date, default: null },
   },
   pushTokens: {
     type: [String],

@@ -25,6 +25,15 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  isStoreOwner: {
+    type: Boolean,
+    default: false,
+  },
+  storeOwnerApprovalStatus: {
+    type: String,
+    enum: ["pending", "approved", "denied"],
+    default: null,
+  },
   role: {
     type: String,
     default: "customer",

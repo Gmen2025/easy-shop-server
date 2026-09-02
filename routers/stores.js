@@ -1,5 +1,11 @@
 const router = require("express").Router();
 const mongoose = require("mongoose");
+const { getAllowedDatabaseNames, getModelsForDb } = require("../helpers/db-manager");
+
+const requireAdmin = (req, res, next) => {
+  if (!req.auth?.isAdmin) return res.status(403).json({ success: false, message: "Admin access required" });
+  next();
+};
 
 const toNumberOrNull = (value) => {
   if (value === undefined || value === null || value === "") return null;
@@ -53,13 +59,57 @@ const parsePointFromBody = (body) => {
 
 router.get(`/`, async (req, res) => {
   const { Store } = req.dbModels;
-  const stores = await Store.find().sort({ name: 1 });
+  const stores = await Store.find(req.auth?.isAdmin ? {} : { approvalStatus: "approved" }).sort({ name: 1 });
 
   if (!stores) {
     return res.status(500).json({ success: false });
   }
 
   res.status(200).send(stores);
+});
+
+router.get("/admin/owners", requireAdmin, async (req, res) => {
+  try {
+    const filter = req.query.approvalStatus ? { approvalStatus: req.query.approvalStatus } : {};
+    if (req.query.allDatabases === "true") {
+      const groups = await Promise.all(getAllowedDatabaseNames().map(async (databaseName) => {
+        const { Store } = getModelsForDb(databaseName);
+        const stores = await Store.find({ ...filter, owner: { $ne: null } }).sort({ approvalStatus: 1, name: 1 }).lean();
+        return stores.map((store) => ({ ...store, databaseName }));
+      }));
+      return res.json(groups.flat());
+    }
+    const { Store } = req.dbModels;
+    return res.json(await Store.find({ ...filter, owner: { $ne: null } }).sort({ approvalStatus: 1, name: 1 }));
+  } catch (error) {
+    console.error("Store owner list error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load store owners." });
+  }
+});
+
+router.put("/:id/:action(approve|deny|recover)", requireAdmin, async (req, res) => {
+  try {
+    const requestedDatabaseName = String(req.body?.databaseName || req.dbName || "").trim();
+    if (!getAllowedDatabaseNames().includes(requestedDatabaseName)) {
+      return res.status(400).json({ success: false, message: "Invalid store database." });
+    }
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: "Invalid Store Id" });
+
+    const { Store, User } = getModelsForDb(requestedDatabaseName);
+    const action = req.params.action;
+    const update = action === "approve"
+      ? { approvalStatus: "approved", isVerified: true, approvedAt: new Date(), approvedBy: req.auth.userId }
+      : { approvalStatus: action === "deny" ? "denied" : "pending", isVerified: false, approvedAt: null, approvedBy: null };
+    const store = await Store.findByIdAndUpdate(req.params.id, { $set: update }, { new: true });
+    if (!store) return res.status(404).json({ success: false, message: "Store not found." });
+    if (store.owner) {
+      await User.findByIdAndUpdate(store.owner, { $set: { isStoreOwner: true, storeOwnerApprovalStatus: update.approvalStatus } });
+    }
+    return res.json({ success: true, message: `Store owner ${action === "recover" ? "restored to pending approval" : `${action}d`}.`, store });
+  } catch (error) {
+    console.error("Store owner access update error:", error);
+    return res.status(500).json({ success: false, message: "Unable to update store owner access right now." });
+  }
 });
 
 /**

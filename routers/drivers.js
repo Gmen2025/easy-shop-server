@@ -150,6 +150,36 @@ router.put("/:id/approve", requireAdmin, async (req, res) => {
   }
 });
 
+router.put("/:id/:action(deny|recover)", requireAdmin, async (req, res) => {
+  try {
+    const requestedDatabaseName = String(req.body?.databaseName || req.dbName || "").trim();
+    if (!getAllowedDatabaseNames().includes(requestedDatabaseName)) {
+      return res.status(400).json({ success: false, message: "Invalid driver database." });
+    }
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid Driver Id" });
+    }
+
+    const { Driver } = getModelsForDb(requestedDatabaseName);
+    const status = req.params.action === "deny" ? "denied" : "pending";
+    const driver = await Driver.findByIdAndUpdate(
+      req.params.id,
+      { $set: { approvalStatus: status, isAvailable: false, approvedAt: null, approvedBy: null } },
+      { new: true }
+    );
+    if (!driver) return res.status(404).json({ success: false, message: "Driver not found." });
+
+    return res.json({
+      success: true,
+      message: req.params.action === "deny" ? "Driver access denied." : "Driver application restored to pending approval.",
+      driver,
+    });
+  } catch (error) {
+    console.error("Driver access update error:", error);
+    return res.status(500).json({ success: false, message: "Unable to update driver access right now." });
+  }
+});
+
 /**
  * @swagger
  * /api/v1/drivers/nearby:
@@ -262,12 +292,17 @@ router.put("/me", async (req, res) => {
       {
         $set: {
           vehicle: {
+            type: String(vehicle.type || "").trim(),
             make: String(vehicle.make || "").trim(),
             model: String(vehicle.model || "").trim(),
+            year: toNumberOrNull(vehicle.year),
             plateNumber: String(vehicle.plateNumber || "").trim(),
             color: String(vehicle.color || "").trim(),
+            insuranceProvider: String(vehicle.insuranceProvider || "").trim(),
+            insurancePolicyNumber: String(vehicle.insurancePolicyNumber || "").trim(),
+            insuranceExpiresAt: vehicle.insuranceExpiresAt || null,
           },
-          vehicleType: [vehicle.make, vehicle.model].filter(Boolean).join(" ").trim(),
+          vehicleType: String(vehicle.type || [vehicle.make, vehicle.model].filter(Boolean).join(" ")).trim(),
         },
       },
       { new: true }
