@@ -1,6 +1,6 @@
 const router = require("express").Router();
 const mongoose = require("mongoose");
-const { getAllowedDatabaseNames, getModelsForDb } = require("../helpers/db-manager");
+const { normalizeDatabaseName, getAllowedDatabaseNames, getModelsForDb } = require("../helpers/db-manager");
 
 const requireAdmin = (req, res, next) => {
   if (!req.auth?.isAdmin) return res.status(403).json({ success: false, message: "Admin access required" });
@@ -89,23 +89,56 @@ router.get("/admin/owners", requireAdmin, async (req, res) => {
 
 router.put("/:id/:action(approve|deny|recover)", requireAdmin, async (req, res) => {
   try {
-    const requestedDatabaseName = String(req.body?.databaseName || req.dbName || "").trim();
-    if (!getAllowedDatabaseNames().includes(requestedDatabaseName)) {
-      return res.status(400).json({ success: false, message: "Invalid store database." });
-    }
-    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: "Invalid Store Id" });
+    const rawDb = String(req.body?.databaseName || req.query?.databaseName || req.dbName || "").trim();
+    const requestedDatabaseName = normalizeDatabaseName(rawDb);
 
-    const { Store, User } = getModelsForDb(requestedDatabaseName);
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid Store Id" });
+    }
+
+    let targetDb = requestedDatabaseName;
+    let { Store, User } = getModelsForDb(targetDb);
+    let store = await Store.findById(req.params.id);
+
+    // Fallback across allowed databases if not found in requested DB
+    if (!store) {
+      for (const dbName of getAllowedDatabaseNames()) {
+        if (dbName === targetDb) continue;
+        const models = getModelsForDb(dbName);
+        const found = await models.Store.findById(req.params.id);
+        if (found) {
+          targetDb = dbName;
+          Store = models.Store;
+          User = models.User;
+          store = found;
+          break;
+        }
+      }
+    }
+
+    if (!store) {
+      return res.status(404).json({ success: false, message: "Store not found." });
+    }
+
     const action = req.params.action;
     const update = action === "approve"
       ? { approvalStatus: "approved", isVerified: true, approvedAt: new Date(), approvedBy: req.auth.userId }
       : { approvalStatus: action === "deny" ? "denied" : "pending", isVerified: false, approvedAt: null, approvedBy: null };
-    const store = await Store.findByIdAndUpdate(req.params.id, { $set: update }, { new: true });
-    if (!store) return res.status(404).json({ success: false, message: "Store not found." });
+
+    store = await Store.findByIdAndUpdate(store._id, { $set: update }, { new: true });
+
     if (store.owner) {
-      await User.findByIdAndUpdate(store.owner, { $set: { isStoreOwner: true, storeOwnerApprovalStatus: update.approvalStatus } });
+      await User.findByIdAndUpdate(store.owner, {
+        $set: { isStoreOwner: true, storeOwnerApprovalStatus: update.approvalStatus }
+      });
     }
-    return res.json({ success: true, message: `Store owner ${action === "recover" ? "restored to pending approval" : `${action}d`}.`, store });
+
+    return res.json({
+      success: true,
+      message: `Store owner ${action === "recover" ? "restored to pending approval" : `${action}d`}.`,
+      databaseName: targetDb,
+      store,
+    });
   } catch (error) {
     console.error("Store owner access update error:", error);
     return res.status(500).json({ success: false, message: "Unable to update store owner access right now." });
@@ -321,21 +354,51 @@ router.put(`/:id`, async (req, res) => {
  *         description: Store not found
  */
 
-router.delete(`/:id`, async (req, res) => {
-  const { Store } = req.dbModels;
+router.delete(`/:id`, requireAdmin, async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) {
     return res.status(400).json({ success: false, message: "Invalid Store Id" });
   }
 
   try {
-    const deleted = await Store.findByIdAndDelete(req.params.id);
-    if (!deleted) {
+    const requestedDatabaseName = String(req.body?.databaseName || req.query?.databaseName || req.dbName || "").trim();
+    let targetDbName = requestedDatabaseName && getAllowedDatabaseNames().includes(normalizeDatabaseName(requestedDatabaseName))
+      ? normalizeDatabaseName(requestedDatabaseName)
+      : null;
+
+    let store = null;
+    let dbNameFound = null;
+
+    if (targetDbName) {
+      const { Store: TargetStore } = getModelsForDb(targetDbName);
+      store = await TargetStore.findById(req.params.id);
+      if (store) dbNameFound = targetDbName;
+    } else {
+      for (const dbName of getAllowedDatabaseNames()) {
+        const { Store: CheckStore } = getModelsForDb(dbName);
+        const found = await CheckStore.findById(req.params.id);
+        if (found) {
+          store = found;
+          dbNameFound = dbName;
+          break;
+        }
+      }
+    }
+
+    if (!store || !dbNameFound) {
       return res.status(404).json({ success: false, message: "Store not found!" });
     }
 
-    return res.status(200).json({ success: true, message: "the store is deleted!" });
+    const { Store, User } = getModelsForDb(dbNameFound);
+    if (store.owner) {
+      await User.findByIdAndUpdate(store.owner, {
+        $set: { isStoreOwner: false, storeOwnerApprovalStatus: null },
+      });
+    }
+
+    await Store.findByIdAndDelete(req.params.id);
+    return res.status(200).json({ success: true, message: "Store owner was successfully deleted!" });
   } catch (err) {
-    return res.status(400).json({ success: false, error: err?.message || err });
+    return res.status(500).json({ success: false, error: err?.message || err });
   }
 });
 

@@ -1616,6 +1616,16 @@ router.post("/upgrade-role", async (req, res) => {
       user.storeOwnerApprovalStatus = "pending";
       await user.save();
 
+      const { Store } = req.dbModels;
+      await Store.findOneAndUpdate(
+        { owner: user._id },
+        {
+          $set: { name: user.name || "Store", email: user.email, phone: user.phone || "", address: user.street || "Pending setup" },
+          $setOnInsert: { owner: user._id, approvalStatus: "pending", isVerified: false, isOpen: true },
+        },
+        { new: true, upsert: true, setDefaultsOnInsert: true }
+      );
+
       return res.status(200).json({
         success: true,
         message: "Your store owner application is pending. Complete your store details in the AGES Store app before admin review.",
