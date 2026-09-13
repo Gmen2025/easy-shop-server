@@ -12,6 +12,7 @@ const { payoutSchema } = require('../models/payout');
 const { serviceRequestSchema } = require('../models/service-request');
 
 const DEFAULT_DB_NAME = process.env.DEFAULT_DB_NAME || 'E_Shopping';
+const DEFAULT_ALLOWED_DBS = ['E_Shopping', 'E_Shopping_2', 'E_ShopUSA', 'E_ShoppingUSA'];
 
 function parseAllowedDatabases() {
   const fromEnv = process.env.ALLOWED_DB_NAMES || process.env.AVAILABLE_DB_NAMES || '';
@@ -22,7 +23,7 @@ function parseAllowedDatabases() {
     .filter(Boolean);
 }
 
-const allowedDatabases = new Set([DEFAULT_DB_NAME, ...parseAllowedDatabases()]);
+const allowedDatabases = new Set([DEFAULT_DB_NAME, ...DEFAULT_ALLOWED_DBS, ...parseAllowedDatabases()]);
 
 function normalizeDatabaseName(dbName) {
   if (!dbName || typeof dbName !== 'string') {
@@ -37,6 +38,25 @@ function normalizeDatabaseName(dbName) {
   // Allow alphanumeric, underscore and hyphen for safety.
   if (!/^[a-zA-Z0-9_-]+$/.test(normalized)) {
     return DEFAULT_DB_NAME;
+  }
+
+  if (allowedDatabases.has(normalized)) {
+    return normalized;
+  }
+
+  const lower = normalized.toLowerCase();
+  for (const allowed of allowedDatabases) {
+    if (allowed.toLowerCase() === lower) {
+      return allowed;
+    }
+  }
+
+  if (lower === 'e_shoppingusa' || lower === 'e_shpusa' || lower === 'shopusa' || lower === 'usa') {
+    for (const allowed of allowedDatabases) {
+      if (allowed.toLowerCase().includes('usa')) {
+        return allowed;
+      }
+    }
   }
 
   if (allowedDatabases.size > 1 && !allowedDatabases.has(normalized)) {

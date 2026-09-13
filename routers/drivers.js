@@ -3,7 +3,7 @@ const mongoose = require("mongoose");
 const { getNearbyDrivers } = require("../helpers/driver-location");
 const { sendPushToUser } = require("../helpers/push-notify");
 const { sendMailSafe } = require("../helpers/mailer");
-const { getAllowedDatabaseNames, getModelsForDb } = require("../helpers/db-manager");
+const { normalizeDatabaseName, getAllowedDatabaseNames, getModelsForDb } = require("../helpers/db-manager");
 
 const requireAdmin = (req, res, next) => {
   if (!req.auth?.isAdmin) {
@@ -93,17 +93,33 @@ router.get(`/`, requireAdmin, async (req, res) => {
 
 router.put("/:id/approve", requireAdmin, async (req, res) => {
   try {
-    const requestedDatabaseName = String(req.body?.databaseName || req.dbName || "").trim();
-    if (!getAllowedDatabaseNames().includes(requestedDatabaseName)) {
-      return res.status(400).json({ success: false, message: "Invalid driver database." });
-    }
+    const rawDb = String(req.body?.databaseName || req.query?.databaseName || req.dbName || "").trim();
+    const requestedDatabaseName = normalizeDatabaseName(rawDb);
 
-    const { Driver, User } = getModelsForDb(requestedDatabaseName);
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ success: false, message: "Invalid Driver Id" });
     }
 
-    const driver = await Driver.findById(req.params.id);
+    let targetDb = requestedDatabaseName;
+    let { Driver, User } = getModelsForDb(targetDb);
+    let driver = await Driver.findById(req.params.id);
+
+    // Fallback across allowed databases if not found in requested DB
+    if (!driver) {
+      for (const dbName of getAllowedDatabaseNames()) {
+        if (dbName === targetDb) continue;
+        const models = getModelsForDb(dbName);
+        const found = await models.Driver.findById(req.params.id);
+        if (found) {
+          targetDb = dbName;
+          Driver = models.Driver;
+          User = models.User;
+          driver = found;
+          break;
+        }
+      }
+    }
+
     if (!driver) {
       return res.status(404).json({ success: false, message: "Driver not found." });
     }
@@ -141,7 +157,7 @@ router.put("/:id/approve", requireAdmin, async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Driver approved and notified.",
-      databaseName: requestedDatabaseName,
+      databaseName: targetDb,
       driver,
     });
   } catch (error) {
@@ -152,26 +168,47 @@ router.put("/:id/approve", requireAdmin, async (req, res) => {
 
 router.put("/:id/:action(deny|recover)", requireAdmin, async (req, res) => {
   try {
-    const requestedDatabaseName = String(req.body?.databaseName || req.dbName || "").trim();
-    if (!getAllowedDatabaseNames().includes(requestedDatabaseName)) {
-      return res.status(400).json({ success: false, message: "Invalid driver database." });
-    }
+    const rawDb = String(req.body?.databaseName || req.query?.databaseName || req.dbName || "").trim();
+    const requestedDatabaseName = normalizeDatabaseName(rawDb);
+
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ success: false, message: "Invalid Driver Id" });
     }
 
-    const { Driver } = getModelsForDb(requestedDatabaseName);
+    let targetDb = requestedDatabaseName;
+    let { Driver } = getModelsForDb(targetDb);
+    let driver = await Driver.findById(req.params.id);
+
+    // Fallback across allowed databases if not found in requested DB
+    if (!driver) {
+      for (const dbName of getAllowedDatabaseNames()) {
+        if (dbName === targetDb) continue;
+        const models = getModelsForDb(dbName);
+        const found = await models.Driver.findById(req.params.id);
+        if (found) {
+          targetDb = dbName;
+          Driver = models.Driver;
+          driver = found;
+          break;
+        }
+      }
+    }
+
+    if (!driver) {
+      return res.status(404).json({ success: false, message: "Driver not found." });
+    }
+
     const status = req.params.action === "deny" ? "denied" : "pending";
-    const driver = await Driver.findByIdAndUpdate(
-      req.params.id,
-      { $set: { approvalStatus: status, isAvailable: false, approvedAt: null, approvedBy: null } },
-      { new: true }
-    );
-    if (!driver) return res.status(404).json({ success: false, message: "Driver not found." });
+    driver.approvalStatus = status;
+    driver.isAvailable = false;
+    driver.approvedAt = null;
+    driver.approvedBy = null;
+    await driver.save();
 
     return res.json({
       success: true,
       message: req.params.action === "deny" ? "Driver access denied." : "Driver application restored to pending approval.",
+      databaseName: targetDb,
       driver,
     });
   } catch (error) {
@@ -543,21 +580,51 @@ router.put(`/:id`, async (req, res) => {
  *         description: Driver not found
  */
 
-router.delete(`/:id`, async (req, res) => {
-  const { Driver } = req.dbModels;
+router.delete(`/:id`, requireAdmin, async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) {
     return res.status(400).json({ success: false, message: "Invalid Driver Id" });
   }
 
   try {
-    const deleted = await Driver.findByIdAndDelete(req.params.id);
-    if (!deleted) {
+    const requestedDatabaseName = String(req.body?.databaseName || req.query?.databaseName || req.dbName || "").trim();
+    let targetDbName = requestedDatabaseName && getAllowedDatabaseNames().includes(requestedDatabaseName)
+      ? requestedDatabaseName
+      : null;
+
+    let driver = null;
+    let dbNameFound = null;
+
+    if (targetDbName) {
+      const { Driver: TargetDriver } = getModelsForDb(targetDbName);
+      driver = await TargetDriver.findById(req.params.id);
+      if (driver) dbNameFound = targetDbName;
+    } else {
+      for (const dbName of getAllowedDatabaseNames()) {
+        const { Driver: CheckDriver } = getModelsForDb(dbName);
+        const found = await CheckDriver.findById(req.params.id);
+        if (found) {
+          driver = found;
+          dbNameFound = dbName;
+          break;
+        }
+      }
+    }
+
+    if (!driver || !dbNameFound) {
       return res.status(404).json({ success: false, message: "Driver not found!" });
     }
 
-    return res.status(200).json({ success: true, message: "the driver is deleted!" });
+    const { Driver, User } = getModelsForDb(dbNameFound);
+    if (driver.user) {
+      await User.findByIdAndUpdate(driver.user, {
+        $set: { isDriver: false, role: "user" },
+      });
+    }
+
+    await Driver.findByIdAndDelete(req.params.id);
+    return res.status(200).json({ success: true, message: "Driver was successfully deleted!" });
   } catch (err) {
-    return res.status(400).json({ success: false, error: err?.message || err });
+    return res.status(500).json({ success: false, error: err?.message || err });
   }
 });
 

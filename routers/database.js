@@ -1,11 +1,8 @@
 const express = require('express');
 const router = express.Router();
-const { normalizeDatabaseName, getDbConnection, DEFAULT_DB_NAME } = require('../helpers/db-manager');
+const { normalizeDatabaseName, getAllowedDatabaseNames, getDbConnection, DEFAULT_DB_NAME } = require('../helpers/db-manager');
 
-const ALLOWED_DB_NAMES = (process.env.ALLOWED_DB_NAMES || DEFAULT_DB_NAME)
-  .split(',')
-  .map((db) => db.trim())
-  .filter(Boolean);
+const ALLOWED_DB_NAMES = getAllowedDatabaseNames();
 
 /**
  * @swagger
