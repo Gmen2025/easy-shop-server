@@ -87,6 +87,358 @@ router.get("/admin/owners", requireAdmin, async (req, res) => {
   }
 });
 
+// Helper to compute store delivered revenue & balances for admin payout settlements
+async function computeStoreBalance(models, storeId) {
+  const { Order, Payout } = models;
+  const match = { store: new mongoose.Types.ObjectId(storeId), status: 'Delivered' };
+  const orders = await Order.find(match).populate({
+    path: 'orderItems',
+    populate: { path: 'product', select: 'name price store' }
+  });
+
+  let gross = 0;
+  for (const order of orders) {
+    let storeTotal = 0;
+    for (const item of order.orderItems || []) {
+      if (item?.product && String(item.product.store) === String(storeId)) {
+        storeTotal += (item.product.price || 0) * (item.quantity || 0);
+      }
+    }
+    if (storeTotal === 0 && order.totalPrice) storeTotal = order.totalPrice;
+    gross += storeTotal;
+  }
+
+  const COMMISSION_RATE = 0.05;
+  const totalEarned = gross * (1 - COMMISSION_RATE);
+  const payouts = await Payout.find({ store: storeId });
+  const paidOut = payouts.filter((p) => p.status === 'paid').reduce((s, p) => s + p.amount, 0);
+  const pending = payouts.filter((p) => ['pending', 'processing'].includes(p.status)).reduce((s, p) => s + p.amount, 0);
+  const available = Math.max(0, totalEarned - paidOut - pending);
+
+  return { gross, totalEarned, paidOut, pending, available: Number(available.toFixed(2)) };
+}
+
+// ---------------------------------------------------------------------------
+// ADMIN PAYOUT ENDPOINTS (Weekly settlement + Early on-demand payouts)
+// ---------------------------------------------------------------------------
+
+/**
+ * @swagger
+ * /api/v1/stores/admin/payouts:
+ *   get:
+ *     summary: List all store payouts (weekly batch & early requests)
+ *     tags: [Store Payouts]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: status
+ *         schema:
+ *           type: string
+ *           enum: [pending, processing, paid, rejected]
+ *         description: Filter by payout status
+ *       - in: query
+ *         name: payoutType
+ *         schema:
+ *           type: string
+ *           enum: [weekly, early_request]
+ *         description: Filter by weekly settlement or early on-demand request
+ *       - in: query
+ *         name: allDatabases
+ *         schema:
+ *           type: boolean
+ *         description: Return payouts aggregated across all regional databases (Ethio & USA)
+ *     responses:
+ *       200:
+ *         description: List of payouts with populated store details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 $ref: '#/components/schemas/Payout'
+ *       403:
+ *         description: Admin access required
+ *       500:
+ *         description: Server error
+ */
+router.get("/admin/payouts", requireAdmin, async (req, res) => {
+  try {
+    const filter = {};
+    if (req.query.status) filter.status = req.query.status;
+    if (req.query.payoutType) filter.payoutType = req.query.payoutType;
+
+    const fetchPayoutsForDb = async (databaseName) => {
+      const isUSA = databaseName.toUpperCase().includes("USA");
+      const currency = isUSA ? "USD" : "ETB";
+      const { Payout } = getModelsForDb(databaseName);
+      const payouts = await Payout.find(filter)
+        .populate("store", "name phone email bankAccount city country")
+        .sort({ dateRequested: -1 })
+        .lean();
+
+      return payouts.map((p) => ({
+        ...p,
+        databaseName,
+        currency: p.currency || currency,
+      }));
+    };
+
+    if (req.query.allDatabases === "true") {
+      const groups = await Promise.all(getAllowedDatabaseNames().map(fetchPayoutsForDb));
+      return res.json(groups.flat().sort((a, b) => new Date(b.dateRequested) - new Date(a.dateRequested)));
+    }
+
+    const currentDb = req.dbName || "E_Shopping";
+    const payouts = await fetchPayoutsForDb(currentDb);
+    return res.json(payouts);
+  } catch (error) {
+    console.error("Admin payouts list error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load payouts." });
+  }
+});
+
+/**
+ * @swagger
+ * /api/v1/stores/admin/payouts/eligible-weekly:
+ *   get:
+ *     summary: Calculate eligible weekly payouts for all approved stores in active database
+ *     tags: [Store Payouts]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Eligible stores with computed balances ready for weekly payout
+ *       403:
+ *         description: Admin access required
+ */
+router.get("/admin/payouts/eligible-weekly", requireAdmin, async (req, res) => {
+  try {
+    const currentDb = req.dbName || "E_Shopping";
+    const isUSA = currentDb.toUpperCase().includes("USA");
+    const currency = isUSA ? "USD" : "ETB";
+    const models = req.dbModels;
+    const { Store } = models;
+
+    const approvedStores = await Store.find({ approvalStatus: "approved" }).lean();
+    const eligible = [];
+
+    for (const store of approvedStores) {
+      const balance = await computeStoreBalance(models, store._id);
+      if (balance.available > 0) {
+        eligible.push({
+          storeId: store._id,
+          storeName: store.name,
+          phone: store.phone,
+          bankAccount: store.bankAccount,
+          currency,
+          availableBalance: balance.available,
+          totalEarned: balance.totalEarned,
+          paidOut: balance.paidOut,
+          pending: balance.pending,
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      databaseName: currentDb,
+      currency,
+      count: eligible.length,
+      stores: eligible,
+    });
+  } catch (error) {
+    console.error("Admin weekly eligible error:", error);
+    return res.status(500).json({ success: false, message: "Unable to compute weekly eligible payouts." });
+  }
+});
+
+/**
+ * @swagger
+ * /api/v1/stores/admin/payouts/batch-weekly:
+ *   post:
+ *     summary: Execute weekly batch settlement for all active stores
+ *     tags: [Store Payouts]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               databaseName:
+ *                 type: string
+ *                 example: E_Shopping
+ *               minAmount:
+ *                 type: number
+ *                 example: 0
+ *               status:
+ *                 type: string
+ *                 enum: [paid, processing]
+ *                 default: paid
+ *               adminNotes:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Batch weekly payout completed
+ *       403:
+ *         description: Admin access required
+ */
+router.post("/admin/payouts/batch-weekly", requireAdmin, async (req, res) => {
+  try {
+    const rawDb = String(req.body?.databaseName || req.query?.databaseName || req.dbName || "").trim();
+    const targetDb = normalizeDatabaseName(rawDb);
+    const isUSA = targetDb.toUpperCase().includes("USA");
+    const currency = isUSA ? "USD" : "ETB";
+
+    const models = getModelsForDb(targetDb);
+    const { Store, Payout } = models;
+
+    const approvedStores = await Store.find({ approvalStatus: "approved" });
+    const processed = [];
+    const minAmount = Number(req.body?.minAmount) || 0;
+    const referencePrefix = req.body?.referencePrefix || `BATCH-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
+    const autoPay = req.body?.status === "paid" || req.body?.markAsPaid !== false;
+
+    for (const store of approvedStores) {
+      const balance = await computeStoreBalance(models, store._id);
+      if (balance.available > minAmount) {
+        const payout = new Payout({
+          store: store._id,
+          amount: balance.available,
+          currency,
+          payoutType: "weekly",
+          status: autoPay ? "paid" : "processing",
+          method: isUSA ? "stripe_or_wire" : "telebirr_or_cbe",
+          accountDetails: store.bankAccount || store.phone || "Store registered payout account",
+          reference: `${referencePrefix}-${String(store._id).slice(-4)}`,
+          adminNotes: req.body?.adminNotes || `Weekly automatic platform settlement for period ending ${new Date().toLocaleDateString()}`,
+          processedBy: req.auth.userId,
+          dateProcessed: autoPay ? new Date() : null,
+        });
+        const saved = await payout.save();
+        processed.push({
+          id: saved.id,
+          storeName: store.name,
+          amount: saved.amount,
+          currency,
+          status: saved.status,
+          reference: saved.reference,
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      message: `Processed weekly payout for ${processed.length} stores in ${targetDb}.`,
+      databaseName: targetDb,
+      currency,
+      totalPayouts: processed.length,
+      payouts: processed,
+    });
+  } catch (error) {
+    console.error("Admin batch weekly payout error:", error);
+    return res.status(500).json({ success: false, message: "Unable to process weekly batch payout." });
+  }
+});
+
+/**
+ * @swagger
+ * /api/v1/stores/admin/payouts/{payoutId}:
+ *   put:
+ *     summary: Update payout status (approve, mark paid with reference, or reject)
+ *     tags: [Store Payouts]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: payoutId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Payout record ID
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               status:
+ *                 type: string
+ *                 enum: [pending, processing, paid, rejected]
+ *               reference:
+ *                 type: string
+ *                 example: TXN-123456
+ *               adminNotes:
+ *                 type: string
+ *                 example: Paid via CBE Direct Transfer
+ *               databaseName:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Payout record updated
+ *       404:
+ *         description: Payout record not found
+ */
+router.put("/admin/payouts/:payoutId", requireAdmin, async (req, res) => {
+  try {
+    const rawDb = String(req.body?.databaseName || req.query?.databaseName || req.dbName || "").trim();
+    const requestedDatabaseName = normalizeDatabaseName(rawDb);
+
+    if (!mongoose.isValidObjectId(req.params.payoutId)) {
+      return res.status(400).json({ success: false, message: "Invalid Payout Id" });
+    }
+
+    let targetDb = requestedDatabaseName;
+    let { Payout } = getModelsForDb(targetDb);
+    let payout = await Payout.findById(req.params.payoutId);
+
+    if (!payout) {
+      for (const dbName of getAllowedDatabaseNames()) {
+        if (dbName === targetDb) continue;
+        const models = getModelsForDb(dbName);
+        const found = await models.Payout.findById(req.params.payoutId);
+        if (found) {
+          targetDb = dbName;
+          Payout = models.Payout;
+          payout = found;
+          break;
+        }
+      }
+    }
+
+    if (!payout) {
+      return res.status(404).json({ success: false, message: "Payout record not found." });
+    }
+
+    const { status, reference, adminNotes } = req.body;
+    if (status && !["pending", "processing", "paid", "rejected"].includes(status)) {
+      return res.status(400).json({ success: false, message: "Invalid payout status." });
+    }
+
+    if (status) payout.status = status;
+    if (reference !== undefined) payout.reference = reference;
+    if (adminNotes !== undefined) payout.adminNotes = adminNotes;
+    if (status === "paid" || status === "rejected") {
+      payout.dateProcessed = new Date();
+      payout.processedBy = req.auth.userId;
+    }
+
+    const updated = await payout.save();
+
+    return res.json({
+      success: true,
+      message: `Payout marked as ${updated.status}.`,
+      databaseName: targetDb,
+      payout: updated,
+    });
+  } catch (error) {
+    console.error("Admin update payout error:", error);
+    return res.status(500).json({ success: false, message: "Unable to update payout record." });
+  }
+});
+
 router.put("/:id/:action(approve|deny|recover)", requireAdmin, async (req, res) => {
   try {
     const rawDb = String(req.body?.databaseName || req.query?.databaseName || req.dbName || "").trim();

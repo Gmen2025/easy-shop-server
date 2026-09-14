@@ -641,8 +641,36 @@ router.get('/:id/reviews', async (req, res) => {
 
 // ---------------------------------------------------------------------------
 // GET /:id/earnings — balances + transaction ledger.
-// POST /:id/payouts — request a payout of the available balance.
+// POST /:id/payouts — request a payout of the available balance (early request).
 // ---------------------------------------------------------------------------
+
+/**
+ * @swagger
+ * /api/v1/stores/{id}/earnings:
+ *   get:
+ *     summary: Get store earnings, balances, delivered orders ledger, and past payouts
+ *     tags: [Store Owner]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Store ID
+ *     responses:
+ *       200:
+ *         description: Store earnings balances and transaction ledger
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/StoreEarningsResponse'
+ *       403:
+ *         description: Not authorized to access this store
+ *       404:
+ *         description: Store not found
+ */
 router.get('/:id/earnings', async (req, res) => {
   try {
     const store = await getOwnedStore(req, res);
@@ -651,6 +679,9 @@ router.get('/:id/earnings', async (req, res) => {
     const { Payout } = req.dbModels;
     const { deliveredOrders, gross } = await getStoreOrderStats(req, store._id);
     const payouts = await Payout.find({ store: store._id }).sort({ dateRequested: -1 });
+
+    const isUSA = String(req.dbName || '').toUpperCase().includes('USA');
+    const currency = isUSA ? 'USD' : 'ETB';
 
     const COMMISSION_RATE = 0.05;
     const totalEarned = gross * (1 - COMMISSION_RATE);
@@ -672,17 +703,70 @@ router.get('/:id/earnings', async (req, res) => {
 
     return res.json({
       success: true,
+      currency,
+      payoutSchedule: 'Weekly settlement every Monday. Early payout available on-demand.',
       available: Number(available.toFixed(2)),
       pending: Number(pending.toFixed(2)),
       totalEarned: Number(totalEarned.toFixed(2)),
+      bankAccount: store.bankAccount || '',
+      phone: store.phone || '',
       transactions,
-      payouts: payouts.map((p) => ({ id: p.id, amount: p.amount, status: p.status, date: p.dateRequested })),
+      payouts: payouts.map((p) => ({
+        id: p.id,
+        amount: p.amount,
+        currency: p.currency || currency,
+        payoutType: p.payoutType || 'early_request',
+        status: p.status,
+        method: p.method || 'bank',
+        accountDetails: p.accountDetails || '',
+        reference: p.reference || '',
+        adminNotes: p.adminNotes || '',
+        date: p.dateRequested,
+        dateProcessed: p.dateProcessed,
+      })),
     });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/stores/{id}/payouts:
+ *   post:
+ *     summary: Request an early on-demand payout from available earnings balance
+ *     tags: [Store Owner]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Store ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/EarlyPayoutRequest'
+ *     responses:
+ *       201:
+ *         description: Early payout request submitted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string }
+ *                 payout: { $ref: '#/components/schemas/Payout' }
+ *       400:
+ *         description: Insufficient balance or invalid amount
+ *       403:
+ *         description: Not authorized to access this store
+ */
 router.post('/:id/payouts', async (req, res) => {
   try {
     const store = await getOwnedStore(req, res);
@@ -708,15 +792,35 @@ router.post('/:id/payouts', async (req, res) => {
       return res.status(400).json({ success: false, message: `Insufficient balance. Available: ${available.toFixed(2)}` });
     }
 
+    const isUSA = String(req.dbName || '').toUpperCase().includes('USA');
+    const currency = isUSA ? 'USD' : 'ETB';
+    const accountDetails = req.body?.accountDetails || store.bankAccount || store.phone || 'Standard Payout Account';
+
     const payout = new Payout({
       store: store._id,
-      amount,
-      method: req.body?.method || 'bank',
-      reference: `PO-${Date.now()}`,
+      amount: Number(amount.toFixed(2)),
+      currency,
+      payoutType: req.body?.payoutType || 'early_request',
+      method: req.body?.method || (isUSA ? 'stripe_or_wire' : 'telebirr_or_bank'),
+      accountDetails,
+      reference: `REQ-${Date.now()}`,
+      status: 'pending',
     });
     const saved = await payout.save();
 
-    return res.status(201).json({ success: true, payout: { id: saved.id, amount: saved.amount, status: saved.status, reference: saved.reference } });
+    return res.status(201).json({
+      success: true,
+      message: 'Early payout requested successfully. Platform admin will review and process payment.',
+      payout: {
+        id: saved.id,
+        amount: saved.amount,
+        currency: saved.currency,
+        payoutType: saved.payoutType,
+        status: saved.status,
+        reference: saved.reference,
+        accountDetails: saved.accountDetails,
+      },
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

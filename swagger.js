@@ -87,8 +87,88 @@ const swaggerOptions = {
             id: { type: 'string' },
             name: { type: 'string' },
             address: { type: 'string' },
+            phone: { type: 'string' },
+            email: { type: 'string' },
+            bankAccount: { type: 'string', description: 'Bank / Payout account for weekly settlements or early requests' },
+            approvalStatus: {
+              type: 'string',
+              enum: ['pending', 'approved', 'denied'],
+              default: 'pending'
+            },
             location: {
               $ref: '#/components/schemas/GeoPoint'
+            }
+          }
+        },
+        Payout: {
+          type: 'object',
+          required: ['store', 'amount'],
+          properties: {
+            id: { type: 'string' },
+            store: {
+              oneOf: [
+                { type: 'string' },
+                { $ref: '#/components/schemas/Store' }
+              ]
+            },
+            amount: { type: 'number', minimum: 0, description: 'Payout amount in regional currency' },
+            currency: { type: 'string', enum: ['ETB', 'USD'], default: 'ETB' },
+            payoutType: {
+              type: 'string',
+              enum: ['weekly', 'early_request'],
+              default: 'early_request',
+              description: 'Weekly scheduled settlement or on-demand early request'
+            },
+            status: {
+              type: 'string',
+              enum: ['pending', 'processing', 'paid', 'rejected'],
+              default: 'pending'
+            },
+            method: { type: 'string', example: 'telebirr_or_cbe', description: 'Payout payment method' },
+            accountDetails: { type: 'string', description: 'Account number, Telebirr phone, or wire details' },
+            reference: { type: 'string', example: 'REQ-1694688000000', description: 'Transaction reference code' },
+            adminNotes: { type: 'string', description: 'Optional admin confirmation or reason notes' },
+            dateRequested: { type: 'string', format: 'date-time' },
+            dateProcessed: { type: 'string', format: 'date-time', nullable: true }
+          }
+        },
+        EarlyPayoutRequest: {
+          type: 'object',
+          required: ['amount'],
+          properties: {
+            amount: { type: 'number', minimum: 0.01, example: 500.0, description: 'Amount to withdraw before weekly settlement' },
+            method: { type: 'string', example: 'bank', description: 'Payment channel: bank, telebirr, or stripe_or_wire' },
+            accountDetails: { type: 'string', example: 'CBE 1000123456789', description: 'Custom or override payout account number' }
+          }
+        },
+        StoreEarningsResponse: {
+          type: 'object',
+          properties: {
+            success: { type: 'boolean', example: true },
+            currency: { type: 'string', example: 'ETB' },
+            payoutSchedule: { type: 'string', example: 'Weekly settlement every Monday. Early payout available on-demand.' },
+            available: { type: 'number', example: 1250.50, description: 'Balance available for early withdrawal' },
+            pending: { type: 'number', example: 400.00, description: 'Amount currently in pending/processing payouts' },
+            totalEarned: { type: 'number', example: 5400.00, description: 'Lifetime net earnings (95% after 5% platform fee)' },
+            bankAccount: { type: 'string', example: 'CBE 1000123456789' },
+            phone: { type: 'string', example: '+251911223344' },
+            transactions: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  date: { type: 'string', format: 'date-time' },
+                  order: { type: 'string', example: '#ab1234' },
+                  amount: { type: 'number', description: 'Gross order amount' },
+                  commission: { type: 'number', description: '5% platform fee' },
+                  net: { type: 'number', description: '95% store revenue' }
+                }
+              }
+            },
+            payouts: {
+              type: 'array',
+              items: { $ref: '#/components/schemas/Payout' }
             }
           }
         },
@@ -353,6 +433,8 @@ const swaggerOptions = {
     },
     tags: [
       { name: 'Stores', description: 'Store management endpoints with GeoJSON coordinates for delivery dispatching.' },
+      { name: 'Store Owner', description: 'Store owner portal for inventory, reviews, sales analysis, earnings, and on-demand early payouts.' },
+      { name: 'Store Payouts', description: 'Platform admin endpoints for managing weekly batch settlements and approving early payout requests across Ethiopia (ETB) and USA (USD).' },
       { name: 'Drivers', description: 'Driver management endpoints with availability and live GPS location.' },
       { name: 'Notifications', description: 'Push notification endpoints for device token management and admin message delivery.' },
       { name: 'Database', description: 'Multi-database switching endpoints — no authentication required. Use x-database-name header on all subsequent requests after switching.' },
