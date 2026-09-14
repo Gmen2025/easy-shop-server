@@ -217,6 +217,66 @@ router.get('/mine/by-owner', async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// PUT /mine/update — let the authenticated owner edit their own store profile.
+// ---------------------------------------------------------------------------
+router.put('/mine/update', async (req, res) => {
+  try {
+    const { Store } = req.dbModels;
+    const userId = req.auth?.userId;
+    if (!userId) return res.status(401).json({ success: false, message: 'Not authenticated.' });
+
+    const store = await Store.findOne({ owner: userId });
+    if (!store) return res.status(404).json({ success: false, message: 'No store found for this account.' });
+
+    const {
+      storeName, name, phone, category, address, city, country,
+      description, bankAccount, openHour, closeHour, latitude, longitude,
+    } = req.body || {};
+
+    if (storeName || name) store.name = storeName || name;
+    if (phone !== undefined) store.phone = phone;
+    if (category !== undefined) store.category = category;
+    if (address !== undefined) store.address = address;
+    if (city !== undefined) store.city = city;
+    if (country !== undefined) store.country = country;
+    if (description !== undefined) store.description = description;
+    if (bankAccount !== undefined) store.bankAccount = bankAccount;
+    if (openHour !== undefined) store.openHour = openHour;
+    if (closeHour !== undefined) store.closeHour = closeHour;
+    if (latitude != null && longitude != null) {
+      store.location = { type: 'Point', coordinates: [toNum(longitude), toNum(latitude)] };
+    }
+
+    await store.save();
+
+    return res.json({
+      success: true,
+      message: 'Store profile updated.',
+      store: {
+        id: store.id,
+        name: store.name,
+        address: store.address,
+        phone: store.phone,
+        email: store.email,
+        category: store.category,
+        city: store.city,
+        country: store.country,
+        description: store.description,
+        bankAccount: store.bankAccount,
+        openHour: store.openHour,
+        closeHour: store.closeHour,
+        isOpen: store.isOpen,
+        approvalStatus: store.approvalStatus,
+        latitude: store.location?.coordinates?.[1] ?? null,
+        longitude: store.location?.coordinates?.[0] ?? null,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /:id/dashboard — headline metrics for the store dashboard.
 // ---------------------------------------------------------------------------
 router.get('/:id/dashboard', async (req, res) => {
