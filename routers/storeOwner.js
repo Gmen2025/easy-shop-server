@@ -421,6 +421,8 @@ router.get('/:id/products', async (req, res) => {
         brand: p.brand || '',
         description: p.description || '',
         image: p.image || '',
+        approvalStatus: p.approvalStatus || 'approved',
+        rejectionReason: p.rejectionReason || '',
       })),
     });
   } catch (err) {
@@ -434,7 +436,7 @@ router.post('/:id/products', async (req, res) => {
     if (!store) return;
 
     const { Product, Category } = req.dbModels;
-    const { name, price, stock, minStock, sku, brand, description, weight, category } = req.body || {};
+    const { name, price, stock, minStock, sku, brand, description, weight, category, image, images } = req.body || {};
 
     if (!name || price == null) {
       return res.status(400).json({ success: false, message: 'Product name and price are required.' });
@@ -457,10 +459,13 @@ router.post('/:id/products', async (req, res) => {
       return res.status(400).json({ success: false, message: 'A valid category is required.' });
     }
 
+    // Store-owner submissions must be reviewed by an admin before they appear in the shop.
     const product = new Product({
       name,
       description: description || name,
       richDescription: weight ? `Weight/Size: ${weight}` : '',
+      image: typeof image === 'string' ? image.trim() : '',
+      images: Array.isArray(images) ? images.filter((url) => typeof url === 'string' && url.trim()) : [],
       price: toNum(price),
       category: categoryId,
       store: store._id,
@@ -469,14 +474,18 @@ router.post('/:id/products', async (req, res) => {
       sku: sku || '',
       brand: brand || '',
       soldCount: 0,
+      approvalStatus: 'pending',
+      submittedBy: req.auth?.userId || null,
     });
 
     const saved = await product.save();
     return res.status(201).json({
       success: true,
+      message: 'Product submitted for admin review.',
       product: {
         id: saved.id, name: saved.name, price: saved.price, stock: saved.countInStock,
         sold: saved.soldCount, minStock: saved.minStock, sku: saved.sku, brand: saved.brand,
+        image: saved.image, approvalStatus: saved.approvalStatus,
       },
     });
   } catch (err) {
@@ -496,14 +505,33 @@ router.put('/:id/products/:productId', async (req, res) => {
     const product = await Product.findOne({ _id: req.params.productId, store: store._id });
     if (!product) return res.status(404).json({ success: false, message: 'Product not found in this store.' });
 
-    const fields = ['name', 'description', 'brand', 'sku', 'image'];
+    // Edits to listing details (not just stock) must go back through admin review.
+    const catalogFields = ['name', 'description', 'brand', 'sku', 'image'];
+    const changedCatalogField = catalogFields.some((f) => req.body[f] !== undefined && req.body[f] !== product[f]);
+    const changedPrice = req.body.price !== undefined && toNum(req.body.price, product.price) !== product.price;
+
+    const fields = catalogFields;
     for (const f of fields) if (req.body[f] !== undefined) product[f] = req.body[f];
     if (req.body.price !== undefined) product.price = toNum(req.body.price, product.price);
+    // Quantity is always editable regardless of approval status, so stock stays accurate for dispatch.
     if (req.body.stock !== undefined) product.countInStock = Math.max(0, parseInt(req.body.stock, 10) || 0);
     if (req.body.minStock !== undefined) product.minStock = Math.max(0, parseInt(req.body.minStock, 10) || 0);
 
+    if ((changedCatalogField || changedPrice) && product.approvalStatus !== 'pending') {
+      product.approvalStatus = 'pending';
+      product.approvedAt = null;
+      product.approvedBy = null;
+      product.rejectionReason = '';
+    }
+
     const saved = await product.save();
-    return res.json({ success: true, product: { id: saved.id, name: saved.name, price: saved.price, stock: saved.countInStock, minStock: saved.minStock } });
+    return res.json({
+      success: true,
+      product: {
+        id: saved.id, name: saved.name, price: saved.price, stock: saved.countInStock,
+        minStock: saved.minStock, approvalStatus: saved.approvalStatus,
+      },
+    });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

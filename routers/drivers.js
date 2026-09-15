@@ -4,6 +4,14 @@ const { getNearbyDrivers } = require("../helpers/driver-location");
 const { sendPushToUser } = require("../helpers/push-notify");
 const { sendMailSafe } = require("../helpers/mailer");
 const { normalizeDatabaseName, getAllowedDatabaseNames, getModelsForDb } = require("../helpers/db-manager");
+const {
+  getCommissionRate,
+  getLowBalanceThreshold,
+  getSuspendThreshold,
+  checkBalanceThresholds,
+  reinstateDriverIfEligible,
+} = require("../helpers/driver-wallet");
+const { buildDriverOrderSummary } = require("../helpers/driver-view");
 
 const requireAdmin = (req, res, next) => {
   if (!req.auth?.isAdmin) {
@@ -266,7 +274,7 @@ router.get(`/nearby`, async (req, res) => {
   if (liveDrivers.length > 0) {
     const validIds = liveDrivers.map((d) => d.driverId).filter((id) => mongoose.isValidObjectId(id));
     const driverDocs = validIds.length
-      ? await Driver.find({ _id: { $in: validIds } }).select("name vehicleType isAvailable")
+      ? await Driver.find({ _id: { $in: validIds } }).select("name vehicleType isAvailable isSuspended")
       : [];
     const byId = new Map(driverDocs.map((doc) => [String(doc._id), doc]));
 
@@ -278,9 +286,10 @@ router.get(`/nearby`, async (req, res) => {
           name: doc?.name || "Driver",
           vehicleType: doc?.vehicleType || "",
           isAvailable: doc ? Boolean(doc.isAvailable) : true,
+          isSuspended: doc ? Boolean(doc.isSuspended) : false,
         };
       })
-      .filter((entry) => entry.isAvailable);
+      .filter((entry) => entry.isAvailable && !entry.isSuspended);
 
     return res.send({ success: true, count: enriched.length, drivers: enriched });
   }
@@ -288,6 +297,7 @@ router.get(`/nearby`, async (req, res) => {
   // Fallback: last persisted driver locations in Mongo.
   const mongoDrivers = await Driver.find({
     isAvailable: true,
+    isSuspended: { $ne: true },
     location: {
       $near: {
         $geometry: { type: "Point", coordinates: [longitude, latitude] },
@@ -353,6 +363,330 @@ router.put("/me", async (req, res) => {
   } catch (error) {
     console.error("Driver vehicle update error:", error);
     return res.status(500).json({ success: false, message: "Unable to save vehicle details right now." });
+  }
+});
+
+// Driver's current delivery queue: every order assigned to them that isn't delivered yet,
+// ordered the way they should work it (batch, then sequence). Drop-off details are
+// sanitized per order until that specific order has been marked picked up.
+router.get("/me/queue", async (req, res) => {
+  try {
+    const userId = req.auth?.userId;
+    const { Driver, Order } = req.dbModels;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const driver = await Driver.findOne({ user: userId }).select("_id");
+    if (!driver) {
+      return res.status(404).json({ success: false, message: "Driver profile not found." });
+    }
+
+    const orders = await Order.find({
+      driver: driver._id,
+      deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] },
+    })
+      .sort({ queueBatchId: 1, queueSequence: 1 })
+      .populate("store", "name address location")
+      .populate("customer", "name phone")
+      .populate("user", "name phone");
+
+    return res.status(200).json({
+      success: true,
+      count: orders.length,
+      queue: orders.map((order) => buildDriverOrderSummary(order)),
+    });
+  } catch (error) {
+    console.error("Driver queue fetch error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load delivery queue right now." });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Driver wallet: deposits, commission balance, low-balance alerts, suspension.
+// ---------------------------------------------------------------------------
+
+router.get("/me/wallet", async (req, res) => {
+  try {
+    const userId = req.auth?.userId;
+    const { Driver, DriverWalletTransaction } = req.dbModels;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const driver = await Driver.findOne({ user: userId });
+    if (!driver) {
+      return res.status(404).json({ success: false, message: "Driver profile not found." });
+    }
+
+    const transactions = await DriverWalletTransaction.find({ driver: driver._id })
+      .sort({ createdAt: -1 })
+      .limit(20);
+
+    return res.status(200).json({
+      success: true,
+      walletBalance: driver.walletBalance,
+      commissionRate: getCommissionRate(driver),
+      lowBalanceThreshold: getLowBalanceThreshold(),
+      suspendThreshold: getSuspendThreshold(),
+      isSuspended: driver.isSuspended,
+      autoSuspended: driver.autoSuspended,
+      suspensionReason: driver.suspensionReason,
+      transactions,
+    });
+  } catch (error) {
+    console.error("Driver wallet fetch error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load wallet right now." });
+  }
+});
+
+// Drivers submit a top-up claim (e.g. mobile-money/bank transfer reference); an admin
+// must approve it before the balance is credited, so a driver can never self-credit.
+router.post("/me/wallet/deposit-requests", async (req, res) => {
+  try {
+    const userId = req.auth?.userId;
+    const { Driver, DriverWalletTransaction } = req.dbModels;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const driver = await Driver.findOne({ user: userId });
+    if (!driver) {
+      return res.status(404).json({ success: false, message: "Driver profile not found." });
+    }
+
+    const amount = Number(req.body?.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      return res.status(400).json({ success: false, message: "amount must be a positive number." });
+    }
+
+    const transaction = await DriverWalletTransaction.create({
+      driver: driver._id,
+      type: "deposit",
+      amount,
+      balanceAfter: driver.walletBalance,
+      provider: String(req.body?.provider || "").trim(),
+      reference: String(req.body?.reference || "").trim(),
+      notes: String(req.body?.notes || "").trim(),
+      status: "pending",
+    });
+
+    return res.status(201).json({ success: true, transaction });
+  } catch (error) {
+    console.error("Driver deposit request error:", error);
+    return res.status(500).json({ success: false, message: "Unable to submit deposit request right now." });
+  }
+});
+
+router.get("/wallet/deposit-requests", requireAdmin, async (req, res) => {
+  try {
+    const { DriverWalletTransaction } = req.dbModels;
+    const status = String(req.query.status || "pending");
+    const filter = { type: "deposit" };
+    if (status !== "all") filter.status = status;
+
+    const requests = await DriverWalletTransaction.find(filter)
+      .sort({ createdAt: -1 })
+      .populate("driver", "name email phone walletBalance isSuspended");
+
+    return res.status(200).json({ success: true, requests });
+  } catch (error) {
+    console.error("Driver deposit request list error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load deposit requests right now." });
+  }
+});
+
+router.put("/wallet/deposit-requests/:transactionId/approve", requireAdmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.transactionId)) {
+      return res.status(400).json({ success: false, message: "Invalid transaction id." });
+    }
+
+    const { Driver, DriverWalletTransaction, User } = req.dbModels;
+    const transaction = await DriverWalletTransaction.findById(req.params.transactionId);
+    if (!transaction || transaction.type !== "deposit" || transaction.status !== "pending") {
+      return res.status(404).json({ success: false, message: "Pending deposit request not found." });
+    }
+
+    const driver = await Driver.findByIdAndUpdate(
+      transaction.driver,
+      { $inc: { walletBalance: transaction.amount } },
+      { new: true }
+    );
+    if (!driver) {
+      return res.status(404).json({ success: false, message: "Driver not found." });
+    }
+
+    transaction.status = "completed";
+    transaction.balanceAfter = driver.walletBalance;
+    transaction.createdBy = req.auth.userId;
+    await transaction.save();
+
+    await reinstateDriverIfEligible({ Driver, User, driver });
+
+    return res.status(200).json({ success: true, driver, transaction });
+  } catch (error) {
+    console.error("Driver deposit approval error:", error);
+    return res.status(500).json({ success: false, message: "Unable to approve deposit right now." });
+  }
+});
+
+router.put("/wallet/deposit-requests/:transactionId/reject", requireAdmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.transactionId)) {
+      return res.status(400).json({ success: false, message: "Invalid transaction id." });
+    }
+
+    const { DriverWalletTransaction } = req.dbModels;
+    const transaction = await DriverWalletTransaction.findById(req.params.transactionId);
+    if (!transaction || transaction.status !== "pending") {
+      return res.status(404).json({ success: false, message: "Pending deposit request not found." });
+    }
+
+    transaction.status = "failed";
+    transaction.createdBy = req.auth.userId;
+    if (req.body?.reason) {
+      transaction.notes = `${transaction.notes ? `${transaction.notes} | ` : ""}Rejected: ${req.body.reason}`;
+    }
+    await transaction.save();
+
+    return res.status(200).json({ success: true, transaction });
+  } catch (error) {
+    console.error("Driver deposit rejection error:", error);
+    return res.status(500).json({ success: false, message: "Unable to reject deposit right now." });
+  }
+});
+
+// Trusted admin path for manual credits/debits (cash top-ups, corrections). Positive
+// amount credits the wallet, negative amount debits it (e.g. correcting an overpayment).
+router.post("/:id/wallet/adjust", requireAdmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid Driver Id" });
+    }
+
+    const { Driver, DriverWalletTransaction, User } = req.dbModels;
+    const amount = Number(req.body?.amount);
+    if (!Number.isFinite(amount) || amount === 0) {
+      return res.status(400).json({ success: false, message: "amount must be a non-zero number." });
+    }
+
+    const driver = await Driver.findByIdAndUpdate(
+      req.params.id,
+      { $inc: { walletBalance: amount } },
+      { new: true }
+    );
+    if (!driver) {
+      return res.status(404).json({ success: false, message: "Driver not found." });
+    }
+
+    await DriverWalletTransaction.create({
+      driver: driver._id,
+      type: amount > 0 ? "deposit" : "adjustment",
+      amount: Math.abs(amount),
+      balanceAfter: driver.walletBalance,
+      provider: "admin",
+      reference: String(req.body?.reference || "").trim(),
+      notes: String(req.body?.notes || "Manual admin adjustment"),
+      createdBy: req.auth.userId,
+    });
+
+    if (amount > 0) {
+      await reinstateDriverIfEligible({ Driver, User, driver });
+    } else {
+      await checkBalanceThresholds({ User, driver });
+    }
+
+    return res.status(200).json({ success: true, driver });
+  } catch (error) {
+    console.error("Driver wallet adjustment error:", error);
+    return res.status(500).json({ success: false, message: "Unable to adjust wallet right now." });
+  }
+});
+
+router.get("/:id/wallet/transactions", requireAdmin, async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    return res.status(400).json({ success: false, message: "Invalid Driver Id" });
+  }
+
+  const { DriverWalletTransaction } = req.dbModels;
+  const transactions = await DriverWalletTransaction.find({ driver: req.params.id })
+    .sort({ createdAt: -1 })
+    .limit(100);
+
+  return res.status(200).json({ success: true, transactions });
+});
+
+// Admin suspends a driver (overrides availability regardless of wallet balance).
+router.put("/:id/suspend", requireAdmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid Driver Id" });
+    }
+
+    const { Driver, User } = req.dbModels;
+    const driver = await Driver.findById(req.params.id);
+    if (!driver) {
+      return res.status(404).json({ success: false, message: "Driver not found." });
+    }
+
+    driver.isSuspended = true;
+    driver.autoSuspended = false;
+    driver.suspensionReason = String(req.body?.reason || "Suspended by admin.");
+    driver.suspendedAt = new Date();
+    driver.suspendedBy = req.auth.userId;
+    driver.isAvailable = false;
+    await driver.save();
+
+    await sendPushToUser({
+      User,
+      userId: driver.user,
+      title: "Account suspended",
+      body: driver.suspensionReason,
+      data: { type: "driver_suspended", driverId: String(driver._id), reason: "admin" },
+    });
+
+    return res.status(200).json({ success: true, driver });
+  } catch (error) {
+    console.error("Driver suspend error:", error);
+    return res.status(500).json({ success: false, message: "Unable to suspend driver right now." });
+  }
+});
+
+// Admin overrides any suspension (auto or manual) and brings the driver back live.
+router.put("/:id/reinstate", requireAdmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid Driver Id" });
+    }
+
+    const { Driver, User } = req.dbModels;
+    const driver = await Driver.findById(req.params.id);
+    if (!driver) {
+      return res.status(404).json({ success: false, message: "Driver not found." });
+    }
+
+    driver.isSuspended = false;
+    driver.autoSuspended = false;
+    driver.suspensionReason = "";
+    driver.suspendedAt = null;
+    driver.suspendedBy = null;
+    driver.lowBalanceNotifiedAt = null;
+    driver.isAvailable = true;
+    await driver.save();
+
+    await sendPushToUser({
+      User,
+      userId: driver.user,
+      title: "You're back online",
+      body: "An admin has reinstated your account. You are now live and ready for business.",
+      data: { type: "driver_reinstated", driverId: String(driver._id) },
+    });
+
+    return res.status(200).json({ success: true, driver });
+  } catch (error) {
+    console.error("Driver reinstate error:", error);
+    return res.status(500).json({ success: false, message: "Unable to reinstate driver right now." });
   }
 });
 
@@ -547,6 +881,16 @@ router.put(`/:id`, async (req, res) => {
   if (req.body.isAvailable !== undefined) updateFields.isAvailable = Boolean(req.body.isAvailable);
   if (req.body.vehicleType !== undefined) updateFields.vehicleType = req.body.vehicleType;
   if (parsedPoint.value) updateFields.location = parsedPoint.value;
+
+  if (updateFields.isAvailable === true) {
+    const existingDriver = await Driver.findById(req.params.id).select("isSuspended");
+    if (existingDriver?.isSuspended) {
+      return res.status(403).json({
+        success: false,
+        message: "Your account is suspended. Top up your wallet balance or contact support to resume deliveries.",
+      });
+    }
+  }
 
   const updated = await Driver.findByIdAndUpdate(req.params.id, updateFields, { new: true });
   if (!updated) {

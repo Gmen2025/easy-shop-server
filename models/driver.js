@@ -58,6 +58,43 @@ const driverSchema = new mongoose.Schema({
     type: [String],
     default: [],
   },
+  walletBalance: {
+    type: Number,
+    default: 0,
+  },
+  commissionRate: {
+    // Fraction (0-1) of each delivery fee kept by the platform. Falls back to DRIVER_COMMISSION_RATE env when null.
+    type: Number,
+    default: null,
+    min: 0,
+    max: 1,
+  },
+  isSuspended: {
+    type: Boolean,
+    default: false,
+  },
+  autoSuspended: {
+    // true when the system (not an admin) suspended the driver for low balance.
+    type: Boolean,
+    default: false,
+  },
+  suspensionReason: {
+    type: String,
+    default: "",
+  },
+  suspendedAt: {
+    type: Date,
+    default: null,
+  },
+  suspendedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: "User",
+    default: null,
+  },
+  lowBalanceNotifiedAt: {
+    type: Date,
+    default: null,
+  },
   location: {
     type: {
       type: String,

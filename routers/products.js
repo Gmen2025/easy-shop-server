@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
+const { sendPushToUser } = require('../helpers/push-notify');
 
 cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -87,6 +88,12 @@ router.get(`/`, async(req, res) => {
         } else if (req.query.isFeatured === 'false') {
             filter.isFeatured = false;
         }
+
+        // Hide products still awaiting/denied admin review from the public storefront.
+        // Legacy products created before this field existed are treated as approved.
+        if (!req.auth?.isAdmin) {
+            filter.$or = [{ approvalStatus: 'approved' }, { approvalStatus: { $exists: false } }];
+        }
         
         console.log('Products filter:', filter);
         
@@ -127,11 +134,19 @@ router.get(`/`, async(req, res) => {
      const { Product } = req.dbModels;
         const product = await Product.findById(req.params.id)
             .populate('category')
-            .populate('store', 'name address location');
+            .populate('store', 'name address location owner');
  
     if(!product) {
         res.status(500).json({message: 'The product with the given ID was not found.'})
-    } 
+    }
+
+    // Non-approved listings are only visible to admins and the submitting store's owner.
+    const isApprovedOrLegacy = !product.approvalStatus || product.approvalStatus === 'approved';
+    const isOwner = product.store?.owner && String(product.store.owner) === String(req.auth?.userId);
+    if (!isApprovedOrLegacy && !req.auth?.isAdmin && !isOwner) {
+        return res.status(404).json({ message: 'The product with the given ID was not found.' });
+    }
+
     res.send(product);
   })
  
@@ -533,6 +548,107 @@ router.put('/gallery-images/:id', uploadOptions.array('images', 10), async(req, 
     res.send(product);
 })
 
+// ---------------------------------------------------------------------------
+// Admin review queue for store-owner product submissions.
+// ---------------------------------------------------------------------------
 
+const requireAdmin = (req, res, next) => {
+    if (!req.auth?.isAdmin) {
+        return res.status(403).json({ success: false, message: 'Admin access required' });
+    }
+    next();
+};
+
+router.get('/admin/pending', requireAdmin, async (req, res) => {
+    const { Product } = req.dbModels;
+    const status = ['pending', 'approved', 'denied'].includes(req.query.status) ? req.query.status : 'pending';
+
+    const products = await Product.find({ approvalStatus: status })
+        .populate('category', 'name')
+        .populate('store', 'name address owner')
+        .populate('submittedBy', 'name email')
+        .sort({ dateCreated: -1 });
+
+    return res.status(200).json({ success: true, products });
+});
+
+router.put('/:id/approve', requireAdmin, async (req, res) => {
+    const { Product, Store, User } = req.dbModels;
+    if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ success: false, message: 'Invalid product id.' });
+    }
+
+    const product = await Product.findById(req.params.id).populate('store', 'name owner');
+    if (!product) {
+        return res.status(404).json({ success: false, message: 'Product not found.' });
+    }
+
+    // Avoid listing the same item twice for a store that already has it live.
+    const duplicate = await Product.findOne({
+        _id: { $ne: product._id },
+        store: product.store?._id || product.store,
+        approvalStatus: 'approved',
+        name: new RegExp(`^${String(product.name).trim()}$`, 'i'),
+    });
+    if (duplicate) {
+        return res.status(409).json({
+            success: false,
+            message: 'This store already has an approved product with the same name.',
+            duplicateProductId: String(duplicate._id),
+        });
+    }
+
+    product.approvalStatus = 'approved';
+    product.approvedAt = new Date();
+    product.approvedBy = req.auth.userId;
+    product.rejectionReason = '';
+    await product.save();
+
+    const ownerId = product.store?.owner;
+    if (ownerId) {
+        await Promise.allSettled([
+            sendPushToUser({
+                User,
+                userId: ownerId,
+                title: 'Product approved',
+                body: `"${product.name}" is now live on Easy Shop.`,
+                data: { type: 'product_approved', productId: String(product._id) },
+            }),
+        ]);
+    }
+
+    return res.status(200).json({ success: true, product });
+});
+
+router.put('/:id/deny', requireAdmin, async (req, res) => {
+    const { Product, User } = req.dbModels;
+    if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ success: false, message: 'Invalid product id.' });
+    }
+
+    const product = await Product.findById(req.params.id).populate('store', 'owner');
+    if (!product) {
+        return res.status(404).json({ success: false, message: 'Product not found.' });
+    }
+
+    product.approvalStatus = 'denied';
+    product.rejectionReason = String(req.body?.reason || 'Does not meet listing requirements.');
+    product.approvedAt = null;
+    product.approvedBy = null;
+    await product.save();
+
+    const ownerId = product.store?.owner;
+    if (ownerId) {
+        await sendPushToUser({
+            User,
+            userId: ownerId,
+            title: 'Product submission denied',
+            body: `"${product.name}" was not approved: ${product.rejectionReason}`,
+            data: { type: 'product_denied', productId: String(product._id) },
+        });
+    }
+
+    return res.status(200).json({ success: true, product });
+});
 
 module.exports = router;

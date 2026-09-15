@@ -68,6 +68,30 @@ const productSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  approvalStatus: {
+    // Store-owner submissions start pending; admin-created products are approved immediately.
+    type: String,
+    enum: ['pending', 'approved', 'denied'],
+    default: 'approved'
+  },
+  submittedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  approvedAt: {
+    type: Date,
+    default: null
+  },
+  approvedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
+  rejectionReason: {
+    type: String,
+    default: ''
+  },
   dateCreated: {
     type: Date,
     default: Date.now

@@ -8,8 +8,10 @@ const mongoose = require("mongoose");
 const { sendMailSafe } = require("../helpers/mailer");
 const { resolveDeliveryPlan } = require("../helpers/delivery");
 const { sendPushToUser } = require("../helpers/push-notify");
-const { assignDriverToOrder } = require("../service/dispatchService");
+const { assignDriverToOrder, syncDriverAvailability } = require("../service/dispatchService");
 const { getDriverLocation } = require("../helpers/driver-location");
+const { getCommissionRate, debitCommission } = require("../helpers/driver-wallet");
+const { buildDriverOrderSummary, isDropoffRevealed } = require("../helpers/driver-view");
 
 const ALLOWED_DELIVERY_STATUSES = ["Pending", "Driver Assigned", "Picked Up", "Delivered"];
 
@@ -182,7 +184,7 @@ router.get(`/`, async (req, res) => {
  */
 // Get a specific order by ID
 router.get(`/:id`, async (req, res) => {
-  const { Order } = req.dbModels;
+  const { Order, Driver } = req.dbModels;
   const order = await Order.findById(req.params.id)
     .populate("user", "name")
     .populate("customer", "name email phone")
@@ -198,6 +200,15 @@ router.get(`/:id`, async (req, res) => {
 
   if (!order) {
     return res.status(500).json({ success: false });
+  }
+
+  // Drivers only see the exact drop-off address/phone once they've marked pickup.
+  if (req.auth?.isDriver && !req.auth?.isAdmin) {
+    const driverProfile = await Driver.findOne({ user: req.auth.userId }).select("_id");
+    const isAssignedDriver = driverProfile && String(order.driver?._id || order.driver) === String(driverProfile._id);
+    if (isAssignedDriver && !isDropoffRevealed(order)) {
+      return res.send(buildDriverOrderSummary(order));
+    }
   }
 
   res.send(order);
@@ -500,6 +511,20 @@ router.post(`/`, async (req, res) => {
         .status(400)
         .send(`Product not found for order item: ${orderItem._id}`);
     }
+
+    // Block purchases of listings still pending/denied admin review, and orders that
+    // exceed what the store actually has on hand (keeps stock accurate for dispatch).
+    if (product.approvalStatus && product.approvalStatus !== "approved") {
+      return res
+        .status(400)
+        .send(`Product "${product.name}" is not available for purchase yet.`);
+    }
+    if ((product.countInStock || 0) < (orderItem.quantity || 0)) {
+      return res
+        .status(400)
+        .send(`Product "${product.name}" does not have enough stock available.`);
+    }
+
     itemsSubtotal += product.price * orderItem.quantity;
 
     if (!inferredStoreId && product.store) {
@@ -929,6 +954,45 @@ router.put("/:id", async (req, res) => {
 
   if (!order) {
     return res.status(404).send("order not found after update");
+  }
+
+  // Deduct the platform commission from the driver's wallet exactly once, when delivery completes.
+  if (
+    updateFields.deliveryStatus === "Delivered" &&
+    existingOrder.deliveryStatus !== "Delivered" &&
+    order.driver?._id &&
+    !existingOrder.driverCommissionDeducted
+  ) {
+    try {
+      const { Driver, DriverWalletTransaction } = req.dbModels;
+      const driverDoc = await Driver.findById(order.driver._id);
+      if (driverDoc) {
+        const commissionAmount = Math.round(Number(order.deliveryFee || 0) * getCommissionRate(driverDoc) * 100) / 100;
+        if (commissionAmount > 0) {
+          await debitCommission({
+            Driver,
+            WalletTransaction: DriverWalletTransaction,
+            User,
+            driverId: driverDoc._id,
+            order,
+            amount: commissionAmount,
+          });
+        }
+        await Order.findByIdAndUpdate(order._id, { driverCommissionDeducted: true });
+      }
+    } catch (commissionError) {
+      console.error("[Driver Wallet] Commission deduction failed:", commissionError?.message || commissionError);
+    }
+  }
+
+  // A delivered/reverted order frees a slot in the driver's queue; re-open dispatch to them if under capacity.
+  if (
+    updateFields.deliveryStatus !== undefined &&
+    updateFields.deliveryStatus !== existingOrder.deliveryStatus &&
+    (order.driver?._id || existingOrder.driver)
+  ) {
+    const { Driver } = req.dbModels;
+    await syncDriverAvailability(Driver, Order, order.driver?._id || existingOrder.driver);
   }
 
   // Notify customers watching the live tracking screen about delivery progress.

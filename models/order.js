@@ -183,6 +183,21 @@ const orderSchema = new mongoose.Schema({
         enum: ['Pending', 'Driver Assigned', 'Picked Up', 'Delivered'],
         default: 'Pending'
     },
+    driverCommissionDeducted: {
+        // Guards against double-charging commission if the order is updated more than once.
+        type: Boolean,
+        default: false
+    },
+    queueBatchId: {
+        // Groups orders bundled onto the same driver's route (same store or nearby drop-offs).
+        type: String,
+        default: null
+    },
+    queueSequence: {
+        // Position of this order within the driver's current batch (1 = accepted first).
+        type: Number,
+        default: 0
+    },
     dateOrdered: {
         type: Date,
         default: Date.now
