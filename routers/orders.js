@@ -470,7 +470,12 @@ router.post(`/`, async (req, res) => {
   const customerEmail =
     orderUserRecord?.email || req.body.customerEmail || req.body.email || "";
 
-  const deliveryPlanResult = resolveDeliveryPlan(req.body);
+  const deliverySetting = await req.dbModels.SiteSetting.findOne({ key: "delivery-config" })
+    .select("deliveryConfig")
+    .lean();
+  const deliveryPlanResult = resolveDeliveryPlan(req.body, {
+    deliveryConfig: deliverySetting?.deliveryConfig,
+  });
   if (!deliveryPlanResult.ok) {
     return res.status(400).json({
       success: false,

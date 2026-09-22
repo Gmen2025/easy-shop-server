@@ -30,6 +30,10 @@ const siteSettingSchema = new mongoose.Schema(
         },
       },
     ],
+    deliveryConfig: {
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
+    },
     updatedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',

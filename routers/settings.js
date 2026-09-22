@@ -1,8 +1,10 @@
 const router = require('express').Router();
 const mongoose = require('mongoose');
+const { normalizeDeliveryConfig } = require('../helpers/delivery');
 
 const MAINTENANCE_SETTING_KEY = 'maintenance-mode';
 const BANK_ACCOUNT_SETTING_KEY = 'bank-account-info';
+const DELIVERY_SETTING_KEY = 'delivery-config';
 
 function requireAdmin(req, res) {
   if (!req.auth?.isAdmin) {
@@ -341,6 +343,48 @@ router.put('/bank-account', async (req, res) => {
       message: 'Failed to update bank account information.',
       error: error.message,
     });
+  }
+});
+
+router.get('/delivery', async (req, res) => {
+  try {
+    const { SiteSetting } = req.dbModels;
+    const setting = await SiteSetting.findOne({ key: DELIVERY_SETTING_KEY })
+      .select('deliveryConfig updatedAt')
+      .lean();
+
+    return res.status(200).json({
+      success: true,
+      deliveryConfig: normalizeDeliveryConfig(setting?.deliveryConfig),
+      updatedAt: setting?.updatedAt || null,
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to read delivery settings.', error: error.message });
+  }
+});
+
+router.put('/delivery', async (req, res) => {
+  if (!requireAdmin(req, res)) {
+    return;
+  }
+
+  try {
+    const { SiteSetting } = req.dbModels;
+    const deliveryConfig = normalizeDeliveryConfig(req.body?.deliveryConfig || req.body);
+    const setting = await SiteSetting.findOneAndUpdate(
+      { key: DELIVERY_SETTING_KEY },
+      { $set: { key: DELIVERY_SETTING_KEY, deliveryConfig, updatedBy: req.auth?.userId || null } },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+
+    return res.status(200).json({
+      success: true,
+      deliveryConfig,
+      updatedAt: setting.updatedAt,
+      message: 'Delivery settings updated.',
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to update delivery settings.', error: error.message });
   }
 });
 

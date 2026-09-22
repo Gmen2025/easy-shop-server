@@ -4,6 +4,21 @@ const DELIVERY_MODES = Object.freeze({
   SCHEDULED: "SCHEDULED",
 });
 
+const DEFAULT_DELIVERY_CONFIG = Object.freeze({
+  sameDayBase: 9,
+  sameDayPerKm: 1,
+  sameDayPremium: 4,
+  nextDayBase: 4,
+  nextDayPerKm: 0.6,
+  scheduledBase: 5,
+  scheduledPerKm: 0.75,
+  scheduledPeakSurcharge: 1.5,
+  scheduledOffPeakDiscount: 0.5,
+  sameDayWindowHours: 4,
+  nextDayWindowHours: 8,
+  scheduledWindowHours: 2,
+});
+
 function roundCurrency(value) {
   return Math.round(Number(value || 0) * 100) / 100;
 }
@@ -41,37 +56,37 @@ function getNextDayStart(now) {
   return start;
 }
 
-function computeDeliveryFee({ deliveryMode, deliveryDistanceKm, scheduledFor }) {
+function normalizeDeliveryConfig(config = {}) {
+  return Object.fromEntries(Object.entries(DEFAULT_DELIVERY_CONFIG).map(([key, fallback]) => {
+    const value = Number(config[key]);
+    return [key, Number.isFinite(value) && value >= 0 ? value : fallback];
+  }));
+}
+
+function computeDeliveryFee({ deliveryMode, deliveryDistanceKm, scheduledFor, config }) {
   const distanceKm = parsePositiveNumber(deliveryDistanceKm) || 0;
-  const sameDayBase = parsePositiveNumber(process.env.SAME_DAY_BASE_FEE) ?? 9;
-  const sameDayPerKm = parsePositiveNumber(process.env.SAME_DAY_PER_KM_FEE) ?? 1;
-  const sameDayPremium = parsePositiveNumber(process.env.SAME_DAY_PREMIUM_SURCHARGE) ?? 4;
-
-  const nextDayBase = parsePositiveNumber(process.env.NEXT_DAY_BASE_FEE) ?? 4;
-  const nextDayPerKm = parsePositiveNumber(process.env.NEXT_DAY_PER_KM_FEE) ?? 0.6;
-
-  const scheduledBase = parsePositiveNumber(process.env.SCHEDULED_BASE_FEE) ?? 5;
-  const scheduledPerKm = parsePositiveNumber(process.env.SCHEDULED_PER_KM_FEE) ?? 0.75;
+  const rates = normalizeDeliveryConfig(config);
 
   if (deliveryMode === DELIVERY_MODES.SAME_DAY) {
-    return roundCurrency(sameDayBase + sameDayPremium + distanceKm * sameDayPerKm);
+    return roundCurrency(rates.sameDayBase + rates.sameDayPremium + distanceKm * rates.sameDayPerKm);
   }
 
   if (deliveryMode === DELIVERY_MODES.NEXT_DAY) {
-    return roundCurrency(nextDayBase + distanceKm * nextDayPerKm);
+    return roundCurrency(rates.nextDayBase + distanceKm * rates.nextDayPerKm);
   }
 
   const scheduledTime = toDate(scheduledFor);
   const hour = scheduledTime ? scheduledTime.getHours() : -1;
-  const peakSurcharge = hour >= 17 && hour <= 20 ? 1.5 : 0;
-  const offPeakDiscount = hour >= 10 && hour <= 15 ? -0.5 : 0;
+  const peakSurcharge = hour >= 17 && hour <= 20 ? rates.scheduledPeakSurcharge : 0;
+  const offPeakDiscount = hour >= 10 && hour <= 15 ? -rates.scheduledOffPeakDiscount : 0;
 
-  return roundCurrency(scheduledBase + distanceKm * scheduledPerKm + peakSurcharge + offPeakDiscount);
+  return roundCurrency(rates.scheduledBase + distanceKm * rates.scheduledPerKm + peakSurcharge + offPeakDiscount);
 }
 
 function resolveDeliveryPlan(payload, options = {}) {
   const now = options.now instanceof Date ? options.now : new Date();
   const current = options.currentOrder || {};
+  const config = normalizeDeliveryConfig(options.deliveryConfig);
 
   const requestedMode =
     normalizeDeliveryMode(payload.deliveryMode) ||
@@ -118,9 +133,9 @@ function resolveDeliveryPlan(payload, options = {}) {
     }
   }
 
-  const sameDayWindowHours = parsePositiveNumber(process.env.SAME_DAY_WINDOW_HOURS) ?? 4;
-  const nextDayWindowHours = parsePositiveNumber(process.env.NEXT_DAY_WINDOW_HOURS) ?? 8;
-  const scheduledWindowHours = parsePositiveNumber(process.env.SCHEDULED_WINDOW_HOURS) ?? 2;
+  const sameDayWindowHours = config.sameDayWindowHours;
+  const nextDayWindowHours = config.nextDayWindowHours;
+  const scheduledWindowHours = config.scheduledWindowHours;
 
   let deliveryWindowStart;
   let deliveryWindowEnd;
@@ -147,13 +162,14 @@ function resolveDeliveryPlan(payload, options = {}) {
     dispatchPriority = hoursToWindowStart <= 2 ? 90 : 65;
   }
 
-  const feeCandidate = payload.deliveryFee !== undefined ? payload.deliveryFee : current.deliveryFee;
+  const feeCandidate = current.deliveryFee;
   const deliveryFee =
     feeCandidate === undefined || feeCandidate === null || feeCandidate === ""
       ? computeDeliveryFee({
           deliveryMode: requestedMode,
           deliveryDistanceKm,
           scheduledFor: normalizedScheduledFor,
+          config,
         })
       : parsePositiveNumber(feeCandidate);
 
@@ -181,5 +197,7 @@ function resolveDeliveryPlan(payload, options = {}) {
 
 module.exports = {
   DELIVERY_MODES,
+  DEFAULT_DELIVERY_CONFIG,
+  normalizeDeliveryConfig,
   resolveDeliveryPlan,
 };
