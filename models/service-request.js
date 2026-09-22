@@ -67,6 +67,11 @@ const serviceRequestSchema = new mongoose.Schema(
       default: '',
       trim: true,
     },
+    contactPhone: {
+      type: String,
+      default: '',
+      trim: true,
+    },
     photos: {
       type: [String],
       default: [],

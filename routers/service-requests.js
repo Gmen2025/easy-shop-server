@@ -178,6 +178,7 @@ router.post('/', async (req, res) => {
   const serviceLocation = String(payload.serviceLocation || '').trim();
   const machineType = String(payload.machineType || '').trim();
   const problemDescription = String(payload.problemDescription || '').trim();
+  const contactPhone = String(payload.contactPhone || '').trim();
 
   if (!validCountries.includes(country)) {
     return res.status(400).json({ success: false, message: 'country must be one of: Ethiopia, USA' });
@@ -195,6 +196,10 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ success: false, message: 'problemDescription is required' });
   }
 
+  if (!contactPhone) {
+    return res.status(400).json({ success: false, message: 'contactPhone is required' });
+  }
+
   const priority = resolvePriority(payload.priority, 'Normal');
 
   const created = await ServiceRequest.create({
@@ -210,6 +215,7 @@ router.post('/', async (req, res) => {
     priority,
     locationCity: String(payload.locationCity || '').trim(),
     locationAddress: String(payload.locationAddress || '').trim(),
+    contactPhone,
     photos: normalizeStringList(payload.photos),
     videos: normalizeStringList(payload.videos),
     status: resolveStatus(payload.status, 'new'),
@@ -286,6 +292,7 @@ router.put('/:id', async (req, res) => {
       ...(payload.priority !== undefined ? { priority: nextPriority } : {}),
       ...(payload.locationCity !== undefined ? { locationCity: String(payload.locationCity).trim() } : {}),
       ...(payload.locationAddress !== undefined ? { locationAddress: String(payload.locationAddress).trim() } : {}),
+      ...(payload.contactPhone !== undefined ? { contactPhone: String(payload.contactPhone).trim() } : {}),
       ...(payload.photos !== undefined ? { photos: normalizeStringList(payload.photos) } : {}),
       ...(payload.videos !== undefined ? { videos: normalizeStringList(payload.videos) } : {}),
       ...(payload.status !== undefined ? { status: nextStatus } : {}),
