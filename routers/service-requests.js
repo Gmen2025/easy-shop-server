@@ -1,7 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
-const { sendPushToTokens } = require('../helpers/push-notify');
+const { sendPushToUser, sendPushToTokens } = require('../helpers/push-notify');
+const { sendMailSafe } = require('../helpers/mailer');
 
 const validCountries = ['Ethiopia', 'USA'];
 const validPriorities = ['Low', 'Normal', 'High', 'Emergency'];
@@ -37,6 +38,33 @@ const resolvePriority = (value, fallback = 'Normal') => {
   const normalized = String(value ?? fallback).trim();
   return validPriorities.includes(normalized) ? normalized : fallback;
 };
+
+const formatStatus = (status) => String(status || 'new').replaceAll('_', ' ');
+
+async function notifyCustomer({ req, customerId, subject, body, data }) {
+  const User = req.dbModels?.User;
+  if (!User || !customerId) {
+    return;
+  }
+
+  const customer = await User.findById(customerId).select('name email');
+  await sendPushToUser({
+    User,
+    userId: customerId,
+    title: subject,
+    body,
+    data,
+  });
+
+  if (customer?.email) {
+    await sendMailSafe({
+      to: customer.email,
+      subject,
+      text: body,
+      html: `<p>${body}</p>`,
+    }, 'service-request');
+  }
+}
 
 router.get('/mine', async (req, res) => {
   const ServiceRequest = getServiceRequestModel(req);
@@ -221,10 +249,15 @@ router.put('/:id', async (req, res) => {
   }
 
   const adminOnlyFields = ['quotedPrice', 'currency', 'budgetEstimate', 'assignedTechnician'];
+  const isCustomerCancellation = isOwner && payload.status === 'cancelled';
   if (!isAdmin && (adminOnlyFields.some((field) => payload[field] !== undefined)
-    || (payload.status !== undefined && !isTechnician)
+    || (payload.status !== undefined && !isTechnician && !isCustomerCancellation)
     || (payload.technicianNotes !== undefined && !isTechnician))) {
     return res.status(403).json({ success: false, message: 'Only an administrator can update service management fields' });
+  }
+
+  if (isCustomerCancellation && ['completed', 'cancelled'].includes(existing.status)) {
+    return res.status(400).json({ success: false, message: 'This service request can no longer be cancelled' });
   }
 
   if (payload.quoteAccepted !== undefined && !isOwner) {
@@ -265,6 +298,22 @@ router.put('/:id', async (req, res) => {
     },
     { new: true }
   );
+  await updated.populate('customer', 'name email phone');
+
+  if (payload.status !== undefined && nextStatus !== existing.status) {
+    const statusLabel = formatStatus(nextStatus);
+    await notifyCustomer({
+      req,
+      customerId: existing.customer,
+      subject: `Service request ${statusLabel}`,
+      body: `Your ${updated.machineType || 'machine service'} request is now ${statusLabel}.`,
+      data: {
+        type: 'service_request_status_updated',
+        serviceRequestId: String(updated._id),
+        status: nextStatus,
+      },
+    });
+  }
 
   if (payload.assignedTechnician !== undefined && updated.assignedTechnician) {
     const Driver = req.dbModels?.Driver;
@@ -304,11 +353,27 @@ router.delete('/:id', async (req, res) => {
     return res.status(400).json({ success: false, message: 'Invalid service request ID' });
   }
 
-  const deleted = await ServiceRequest.findByIdAndDelete(req.params.id);
+  if (!req.auth?.isAdmin) {
+    return res.status(403).json({ success: false, message: 'Only administrators can delete service requests' });
+  }
+
+  const deleted = await ServiceRequest.findById(req.params.id);
 
   if (!deleted) {
     return res.status(404).json({ success: false, message: 'Service request not found' });
   }
+
+  await ServiceRequest.findByIdAndDelete(req.params.id);
+  await notifyCustomer({
+    req,
+    customerId: deleted.customer,
+    subject: 'Service request deleted',
+    body: `Your ${deleted.machineType || 'machine service'} request was deleted by an administrator.`,
+    data: {
+      type: 'service_request_deleted',
+      serviceRequestId: String(deleted._id),
+    },
+  });
 
   return res.status(200).json({ success: true, deletedId: deleted._id });
 });
