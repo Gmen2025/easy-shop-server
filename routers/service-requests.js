@@ -28,6 +28,16 @@ const resolveCurrency = (country) => {
   return 'ETB';
 };
 
+const resolveStatus = (value, fallback = 'new') => {
+  const normalized = String(value ?? fallback).trim();
+  return validStatuses.includes(normalized) ? normalized : fallback;
+};
+
+const resolvePriority = (value, fallback = 'Normal') => {
+  const normalized = String(value ?? fallback).trim();
+  return validPriorities.includes(normalized) ? normalized : fallback;
+};
+
 router.get('/mine', async (req, res) => {
   const ServiceRequest = getServiceRequestModel(req);
 
@@ -157,9 +167,7 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ success: false, message: 'problemDescription is required' });
   }
 
-  const priority = validPriorities.includes(String(payload.priority || 'Normal'))
-    ? String(payload.priority)
-    : 'Normal';
+  const priority = resolvePriority(payload.priority, 'Normal');
 
   const created = await ServiceRequest.create({
     customer: customerId,
@@ -176,7 +184,7 @@ router.post('/', async (req, res) => {
     locationAddress: String(payload.locationAddress || '').trim(),
     photos: normalizeStringList(payload.photos),
     videos: normalizeStringList(payload.videos),
-    status: validStatuses.includes(String(payload.status || 'new')) ? String(payload.status) : 'new',
+    status: resolveStatus(payload.status, 'new'),
     currency: String(payload.currency || resolveCurrency(country)).trim(),
     budgetEstimate: payload.budgetEstimate !== undefined && payload.budgetEstimate !== null
       ? Number(payload.budgetEstimate)
@@ -224,12 +232,8 @@ router.put('/:id', async (req, res) => {
   }
 
   const nextCountry = payload.country || existing.country;
-  const nextStatus = validStatuses.includes(String(payload.status || existing.status))
-    ? String(payload.status || existing.status)
-    : existing.status;
-  const nextPriority = validPriorities.includes(String(payload.priority || existing.priority))
-    ? String(payload.priority || existing.priority)
-    : existing.priority;
+  const nextStatus = resolveStatus(payload.status ?? existing.status, existing.status || 'new');
+  const nextPriority = resolvePriority(payload.priority ?? existing.priority, existing.priority || 'Normal');
 
   if (payload.country && !validCountries.includes(String(payload.country))) {
     return res.status(400).json({ success: false, message: 'country must be one of: Ethiopia, USA' });
