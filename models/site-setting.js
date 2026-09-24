@@ -34,6 +34,11 @@ const siteSettingSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.Mixed,
       default: undefined,
     },
+    // Store/warehouse address used as the origin point for Google-based delivery
+    // distance calculations (admin-configurable).
+    deliveryOrigin: {
+      address: { type: String, default: '' },
+    },
     updatedBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User',

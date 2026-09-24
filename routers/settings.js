@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const mongoose = require('mongoose');
 const { normalizeDeliveryConfig } = require('../helpers/delivery');
+const { isGoogleDistanceApiConfigured, getDrivingDistanceKm } = require('../helpers/google-distance');
 
 const MAINTENANCE_SETTING_KEY = 'maintenance-mode';
 const BANK_ACCOUNT_SETTING_KEY = 'bank-account-info';
@@ -346,16 +347,31 @@ router.put('/bank-account', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/settings/delivery:
+ *   get:
+ *     summary: Get delivery settings
+ *     description: Returns the delivery pricing configuration, delivery origin, and Google distance API availability.
+ *     tags: [Settings]
+ *     responses:
+ *       200:
+ *         description: Delivery settings
+ *       500:
+ *         description: Failed to read delivery settings
+ */
 router.get('/delivery', async (req, res) => {
   try {
     const { SiteSetting } = req.dbModels;
     const setting = await SiteSetting.findOne({ key: DELIVERY_SETTING_KEY })
-      .select('deliveryConfig updatedAt')
+      .select('deliveryConfig deliveryOrigin updatedAt')
       .lean();
 
     return res.status(200).json({
       success: true,
       deliveryConfig: normalizeDeliveryConfig(setting?.deliveryConfig),
+      deliveryOrigin: { address: setting?.deliveryOrigin?.address || '' },
+      distanceApiEnabled: isGoogleDistanceApiConfigured(),
       updatedAt: setting?.updatedAt || null,
     });
   } catch (error) {
@@ -363,6 +379,42 @@ router.get('/delivery', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/settings/delivery:
+ *   put:
+ *     summary: Update delivery settings
+ *     description: Updates delivery pricing and the delivery origin address. Admin access required.
+ *     tags: [Settings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               deliveryConfig:
+ *                 type: object
+ *                 additionalProperties: true
+ *                 description: Delivery pricing and distance configuration.
+ *               deliveryOrigin:
+ *                 type: object
+ *                 properties:
+ *                   address:
+ *                     type: string
+ *                     description: Address used as the default delivery origin.
+ *     responses:
+ *       200:
+ *         description: Delivery settings updated
+ *       400:
+ *         description: Invalid delivery configuration
+ *       403:
+ *         description: Admin access required
+ *       500:
+ *         description: Failed to update delivery settings
+ */
 router.put('/delivery', async (req, res) => {
   if (!requireAdmin(req, res)) {
     return;
@@ -371,20 +423,95 @@ router.put('/delivery', async (req, res) => {
   try {
     const { SiteSetting } = req.dbModels;
     const deliveryConfig = normalizeDeliveryConfig(req.body?.deliveryConfig || req.body);
+    const originAddress = String(req.body?.deliveryOrigin?.address || '').trim();
     const setting = await SiteSetting.findOneAndUpdate(
       { key: DELIVERY_SETTING_KEY },
-      { $set: { key: DELIVERY_SETTING_KEY, deliveryConfig, updatedBy: req.auth?.userId || null } },
+      {
+        $set: {
+          key: DELIVERY_SETTING_KEY,
+          deliveryConfig,
+          deliveryOrigin: { address: originAddress },
+          updatedBy: req.auth?.userId || null,
+        },
+      },
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
 
     return res.status(200).json({
       success: true,
       deliveryConfig,
+      deliveryOrigin: { address: originAddress },
       updatedAt: setting.updatedAt,
       message: 'Delivery settings updated.',
     });
   } catch (error) {
     return res.status(500).json({ success: false, message: 'Failed to update delivery settings.', error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/v1/settings/delivery/estimate-distance:
+ *   post:
+ *     summary: Estimate delivery distance from the store origin to a shipping address
+ *     description: Uses the Google Distance Matrix API (server-side key) to compute driving
+ *       distance in km from the admin-configured origin address to the given destination.
+ *       Returns distanceKm null if the Google API is not configured or the lookup fails, in
+ *       which case the client should fall back to a manual distance entry.
+ *     tags: [Settings]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               destinationAddress:
+ *                 type: string
+ *               storeId:
+ *                 type: string
+ *                 description: Optional store id to use as the origin instead of the admin hub address.
+ *     responses:
+ *       200:
+ *         description: Distance estimate
+ *       400:
+ *         description: destinationAddress is required
+ */
+router.post('/delivery/estimate-distance', async (req, res) => {
+  try {
+    const destinationAddress = String(req.body?.destinationAddress || '').trim();
+    if (!destinationAddress) {
+      return res.status(400).json({ success: false, message: 'destinationAddress is required.' });
+    }
+
+    if (!isGoogleDistanceApiConfigured()) {
+      return res.status(200).json({ success: true, distanceKm: null, message: 'Distance API not configured.' });
+    }
+
+    const { SiteSetting, Store } = req.dbModels;
+    const storeId = req.body?.storeId;
+    let originAddress = '';
+
+    if (storeId && mongoose.isValidObjectId(storeId)) {
+      const store = await Store.findById(storeId).select('address').lean();
+      originAddress = store?.address || '';
+    }
+
+    if (!originAddress) {
+      const setting = await SiteSetting.findOne({ key: DELIVERY_SETTING_KEY })
+        .select('deliveryOrigin')
+        .lean();
+      originAddress = setting?.deliveryOrigin?.address || '';
+    }
+
+    if (!originAddress) {
+      return res.status(200).json({ success: true, distanceKm: null, message: 'Delivery origin address is not configured.' });
+    }
+
+    const distanceKm = await getDrivingDistanceKm(originAddress, destinationAddress);
+    return res.status(200).json({ success: true, distanceKm });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: 'Failed to estimate delivery distance.', error: error.message });
   }
 });
 

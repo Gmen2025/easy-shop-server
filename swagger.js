@@ -1,4 +1,5 @@
 const swaggerJsDoc = require('swagger-jsdoc');
+const extraSwaggerPaths = require('./swagger-extra');
 
 const swaggerOptions = {
   definition: {
@@ -20,6 +21,7 @@ const swaggerOptions = {
         description: process.env.NODE_ENV === 'production' ? 'Production server' : 'Development server'
       }
     ],
+    paths: JSON.parse(JSON.stringify(extraSwaggerPaths)),
     components: {
       securitySchemes: {
         bearerAuth: {
@@ -437,6 +439,12 @@ const swaggerOptions = {
       { name: 'Store Payouts', description: 'Platform admin endpoints for managing weekly batch settlements and approving early payout requests across Ethiopia (ETB) and USA (USD).' },
       { name: 'Drivers', description: 'Driver management endpoints with availability and live GPS location.' },
       { name: 'Notifications', description: 'Push notification endpoints for device token management and admin message delivery.' },
+      { name: 'Cloudinary', description: 'Signed media upload helpers.' },
+      { name: 'Products', description: 'Product catalog and moderation endpoints.' },
+      { name: 'Users', description: 'User registration, authentication, and account management endpoints.' },
+      { name: 'Telebirr', description: 'Telebirr payment initiation and verification endpoints.' },
+      { name: 'Service Requests', description: 'Customer service request and technician workflow endpoints.' },
+      { name: 'System', description: 'API health and documentation endpoints.' },
       { name: 'Database', description: 'Multi-database switching endpoints — no authentication required. Use x-database-name header on all subsequent requests after switching.' },
       { name: 'Settings', description: 'Site-wide configuration endpoints for maintenance mode and other admin-only settings.' }
     ],
@@ -448,5 +456,15 @@ const swaggerOptions = {
 };
 
 const swaggerDocs = swaggerJsDoc(swaggerOptions);
+
+// swagger-jsdoc mutates definition paths while merging router annotations.
+// Merge supplemental operations again so aliases and app-level routes are retained.
+swaggerDocs.paths = swaggerDocs.paths || {};
+for (const [path, operations] of Object.entries(extraSwaggerPaths)) {
+  swaggerDocs.paths[path] = {
+    ...(swaggerDocs.paths[path] || {}),
+    ...operations,
+  };
+}
 
 module.exports = swaggerDocs;

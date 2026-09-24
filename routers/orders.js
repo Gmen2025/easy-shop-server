@@ -7,6 +7,7 @@ const mongoose = require("mongoose");
 //const twilio = require("twilio");
 const { sendMailSafe } = require("../helpers/mailer");
 const { resolveDeliveryPlan } = require("../helpers/delivery");
+const { isGoogleDistanceApiConfigured, getDrivingDistanceKm } = require("../helpers/google-distance");
 const { sendPushToUser } = require("../helpers/push-notify");
 const { assignDriverToOrder, syncDriverAvailability } = require("../service/dispatchService");
 const { getDriverLocation } = require("../helpers/driver-location");
@@ -471,18 +472,8 @@ router.post(`/`, async (req, res) => {
     orderUserRecord?.email || req.body.customerEmail || req.body.email || "";
 
   const deliverySetting = await req.dbModels.SiteSetting.findOne({ key: "delivery-config" })
-    .select("deliveryConfig")
+    .select("deliveryConfig deliveryOrigin")
     .lean();
-  const deliveryPlanResult = resolveDeliveryPlan(req.body, {
-    deliveryConfig: deliverySetting?.deliveryConfig,
-  });
-  if (!deliveryPlanResult.ok) {
-    return res.status(400).json({
-      success: false,
-      message: deliveryPlanResult.error,
-    });
-  }
-  const deliveryPlan = deliveryPlanResult.value;
 
   // Create an array of promises for creating OrderItem documents
   const orderItemsIDS = Promise.all(
@@ -538,6 +529,35 @@ router.post(`/`, async (req, res) => {
   }
 
   const resolvedStoreId = validatedStore?._id || inferredStoreId || null;
+
+  // Prefer an authoritative, server-computed distance over whatever the client sent, so the
+  // delivery fee can't be manipulated by submitting a fake deliveryDistanceKm. The assigned
+  // store's own address is the origin when known (multi-store apps), falling back to the
+  // single admin-configured hub address (e.g. web storefront with one warehouse).
+  const originStore = resolvedStoreId
+    ? await Store.findById(resolvedStoreId).select("address")
+    : null;
+  const originAddress = originStore?.address || deliverySetting?.deliveryOrigin?.address || "";
+  const destinationAddress = [req.body.shippingAddress1, req.body.city, req.body.country]
+    .filter(Boolean)
+    .join(", ");
+  if (isGoogleDistanceApiConfigured() && originAddress && destinationAddress) {
+    const googleDistanceKm = await getDrivingDistanceKm(originAddress, destinationAddress);
+    if (googleDistanceKm !== null) {
+      req.body.deliveryDistanceKm = googleDistanceKm;
+    }
+  }
+
+  const deliveryPlanResult = resolveDeliveryPlan(req.body, {
+    deliveryConfig: deliverySetting?.deliveryConfig,
+  });
+  if (!deliveryPlanResult.ok) {
+    return res.status(400).json({
+      success: false,
+      message: deliveryPlanResult.error,
+    });
+  }
+  const deliveryPlan = deliveryPlanResult.value;
 
   const totalPrice = Number(itemsSubtotal) + Number(deliveryPlan.deliveryFee || 0);
 
