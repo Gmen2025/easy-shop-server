@@ -1108,6 +1108,12 @@ router.put("/:id", async (req, res) => {
       });
     }
     updateFields.deliveryStatus = req.body.deliveryStatus;
+
+    // Keep the admin-facing order status in sync with the driver-reported delivery status,
+    // so a completed delivery shows up as "Delivered" in the admin order list automatically.
+    if (updateFields.deliveryStatus === "Delivered" && req.body.status === undefined) {
+      updateFields.status = "3";
+    }
   }
 
   if (req.body.store !== undefined) {
