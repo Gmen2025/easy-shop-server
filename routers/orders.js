@@ -350,18 +350,32 @@ router.get("/admin/company-fulfillable", requireAdmin, async (req, res) => {
       return res.status(400).json({ success: false, message: "latitude and longitude are required." });
     }
 
-    const { Order, Driver } = req.dbModels;
+    const { Order, Driver, Store } = req.dbModels;
     const orders = await Order.find({
       driver: null,
       dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] },
     })
       .populate("store", "name address location")
+      .populate({
+        path: "orderItems",
+        populate: { path: "product", select: "store" },
+      })
       .sort({ dateOrdered: -1 })
       .limit(100);
 
     const results = [];
     for (const order of orders) {
-      const coords = order.store?.location?.coordinates || order.customerLocation?.coordinates || [longitude, latitude];
+      // Same lazy pickup-store resolution as /company/my-deliveries - order.store is often
+      // still null for pre-dispatch orders.
+      let resolvedStore = order.store;
+      if (!resolvedStore) {
+        const productWithStore = (order.orderItems || []).find((item) => item?.product?.store);
+        if (productWithStore) {
+          resolvedStore = await Store.findById(productWithStore.product.store).select("name address location");
+        }
+      }
+
+      const coords = resolvedStore?.location?.coordinates || order.customerLocation?.coordinates || [longitude, latitude];
 
       const nearbyPartnerDriver = await Driver.findOne({
         isCompanyOwned: { $ne: true },
@@ -376,7 +390,7 @@ router.get("/admin/company-fulfillable", requireAdmin, async (req, res) => {
       });
 
       if (!nearbyPartnerDriver) {
-        results.push(order);
+        results.push({ ...order.toObject(), store: resolvedStore });
       }
     }
 
@@ -413,7 +427,7 @@ async function hasNearbyPartnerDriver(Driver, coords, radiusKm) {
  */
 router.get("/company/my-deliveries", async (req, res) => {
   try {
-    const { Order, Driver } = req.dbModels;
+    const { Order, Driver, Store } = req.dbModels;
     const driver = await Driver.findOne({ user: req.auth?.userId, isCompanyOwned: true });
     if (!driver) {
       return res.status(403).json({ success: false, message: "Only company drivers can access this list." });
@@ -434,18 +448,29 @@ router.get("/company/my-deliveries", async (req, res) => {
       .populate("store", "name address location")
       .populate({
         path: "orderItems",
-        populate: { path: "product", select: "name image price" },
+        populate: { path: "product", select: "name image price store" },
       })
       .sort({ dateOrdered: -1 })
       .limit(100);
 
     const results = [];
     for (const order of orders) {
-      const orderCoords = order.store?.location?.coordinates || order.customerLocation?.coordinates || coords;
+      // order.store is only set once a delivery is actually dispatched; for these pre-dispatch,
+      // unassigned orders it's frequently still null, so derive the pickup store from the first
+      // order item's product here (same fallback dispatchService uses at real assignment time).
+      let orderStore = order.store;
+      if (!orderStore) {
+        const productWithStore = (order.orderItems || []).find((item) => item?.product?.store);
+        if (productWithStore) {
+          orderStore = await Store.findById(productWithStore.product.store).select("name address location");
+        }
+      }
+
+      const orderCoords = orderStore?.location?.coordinates || order.customerLocation?.coordinates || coords;
       if (!(await hasNearbyPartnerDriver(Driver, orderCoords, radiusKm))) {
         results.push({
           _id: order._id,
-          store: order.store,
+          store: orderStore,
           deliveryFee: order.deliveryFee,
           deliveryMode: order.deliveryMode,
           dateOrdered: order.dateOrdered,
