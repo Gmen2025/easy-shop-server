@@ -534,7 +534,7 @@ router.get("/me/queue", async (req, res) => {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
-    const driver = await Driver.findOne({ user: userId }).select("_id");
+    const driver = await Driver.findOne({ user: userId }).select("_id isCompanyOwned");
     if (!driver) {
       return res.status(404).json({ success: false, message: "Driver profile not found." });
     }
@@ -552,10 +552,15 @@ router.get("/me/queue", async (req, res) => {
         populate: { path: "product", select: "name image price" },
       });
 
+    // Company drivers plan routes across both legs up front, so they see the full pickup +
+    // drop-off address as soon as an order is assigned to them, not gated behind "Picked Up".
+    // Partner (marketplace) drivers keep the existing pre-pickup privacy protection.
+    const forceReveal = Boolean(driver.isCompanyOwned);
+
     return res.status(200).json({
       success: true,
       count: orders.length,
-      queue: orders.map((order) => buildDriverOrderSummary(order)),
+      queue: orders.map((order) => buildDriverOrderSummary(order, { forceReveal })),
     });
   } catch (error) {
     console.error("Driver queue fetch error:", error);

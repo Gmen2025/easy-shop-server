@@ -10,7 +10,8 @@ function roundCoordinate(value, decimals = 2) {
   return Math.round(num * factor) / factor;
 }
 
-function isDropoffRevealed(order) {
+function isDropoffRevealed(order, options = {}) {
+  if (options.forceReveal) return true;
   return REVEALED_STATUSES.includes(order?.deliveryStatus);
 }
 
@@ -28,8 +29,8 @@ function getApproxDropZone(order) {
   };
 }
 
-function buildDriverOrderSummary(order) {
-  const revealed = isDropoffRevealed(order);
+function buildDriverOrderSummary(order, options = {}) {
+  const revealed = isDropoffRevealed(order, options);
   const customerSource = (order?.customer && typeof order.customer === "object" ? order.customer : null) ||
     (order?.user && typeof order.user === "object" ? order.user : null) ||
     {};

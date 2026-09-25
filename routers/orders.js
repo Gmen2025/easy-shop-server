@@ -449,7 +449,16 @@ router.get("/company/my-deliveries", async (req, res) => {
           deliveryFee: order.deliveryFee,
           deliveryMode: order.deliveryMode,
           dateOrdered: order.dateOrdered,
-          // Pre-claim: only the general drop-off area, not the exact customer address (privacy).
+          // Company drivers pick their own routes, so the full drop-off address/coordinates are
+          // shown up front (unlike partner drivers, whose exact address unlocks after pickup).
+          dropoffAddress: {
+            address1: order.shippingAddress1 || "",
+            address2: order.shippingAddress2 || "",
+            city: order.city || "",
+            zip: order.zip || "",
+            country: order.country || "",
+            coordinates: order.customerLocation?.coordinates || null,
+          },
           dropZone: { city: order.city || "", zip: order.zip || "" },
           itemCount: (order.orderItems || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0),
           items: (order.orderItems || []).map((item) => ({
