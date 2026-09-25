@@ -190,6 +190,12 @@ const orderSchema = new mongoose.Schema({
         enum: ['Pending', 'Driver Assigned', 'Picked Up', 'Delivered'],
         default: 'Pending'
     },
+    deliveredAt: {
+        // Set once when deliveryStatus first transitions to 'Delivered'; drives the driver
+        // dashboard's "completed today" list, which rolls off 24 hours after this timestamp.
+        type: Date,
+        default: null
+    },
     driverCommissionDeducted: {
         // Guards against double-charging commission if the order is updated more than once.
         type: Boolean,

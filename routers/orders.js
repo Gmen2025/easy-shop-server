@@ -1132,6 +1132,12 @@ router.put("/:id", async (req, res) => {
     if (updateFields.deliveryStatus === "Delivered" && req.body.status === undefined) {
       updateFields.status = "3";
     }
+
+    // Record when the delivery actually completed (once), to drive the driver dashboard's
+    // "completed today" list which rolls off 24 hours after this timestamp.
+    if (updateFields.deliveryStatus === "Delivered" && existingOrder.deliveryStatus !== "Delivered") {
+      updateFields.deliveredAt = new Date();
+    }
   }
 
   if (req.body.store !== undefined) {
@@ -1506,17 +1512,21 @@ router.delete("/:id", async (req, res) => {
       isTruthy(req.query.skipNotifyCustomer) || isTruthy(req.body?.skipNotifyCustomer);
     const explicitNotifyProvided =
       req.query.notifyCustomer !== undefined || req.body?.notifyCustomer !== undefined;
+    const explicitNotifyValue =
+      isTruthy(req.query.notifyCustomer) || isTruthy(req.body?.notifyCustomer);
+    // A completed delivery isn't a "cancellation" - only send the cancelled/refund email for
+    // orders that hadn't finished delivering yet (e.g. still Processing), unless an admin
+    // explicitly forces it via notifyCustomer=true.
+    const isAlreadyDelivered = String(order.status) === "3" || order.deliveryStatus === "Delivered";
     const shouldNotify =
       !skipNotify &&
-      (!explicitNotifyProvided ||
-        isTruthy(req.query.notifyCustomer) ||
-        isTruthy(req.body?.notifyCustomer));
+      (explicitNotifyProvided ? explicitNotifyValue : !isAlreadyDelivered);
 
     const notification = {
       attempted: shouldNotify,
       delivered: false,
-      skipped: false,
-      reason: null,
+      skipped: !shouldNotify && isAlreadyDelivered && !skipNotify,
+      reason: !shouldNotify && isAlreadyDelivered && !skipNotify ? "already_delivered" : null,
     };
 
     if (shouldNotify) {

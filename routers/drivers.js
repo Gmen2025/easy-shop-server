@@ -563,6 +563,54 @@ router.get("/me/queue", async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/drivers/me/completed-today:
+ *   get:
+ *     summary: Deliveries the authenticated driver completed in the last 24 hours
+ *     tags: [Drivers]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get("/me/completed-today", async (req, res) => {
+  try {
+    const userId = req.auth?.userId;
+    const { Driver, Order } = req.dbModels;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const driver = await Driver.findOne({ user: userId }).select("_id");
+    if (!driver) {
+      return res.status(404).json({ success: false, message: "Driver profile not found." });
+    }
+
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const orders = await Order.find({
+      driver: driver._id,
+      deliveryStatus: "Delivered",
+      deliveredAt: { $gte: since },
+    })
+      .select("_id deliveredAt deliveryFee store")
+      .populate("store", "name")
+      .sort({ deliveredAt: -1 });
+
+    return res.status(200).json({
+      success: true,
+      count: orders.length,
+      orders: orders.map((order) => ({
+        _id: order._id,
+        storeName: order.store?.name || "",
+        deliveryFee: order.deliveryFee,
+        deliveredAt: order.deliveredAt,
+      })),
+    });
+  } catch (error) {
+    console.error("Driver completed-today fetch error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load today's completed deliveries." });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Driver wallet: deposits, commission balance, low-balance alerts, suspension.
 // ---------------------------------------------------------------------------
