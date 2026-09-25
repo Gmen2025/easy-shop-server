@@ -196,6 +196,66 @@ router.post("/admin/company-drivers", requireAdmin, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/drivers/admin/company-drivers/{id}:
+ *   put:
+ *     summary: Admin updates a company-owned driver's details/credentials
+ *     tags: [Drivers]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.put("/admin/company-drivers/:id", requireAdmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid driver id." });
+    }
+
+    const { Driver, User } = req.dbModels;
+    const driver = await Driver.findOne({ _id: req.params.id, isCompanyOwned: true });
+    if (!driver) {
+      return res.status(404).json({ success: false, message: "Company driver not found." });
+    }
+
+    const parsedPoint = parsePointFromBody(req.body);
+    if (!parsedPoint.ok) {
+      return res.status(400).json({ success: false, message: parsedPoint.error });
+    }
+
+    const { name, email, phone, password, vehicleType, address } = req.body || {};
+
+    if (name !== undefined) driver.name = name;
+    if (phone !== undefined) driver.phone = phone;
+    if (address !== undefined) driver.address = address;
+    if (vehicleType !== undefined) driver.vehicleType = vehicleType;
+    if (parsedPoint.value) driver.location = parsedPoint.value;
+
+    const user = driver.user ? await User.findById(driver.user) : null;
+
+    if (email !== undefined) {
+      const normalizedEmail = String(email).trim().toLowerCase();
+      driver.email = normalizedEmail;
+      if (user) user.email = normalizedEmail;
+    }
+    if (name !== undefined && user) user.name = name;
+    if (phone !== undefined && user) user.phone = phone;
+    if (password) {
+      if (!user) {
+        return res.status(400).json({ success: false, message: "This driver has no linked account to update the password on." });
+      }
+      user.passwordHash = bcrypt.hashSync(password, 10);
+    }
+
+    if (user) await user.save();
+    const saved = await driver.save();
+
+    return res.status(200).json({ success: true, message: "Company driver updated.", driver: saved });
+  } catch (error) {
+    console.error("Company driver update error:", error);
+    return res.status(500).json({ success: false, message: "Unable to update the company driver." });
+  }
+});
+
 router.put("/:id/approve", requireAdmin, async (req, res) => {
   try {
     const rawDb = String(req.body?.databaseName || req.query?.databaseName || req.dbName || "").trim();

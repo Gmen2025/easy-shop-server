@@ -178,6 +178,65 @@ router.post("/admin/company-stores", requireAdmin, async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/stores/admin/company-stores/{id}:
+ *   put:
+ *     summary: Admin updates a company-owned store's details/credentials
+ *     tags: [Stores]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.put("/admin/company-stores/:id", requireAdmin, async (req, res) => {
+  try {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid store id." });
+    }
+
+    const { Store, User } = req.dbModels;
+    const store = await Store.findOne({ _id: req.params.id, isCompanyOwned: true });
+    if (!store) {
+      return res.status(404).json({ success: false, message: "Company store not found." });
+    }
+
+    const parsedPoint = parsePointFromBody(req.body);
+    if (!parsedPoint.ok) {
+      return res.status(400).json({ success: false, message: parsedPoint.error });
+    }
+
+    const { name, address, email, phone, password } = req.body || {};
+
+    if (name !== undefined) store.name = name;
+    if (address !== undefined) store.address = address;
+    if (phone !== undefined) store.phone = phone;
+    if (parsedPoint.value) store.location = parsedPoint.value;
+
+    const user = store.owner ? await User.findById(store.owner) : null;
+
+    if (email !== undefined) {
+      const normalizedEmail = String(email).trim().toLowerCase();
+      store.email = normalizedEmail;
+      if (user) user.email = normalizedEmail;
+    }
+    if (name !== undefined && user) user.name = name;
+    if (phone !== undefined && user) user.phone = phone;
+    if (password) {
+      if (!user) {
+        return res.status(400).json({ success: false, message: "This store has no linked account to update the password on." });
+      }
+      user.passwordHash = bcrypt.hashSync(password, 10);
+    }
+
+    if (user) await user.save();
+    const saved = await store.save();
+
+    return res.status(200).json({ success: true, message: "Company store updated.", store: saved });
+  } catch (error) {
+    console.error("Company store update error:", error);
+    return res.status(500).json({ success: false, message: "Unable to update the company store." });
+  }
+});
+
 // Helper to compute store delivered revenue & balances for admin payout settlements
 async function computeStoreBalance(models, storeId) {
   const { Order, Payout } = models;
