@@ -38,6 +38,8 @@ const storeSchema = new mongoose.Schema({
   closeHour: { type: String, default: "" },
   isVerified: { type: Boolean, default: false },
   isOpen: { type: Boolean, default: true },
+  // true for company-run fulfillment locations created directly by an admin (not a partner-owned store).
+  isCompanyOwned: { type: Boolean, default: false },
   location: {
     type: {
       type: String,

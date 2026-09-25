@@ -324,6 +324,249 @@ router.get(`/:id/tracking`, async (req, res) => {
   });
 });
 
+const requireAdmin = (req, res, next) => {
+  if (!req.auth?.isAdmin) {
+    return res.status(403).json({ success: false, message: "Admin access required" });
+  }
+  next();
+};
+
+/**
+ * @swagger
+ * /api/v1/orders/admin/company-fulfillable:
+ *   get:
+ *     summary: List deliveries not claimable by any nearby partner driver, for company-driver fulfillment
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get("/admin/company-fulfillable", requireAdmin, async (req, res) => {
+  const latitude = Number(req.query.latitude);
+  const longitude = Number(req.query.longitude);
+  const radiusKm = Number(req.query.radiusKm) > 0 ? Number(req.query.radiusKm) : 10;
+
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+    return res.status(400).json({ success: false, message: "latitude and longitude are required." });
+  }
+
+  const { Order, Driver } = req.dbModels;
+  const orders = await Order.find({
+    driver: null,
+    dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] },
+  })
+    .populate("store", "name address location")
+    .sort({ dateOrdered: -1 })
+    .limit(100);
+
+  const results = [];
+  for (const order of orders) {
+    const coords = order.store?.location?.coordinates || order.customerLocation?.coordinates || [longitude, latitude];
+
+    const nearbyPartnerDriver = await Driver.findOne({
+      isCompanyOwned: { $ne: true },
+      isSuspended: { $ne: true },
+      $or: [{ isAvailable: true }, { availabilityStatus: true }],
+      location: {
+        $near: {
+          $geometry: { type: "Point", coordinates: coords },
+          $maxDistance: radiusKm * 1000,
+        },
+      },
+    });
+
+    if (!nearbyPartnerDriver) {
+      results.push(order);
+    }
+  }
+
+  return res.status(200).json({ success: true, radiusKm, orders: results });
+});
+
+async function hasNearbyPartnerDriver(Driver, coords, radiusKm) {
+  const nearbyPartnerDriver = await Driver.findOne({
+    isCompanyOwned: { $ne: true },
+    isSuspended: { $ne: true },
+    $or: [{ isAvailable: true }, { availabilityStatus: true }],
+    location: {
+      $near: {
+        $geometry: { type: "Point", coordinates: coords },
+        $maxDistance: radiusKm * 1000,
+      },
+    },
+  });
+  return Boolean(nearbyPartnerDriver);
+}
+
+/**
+ * @swagger
+ * /api/v1/orders/company/my-deliveries:
+ *   get:
+ *     summary: Self-service list of deliveries for the authenticated company driver to accept/reject
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get("/company/my-deliveries", async (req, res) => {
+  const { Order, Driver } = req.dbModels;
+  const driver = await Driver.findOne({ user: req.auth?.userId, isCompanyOwned: true });
+  if (!driver) {
+    return res.status(403).json({ success: false, message: "Only company drivers can access this list." });
+  }
+
+  const coords = driver.location?.coordinates;
+  if (!Array.isArray(coords) || coords.length !== 2) {
+    return res.status(400).json({ success: false, message: "Your driver profile has no registered location." });
+  }
+
+  const radiusKm = Number(req.query.radiusKm) > 0 ? Number(req.query.radiusKm) : 10;
+
+  const orders = await Order.find({
+    driver: null,
+    dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] },
+    "companyDriverResponses.driver": { $ne: driver._id },
+  })
+    .populate("store", "name address location")
+    .sort({ dateOrdered: -1 })
+    .limit(100);
+
+  const results = [];
+  for (const order of orders) {
+    const orderCoords = order.store?.location?.coordinates || order.customerLocation?.coordinates || coords;
+    if (!(await hasNearbyPartnerDriver(Driver, orderCoords, radiusKm))) {
+      results.push(order);
+    }
+  }
+
+  return res.status(200).json({ success: true, radiusKm, orders: results });
+});
+
+/**
+ * @swagger
+ * /api/v1/orders/{id}/company-claim:
+ *   put:
+ *     summary: Authenticated company driver accepts (claims) a delivery
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.put("/:id/company-claim", async (req, res) => {
+  const { Order, Driver } = req.dbModels;
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    return res.status(400).json({ success: false, message: "Invalid order id." });
+  }
+
+  const driver = await Driver.findOne({ user: req.auth?.userId, isCompanyOwned: true });
+  if (!driver) {
+    return res.status(403).json({ success: false, message: "Only company drivers can claim deliveries." });
+  }
+
+  const order = await Order.findById(req.params.id);
+  if (!order) {
+    return res.status(404).json({ success: false, message: "Order not found." });
+  }
+  if (order.driver) {
+    return res.status(409).json({ success: false, message: "This delivery has already been claimed." });
+  }
+
+  order.driver = driver._id;
+  order.deliveryStatus = "Driver Assigned";
+  order.dispatchStatus = "driver_assigned";
+  order.companyDriverResponses.push({ driver: driver._id, status: "accepted" });
+  await order.save();
+
+  return res.status(200).json({ success: true, message: "Delivery claimed.", order });
+});
+
+/**
+ * @swagger
+ * /api/v1/orders/{id}/company-reject:
+ *   put:
+ *     summary: Authenticated company driver rejects a delivery (does not delete it)
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.put("/:id/company-reject", async (req, res) => {
+  const { Order, Driver } = req.dbModels;
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    return res.status(400).json({ success: false, message: "Invalid order id." });
+  }
+
+  const driver = await Driver.findOne({ user: req.auth?.userId, isCompanyOwned: true });
+  if (!driver) {
+    return res.status(403).json({ success: false, message: "Only company drivers can reject deliveries." });
+  }
+
+  const order = await Order.findById(req.params.id);
+  if (!order) {
+    return res.status(404).json({ success: false, message: "Order not found." });
+  }
+
+  const alreadyResponded = (order.companyDriverResponses || []).some((entry) => String(entry.driver) === String(driver._id));
+  if (alreadyResponded) {
+    return res.status(409).json({ success: false, message: "You have already responded to this delivery." });
+  }
+
+  order.companyDriverResponses.push({ driver: driver._id, status: "rejected" });
+  await order.save();
+
+  return res.status(200).json({ success: true, message: "Delivery rejected." });
+});
+
+/**
+ * @swagger
+ * /api/v1/orders/admin/company-rejections:
+ *   get:
+ *     summary: Admin lists deliveries rejected by company drivers
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get("/admin/company-rejections", requireAdmin, async (req, res) => {
+  const { Order } = req.dbModels;
+  const orders = await Order.find({ "companyDriverResponses.status": "rejected" })
+    .populate("store", "name address")
+    .populate("companyDriverResponses.driver", "name email")
+    .sort({ dateOrdered: -1 })
+    .limit(100);
+
+  return res.status(200).json({ success: true, orders });
+});
+
+/**
+ * @swagger
+ * /api/v1/orders/{id}/company-responses/{responseId}:
+ *   delete:
+ *     summary: Admin deletes a rejected company-driver response, re-opening the order
+ *     tags: [Orders]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.delete("/:id/company-responses/:responseId", requireAdmin, async (req, res) => {
+  const { Order } = req.dbModels;
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    return res.status(400).json({ success: false, message: "Invalid order id." });
+  }
+
+  const order = await Order.findById(req.params.id);
+  if (!order) {
+    return res.status(404).json({ success: false, message: "Order not found." });
+  }
+
+  const response = order.companyDriverResponses.id(req.params.responseId);
+  if (!response) {
+    return res.status(404).json({ success: false, message: "Response not found." });
+  }
+  if (response.status !== "rejected") {
+    return res.status(400).json({ success: false, message: "Only rejected responses can be deleted." });
+  }
+
+  response.deleteOne();
+  await order.save();
+
+  return res.status(200).json({ success: true, message: "Rejection removed; the order is re-opened." });
+});
+
 /**
  * @swagger
  * /api/v1/orders:

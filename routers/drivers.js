@@ -1,5 +1,6 @@
 const router = require("express").Router();
 const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 const { getNearbyDrivers } = require("../helpers/driver-location");
 const { sendPushToUser } = require("../helpers/push-notify");
 const { sendMailSafe } = require("../helpers/mailer");
@@ -97,6 +98,102 @@ router.get(`/`, requireAdmin, async (req, res) => {
   }
 
   res.status(200).send(drivers);
+});
+
+/**
+ * @swagger
+ * /api/v1/drivers/admin/company-drivers:
+ *   get:
+ *     summary: List admin-created company-owned drivers
+ *     tags: [Drivers]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get("/admin/company-drivers", requireAdmin, async (req, res) => {
+  try {
+    const { Driver } = req.dbModels;
+    const drivers = await Driver.find({ isCompanyOwned: true }).sort({ name: 1 });
+    return res.json(drivers);
+  } catch (error) {
+    console.error("Company drivers list error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load company drivers." });
+  }
+});
+
+/**
+ * @swagger
+ * /api/v1/drivers/admin/company-drivers:
+ *   post:
+ *     summary: Admin creates a company-employed driver (not a partner) at a given address/location
+ *     tags: [Drivers]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.post("/admin/company-drivers", requireAdmin, async (req, res) => {
+  try {
+    const { name, email, phone, password, vehicleType, address } = req.body || {};
+
+    if (!name || !email || !phone || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "name, email, phone, and password are required.",
+      });
+    }
+
+    const parsedPoint = parsePointFromBody(req.body);
+    if (!parsedPoint.ok) {
+      return res.status(400).json({ success: false, message: parsedPoint.error });
+    }
+    if (!parsedPoint.value) {
+      return res.status(400).json({ success: false, message: "latitude and longitude are required." });
+    }
+
+    const { Driver, User } = req.dbModels;
+    const normalizedEmail = String(email).trim().toLowerCase();
+
+    let user = await User.findOne({ email: normalizedEmail });
+    if (user) {
+      user.isDriver = true;
+      user.role = "driver";
+    } else {
+      user = new User({
+        name,
+        email: normalizedEmail,
+        passwordHash: bcrypt.hashSync(password, 10),
+        phone,
+        isDriver: true,
+        role: "driver",
+        isEmailVerified: true,
+      });
+    }
+    await user.save();
+
+    const driver = await Driver.findOneAndUpdate(
+      { user: user._id },
+      {
+        $set: {
+          name,
+          email: normalizedEmail,
+          phone,
+          address: address || "",
+          vehicleType: vehicleType || "",
+          location: parsedPoint.value,
+          isCompanyOwned: true,
+          approvalStatus: "approved",
+          approvedAt: new Date(),
+          approvedBy: req.auth.userId,
+          isAvailable: true,
+        },
+        $setOnInsert: { user: user._id },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    return res.status(201).json({ success: true, message: "Company driver created.", driver });
+  } catch (error) {
+    console.error("Company driver creation error:", error);
+    return res.status(500).json({ success: false, message: "Unable to create the company driver." });
+  }
 });
 
 router.put("/:id/approve", requireAdmin, async (req, res) => {

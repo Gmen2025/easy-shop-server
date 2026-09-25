@@ -178,6 +178,7 @@ router.post("/driver-login", async (req, res) => {
       isDriver: true,
       role: "driver",
       driverId: driver._id,
+      isCompanyOwned: Boolean(driver.isCompanyOwned),
       token,
     });
   } catch (error) {
@@ -204,7 +205,7 @@ router.post("/store-owner-login", async (req, res) => {
     }
 
     const token = jwt.sign({ userId: user.id, isAdmin: user.isAdmin, role: "store_owner" }, process.env.secret, { expiresIn: "1d" });
-    return res.json({ _id: user._id, name: user.name, email: user.email, phone: user.phone, role: "store_owner", storeId: store._id, token });
+    return res.json({ _id: user._id, name: user.name, email: user.email, phone: user.phone, role: "store_owner", storeId: store._id, isCompanyOwned: Boolean(store.isCompanyOwned), token });
   } catch (error) {
     console.error("Store owner login error:", error);
     return res.status(500).json({ success: false, message: "Unable to sign in to the store app right now." });
@@ -1541,9 +1542,22 @@ router.get("/profile", async (req, res) => {
       });
     }
 
+    const userJson = user.toObject();
+
+    // Surface whether this driver/store is company-run (not a partner) so client apps can
+    // route them to their own dashboard instead of the partner driver/store-owner experience.
+    if (user.isDriver) {
+      const driver = await req.dbModels.Driver.findOne({ user: userId }).select("isCompanyOwned");
+      userJson.isCompanyOwnedDriver = Boolean(driver?.isCompanyOwned);
+    }
+    if (user.isStoreOwner) {
+      const store = await req.dbModels.Store.findOne({ owner: userId }).select("isCompanyOwned");
+      userJson.isCompanyOwnedStore = Boolean(store?.isCompanyOwned);
+    }
+
     return res.status(200).json({
       success: true,
-      user,
+      user: userJson,
     });
   } catch (error) {
     console.error("Get profile error:", error);
@@ -1682,6 +1696,111 @@ router.post("/upgrade-role", async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Unable to upgrade the account to driver right now.",
+    });
+  }
+});
+
+/**
+ * @swagger
+ * /api/v1/users/admin/assign-role:
+ *   post:
+ *     summary: Admin assigns the driver or store owner role to an existing user
+ *     tags: [Users]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.post("/admin/assign-role", async (req, res) => {
+  try {
+    if (!req.auth?.isAdmin) {
+      return res.status(403).json({ success: false, message: "Admin access required" });
+    }
+
+    const email = String(req.body?.email || "").trim().toLowerCase();
+    const roleType = String(req.body?.roleType || "").trim().toLowerCase();
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: "An email address is required." });
+    }
+
+    if (!["driver", "store_owner", "storeowner"].includes(roleType)) {
+      return res.status(400).json({ success: false, message: "Only the driver or store owner role can be assigned." });
+    }
+
+    const User = getUserModel(req);
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: "No user found with that email address." });
+    }
+
+    if (roleType === "store_owner" || roleType === "storeowner") {
+      user.isStoreOwner = true;
+      user.storeOwnerApprovalStatus = "approved";
+      await user.save();
+
+      const { Store } = req.dbModels;
+      const store = await Store.findOneAndUpdate(
+        { owner: user._id },
+        {
+          $set: {
+            name: user.name || "Store",
+            email: user.email,
+            phone: user.phone || "",
+            address: user.street || "Pending setup",
+            approvalStatus: "approved",
+          },
+          $setOnInsert: { owner: user._id, isVerified: false, isOpen: true },
+        },
+        { new: true, upsert: true, setDefaultsOnInsert: true }
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: `${user.name || user.email} was assigned the store owner role.`,
+        user: {
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          isStoreOwner: true,
+          storeOwnerApprovalStatus: "approved",
+        },
+        storeId: store._id,
+      });
+    }
+
+    const { Driver } = req.dbModels;
+    user.isDriver = true;
+    user.role = "driver";
+    await user.save();
+
+    const driver = await Driver.findOneAndUpdate(
+      { user: user._id },
+      {
+        $set: { name: user.name, email: user.email, phone: user.phone, approvalStatus: "approved" },
+        $setOnInsert: { user: user._id, isAvailable: false },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `${user.name || user.email} was assigned the driver role.`,
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        isDriver: user.isDriver,
+        role: user.role,
+      },
+      driverId: driver._id,
+    });
+  } catch (error) {
+    console.error("Admin role assignment error:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Unable to assign the role right now.",
     });
   }
 });

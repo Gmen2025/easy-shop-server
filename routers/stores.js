@@ -1,5 +1,6 @@
 const router = require("express").Router();
 const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 const { normalizeDatabaseName, getAllowedDatabaseNames, getModelsForDb } = require("../helpers/db-manager");
 
 const requireAdmin = (req, res, next) => {
@@ -84,6 +85,96 @@ router.get("/admin/owners", requireAdmin, async (req, res) => {
   } catch (error) {
     console.error("Store owner list error:", error);
     return res.status(500).json({ success: false, message: "Unable to load store owners." });
+  }
+});
+
+/**
+ * @swagger
+ * /api/v1/stores/admin/company-stores:
+ *   get:
+ *     summary: List admin-created company-owned stores
+ *     tags: [Stores]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get("/admin/company-stores", requireAdmin, async (req, res) => {
+  try {
+    const { Store } = req.dbModels;
+    const stores = await Store.find({ isCompanyOwned: true }).sort({ name: 1 });
+    return res.json(stores);
+  } catch (error) {
+    console.error("Company stores list error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load company stores." });
+  }
+});
+
+/**
+ * @swagger
+ * /api/v1/stores/admin/company-stores:
+ *   post:
+ *     summary: Admin creates a company-owned store (not a partner) at a given address/location
+ *     tags: [Stores]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.post("/admin/company-stores", requireAdmin, async (req, res) => {
+  try {
+    const { name, address, email, phone, password } = req.body || {};
+
+    if (!name || !address || !email || !phone || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "name, address, email, phone, and password are required.",
+      });
+    }
+
+    const parsedPoint = parsePointFromBody(req.body);
+    if (!parsedPoint.ok) {
+      return res.status(400).json({ success: false, message: parsedPoint.error });
+    }
+    if (!parsedPoint.value) {
+      return res.status(400).json({ success: false, message: "latitude and longitude are required." });
+    }
+
+    const { Store, User } = req.dbModels;
+    const normalizedEmail = String(email).trim().toLowerCase();
+
+    let user = await User.findOne({ email: normalizedEmail });
+    if (user) {
+      user.isStoreOwner = true;
+      user.storeOwnerApprovalStatus = "approved";
+    } else {
+      user = new User({
+        name,
+        email: normalizedEmail,
+        passwordHash: bcrypt.hashSync(password, 10),
+        phone,
+        isStoreOwner: true,
+        storeOwnerApprovalStatus: "approved",
+        isEmailVerified: true,
+      });
+    }
+    await user.save();
+
+    const store = new Store({
+      name,
+      address,
+      owner: user._id,
+      phone,
+      email: normalizedEmail,
+      location: parsedPoint.value,
+      isCompanyOwned: true,
+      approvalStatus: "approved",
+      isVerified: true,
+      approvedAt: new Date(),
+      approvedBy: req.auth.userId,
+    });
+
+    const saved = await store.save();
+    return res.status(201).json({ success: true, message: "Company store created.", store: saved });
+  } catch (error) {
+    console.error("Company store creation error:", error);
+    return res.status(500).json({ success: false, message: "Unable to create the company store." });
   }
 });
 

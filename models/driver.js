@@ -24,6 +24,11 @@ const driverSchema = new mongoose.Schema({
     default: "",
     trim: true,
   },
+  address: {
+    type: String,
+    default: "",
+    trim: true,
+  },
   approvalStatus: {
     type: String,
     enum: ["pending", "approved", "denied"],
@@ -70,6 +75,11 @@ const driverSchema = new mongoose.Schema({
     max: 1,
   },
   isSuspended: {
+    type: Boolean,
+    default: false,
+  },
+  // true for company-employed drivers created directly by an admin (not a self-registered partner driver).
+  isCompanyOwned: {
     type: Boolean,
     default: false,
   },

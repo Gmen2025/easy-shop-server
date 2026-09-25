@@ -178,6 +178,13 @@ const orderSchema = new mongoose.Schema({
         ref: 'Driver',
         default: null
     },
+    // Company (non-partner) drivers can accept/reject deliveries not covered by nearby partner drivers.
+    // They cannot delete these entries; only an admin can remove a 'rejected' entry (re-opening the order).
+    companyDriverResponses: [{
+        driver: { type: mongoose.Schema.Types.ObjectId, ref: 'Driver' },
+        status: { type: String, enum: ['accepted', 'rejected'], required: true },
+        respondedAt: { type: Date, default: Date.now }
+    }],
     deliveryStatus: {
         type: String,
         enum: ['Pending', 'Driver Assigned', 'Picked Up', 'Delivered'],

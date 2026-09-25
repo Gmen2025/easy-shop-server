@@ -92,6 +92,14 @@ const productSchema = new mongoose.Schema({
     type: String,
     default: ''
   },
+  // Company (non-partner) stores can mark themselves ready/rejected for products not covered by
+  // nearby partner stores. They cannot delete these entries; only an admin can remove a
+  // 'rejected' entry (re-opening the product for that store).
+  companyStoreResponses: [{
+    store: { type: mongoose.Schema.Types.ObjectId, ref: 'Store' },
+    status: { type: String, enum: ['ready', 'rejected'], required: true },
+    respondedAt: { type: Date, default: Date.now }
+  }],
   dateCreated: {
     type: Date,
     default: Date.now

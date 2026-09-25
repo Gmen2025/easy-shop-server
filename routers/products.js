@@ -572,6 +572,228 @@ router.get('/admin/pending', requireAdmin, async (req, res) => {
     return res.status(200).json({ success: true, products });
 });
 
+/**
+ * @swagger
+ * /api/v1/products/admin/company-fulfillable:
+ *   get:
+ *     summary: List approved products not covered by any nearby partner store, for company-store fulfillment
+ *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get('/admin/company-fulfillable', requireAdmin, async (req, res) => {
+    const latitude = Number(req.query.latitude);
+    const longitude = Number(req.query.longitude);
+    const radiusKm = Number(req.query.radiusKm) > 0 ? Number(req.query.radiusKm) : 10;
+
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+        return res.status(400).json({ success: false, message: 'latitude and longitude are required.' });
+    }
+
+    const toRad = (deg) => (deg * Math.PI) / 180;
+    const haversineKm = ([lng1, lat1], [lng2, lat2]) => {
+        const R = 6371;
+        const dLat = toRad(lat2 - lat1);
+        const dLng = toRad(lng2 - lng1);
+        const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+        return 2 * R * Math.asin(Math.sqrt(a));
+    };
+
+    const { Product } = req.dbModels;
+    const products = await Product.find({ approvalStatus: 'approved' })
+        .populate('category', 'name')
+        .populate('store', 'name location isCompanyOwned')
+        .sort({ dateCreated: -1 });
+
+    const point = [longitude, latitude];
+    const uncovered = products.filter((product) => {
+        const store = product.store;
+        if (!store || store.isCompanyOwned) return true;
+        const coords = store.location?.coordinates;
+        if (!Array.isArray(coords) || coords.length !== 2) return true;
+        return haversineKm(point, coords) > radiusKm;
+    });
+
+    return res.status(200).json({ success: true, radiusKm, products: uncovered });
+});
+
+const haversineKmDistance = ([lng1, lat1], [lng2, lat2]) => {
+    const toRad = (deg) => (deg * Math.PI) / 180;
+    const R = 6371;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+};
+
+/**
+ * @swagger
+ * /api/v1/products/company/my-products:
+ *   get:
+ *     summary: Self-service list of products for the authenticated company store to mark ready/reject
+ *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get('/company/my-products', async (req, res) => {
+    const { Product, Store } = req.dbModels;
+    const store = await Store.findOne({ owner: req.auth?.userId, isCompanyOwned: true });
+    if (!store) {
+        return res.status(403).json({ success: false, message: 'Only company stores can access this list.' });
+    }
+
+    const coords = store.location?.coordinates;
+    if (!Array.isArray(coords) || coords.length !== 2) {
+        return res.status(400).json({ success: false, message: 'Your store profile has no registered location.' });
+    }
+
+    const radiusKm = Number(req.query.radiusKm) > 0 ? Number(req.query.radiusKm) : 10;
+
+    const products = await Product.find({
+        approvalStatus: 'approved',
+        'companyStoreResponses.store': { $ne: store._id },
+    })
+        .populate('category', 'name')
+        .populate('store', 'name location isCompanyOwned')
+        .sort({ dateCreated: -1 });
+
+    const uncovered = products.filter((product) => {
+        const productStore = product.store;
+        if (!productStore) return true;
+        const productCoords = productStore.location?.coordinates;
+        if (!Array.isArray(productCoords) || productCoords.length !== 2) return true;
+        return haversineKmDistance(coords, productCoords) > radiusKm;
+    });
+
+    return res.status(200).json({ success: true, radiusKm, products: uncovered });
+});
+
+/**
+ * @swagger
+ * /api/v1/products/{id}/company-ready:
+ *   put:
+ *     summary: Authenticated company store marks a product ready for fulfillment
+ *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.put('/:id/company-ready', async (req, res) => {
+    const { Product, Store } = req.dbModels;
+    if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ success: false, message: 'Invalid product id.' });
+    }
+
+    const store = await Store.findOne({ owner: req.auth?.userId, isCompanyOwned: true });
+    if (!store) {
+        return res.status(403).json({ success: false, message: 'Only company stores can accept products.' });
+    }
+
+    const product = await Product.findById(req.params.id);
+    if (!product) {
+        return res.status(404).json({ success: false, message: 'Product not found.' });
+    }
+
+    const alreadyResponded = (product.companyStoreResponses || []).some((entry) => String(entry.store) === String(store._id));
+    if (alreadyResponded) {
+        return res.status(409).json({ success: false, message: 'You have already responded to this product.' });
+    }
+
+    product.companyStoreResponses.push({ store: store._id, status: 'ready' });
+    await product.save();
+
+    return res.status(200).json({ success: true, message: 'Product marked ready for fulfillment.' });
+});
+
+/**
+ * @swagger
+ * /api/v1/products/{id}/company-reject:
+ *   put:
+ *     summary: Authenticated company store rejects a product (does not delete it)
+ *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.put('/:id/company-reject', async (req, res) => {
+    const { Product, Store } = req.dbModels;
+    if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ success: false, message: 'Invalid product id.' });
+    }
+
+    const store = await Store.findOne({ owner: req.auth?.userId, isCompanyOwned: true });
+    if (!store) {
+        return res.status(403).json({ success: false, message: 'Only company stores can reject products.' });
+    }
+
+    const product = await Product.findById(req.params.id);
+    if (!product) {
+        return res.status(404).json({ success: false, message: 'Product not found.' });
+    }
+
+    const alreadyResponded = (product.companyStoreResponses || []).some((entry) => String(entry.store) === String(store._id));
+    if (alreadyResponded) {
+        return res.status(409).json({ success: false, message: 'You have already responded to this product.' });
+    }
+
+    product.companyStoreResponses.push({ store: store._id, status: 'rejected' });
+    await product.save();
+
+    return res.status(200).json({ success: true, message: 'Product rejected.' });
+});
+
+/**
+ * @swagger
+ * /api/v1/products/admin/company-rejections:
+ *   get:
+ *     summary: Admin lists products rejected by company stores
+ *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.get('/admin/company-rejections', requireAdmin, async (req, res) => {
+    const { Product } = req.dbModels;
+    const products = await Product.find({ 'companyStoreResponses.status': 'rejected' })
+        .populate('category', 'name')
+        .populate('companyStoreResponses.store', 'name email')
+        .sort({ dateCreated: -1 })
+        .limit(100);
+
+    return res.status(200).json({ success: true, products });
+});
+
+/**
+ * @swagger
+ * /api/v1/products/{id}/company-responses/{responseId}:
+ *   delete:
+ *     summary: Admin deletes a rejected company-store response, re-opening the product
+ *     tags: [Products]
+ *     security:
+ *       - bearerAuth: []
+ */
+router.delete('/:id/company-responses/:responseId', requireAdmin, async (req, res) => {
+    const { Product } = req.dbModels;
+    if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ success: false, message: 'Invalid product id.' });
+    }
+
+    const product = await Product.findById(req.params.id);
+    if (!product) {
+        return res.status(404).json({ success: false, message: 'Product not found.' });
+    }
+
+    const response = product.companyStoreResponses.id(req.params.responseId);
+    if (!response) {
+        return res.status(404).json({ success: false, message: 'Response not found.' });
+    }
+    if (response.status !== 'rejected') {
+        return res.status(400).json({ success: false, message: 'Only rejected responses can be deleted.' });
+    }
+
+    response.deleteOne();
+    await product.save();
+
+    return res.status(200).json({ success: true, message: 'Rejection removed; the product is re-opened.' });
+});
+
 router.put('/:id/approve', requireAdmin, async (req, res) => {
     const { Product, Store, User } = req.dbModels;
     if (!mongoose.isValidObjectId(req.params.id)) {
