@@ -122,6 +122,18 @@ router.post("/login", async (req, res) => {
       secret,
       { expiresIn: "1d" }
     );
+
+    let isCompanyOwnedDriver = false;
+    let isCompanyOwnedStore = false;
+    if (user.isDriver) {
+      const driver = await req.dbModels.Driver.findOne({ user: user._id }).select("isCompanyOwned");
+      isCompanyOwnedDriver = Boolean(driver?.isCompanyOwned);
+    }
+    if (user.isStoreOwner) {
+      const store = await req.dbModels.Store.findOne({ owner: user._id }).select("isCompanyOwned");
+      isCompanyOwnedStore = Boolean(store?.isCompanyOwned);
+    }
+
     return res.send({
       _id: user._id,
       name: user.name,
@@ -129,6 +141,9 @@ router.post("/login", async (req, res) => {
       phone: user.phone,
       isAdmin: user.isAdmin,
       isDriver: user.isDriver,
+      isStoreOwner: user.isStoreOwner,
+      isCompanyOwnedDriver,
+      isCompanyOwnedStore,
       role: user.role,
       isEmailVerified: user.isEmailVerified,
       token: token,
