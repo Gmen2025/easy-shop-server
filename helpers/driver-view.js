@@ -43,6 +43,12 @@ function buildDriverOrderSummary(order) {
     queueSequence: order.queueSequence || 0,
     deliveryFee: order.deliveryFee,
     deliveryMode: order.deliveryMode,
+    itemCount: (order.orderItems || []).reduce((sum, item) => sum + Number(item?.quantity || 0), 0),
+    items: (order.orderItems || []).map((item) => ({
+      name: item?.product?.name || "Item",
+      image: item?.product?.image || "",
+      quantity: item?.quantity,
+    })),
     store: storeSource
       ? {
           id: String(storeSource._id || storeSource),

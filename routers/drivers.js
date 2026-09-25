@@ -546,7 +546,11 @@ router.get("/me/queue", async (req, res) => {
       .sort({ queueBatchId: 1, queueSequence: 1 })
       .populate("store", "name address location")
       .populate("customer", "name phone")
-      .populate("user", "name phone");
+      .populate("user", "name phone")
+      .populate({
+        path: "orderItems",
+        populate: { path: "product", select: "name image price" },
+      });
 
     return res.status(200).json({
       success: true,

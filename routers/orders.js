@@ -432,6 +432,10 @@ router.get("/company/my-deliveries", async (req, res) => {
       "companyDriverResponses.driver": { $ne: driver._id },
     })
       .populate("store", "name address location")
+      .populate({
+        path: "orderItems",
+        populate: { path: "product", select: "name image price" },
+      })
       .sort({ dateOrdered: -1 })
       .limit(100);
 
@@ -439,7 +443,21 @@ router.get("/company/my-deliveries", async (req, res) => {
     for (const order of orders) {
       const orderCoords = order.store?.location?.coordinates || order.customerLocation?.coordinates || coords;
       if (!(await hasNearbyPartnerDriver(Driver, orderCoords, radiusKm))) {
-        results.push(order);
+        results.push({
+          _id: order._id,
+          store: order.store,
+          deliveryFee: order.deliveryFee,
+          deliveryMode: order.deliveryMode,
+          dateOrdered: order.dateOrdered,
+          // Pre-claim: only the general drop-off area, not the exact customer address (privacy).
+          dropZone: { city: order.city || "", zip: order.zip || "" },
+          itemCount: (order.orderItems || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0),
+          items: (order.orderItems || []).map((item) => ({
+            name: item.product?.name || "Item",
+            image: item.product?.image || "",
+            quantity: item.quantity,
+          })),
+        });
       }
     }
 
