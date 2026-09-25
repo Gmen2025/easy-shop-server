@@ -13,6 +13,12 @@ const { connectDefaultDatabase } = require('./helpers/db-manager');
 const { verifyMailerConnection } = require('./helpers/mailer');
 const { DRIVER_RESPONSE_EVENT } = require('./service/dispatchService');
 const { saveDriverLocation } = require('./helpers/driver-location');
+
+// Safety net: an async route handler that forgets try/catch would otherwise crash the whole
+// process on Node's default unhandledRejection behavior, taking down every user's requests.
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection (server kept alive):', reason);
+});
 const { getModelsForDb, DEFAULT_DB_NAME } = require('./helpers/db-manager');
 const jwt = require('jsonwebtoken');
 

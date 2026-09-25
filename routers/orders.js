@@ -341,45 +341,50 @@ const requireAdmin = (req, res, next) => {
  *       - bearerAuth: []
  */
 router.get("/admin/company-fulfillable", requireAdmin, async (req, res) => {
-  const latitude = Number(req.query.latitude);
-  const longitude = Number(req.query.longitude);
-  const radiusKm = Number(req.query.radiusKm) > 0 ? Number(req.query.radiusKm) : 10;
+  try {
+    const latitude = Number(req.query.latitude);
+    const longitude = Number(req.query.longitude);
+    const radiusKm = Number(req.query.radiusKm) > 0 ? Number(req.query.radiusKm) : 10;
 
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-    return res.status(400).json({ success: false, message: "latitude and longitude are required." });
-  }
-
-  const { Order, Driver } = req.dbModels;
-  const orders = await Order.find({
-    driver: null,
-    dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] },
-  })
-    .populate("store", "name address location")
-    .sort({ dateOrdered: -1 })
-    .limit(100);
-
-  const results = [];
-  for (const order of orders) {
-    const coords = order.store?.location?.coordinates || order.customerLocation?.coordinates || [longitude, latitude];
-
-    const nearbyPartnerDriver = await Driver.findOne({
-      isCompanyOwned: { $ne: true },
-      isSuspended: { $ne: true },
-      $or: [{ isAvailable: true }, { availabilityStatus: true }],
-      location: {
-        $near: {
-          $geometry: { type: "Point", coordinates: coords },
-          $maxDistance: radiusKm * 1000,
-        },
-      },
-    });
-
-    if (!nearbyPartnerDriver) {
-      results.push(order);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return res.status(400).json({ success: false, message: "latitude and longitude are required." });
     }
-  }
 
-  return res.status(200).json({ success: true, radiusKm, orders: results });
+    const { Order, Driver } = req.dbModels;
+    const orders = await Order.find({
+      driver: null,
+      dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] },
+    })
+      .populate("store", "name address location")
+      .sort({ dateOrdered: -1 })
+      .limit(100);
+
+    const results = [];
+    for (const order of orders) {
+      const coords = order.store?.location?.coordinates || order.customerLocation?.coordinates || [longitude, latitude];
+
+      const nearbyPartnerDriver = await Driver.findOne({
+        isCompanyOwned: { $ne: true },
+        isSuspended: { $ne: true },
+        $or: [{ isAvailable: true }, { availabilityStatus: true }],
+        location: {
+          $near: {
+            $geometry: { type: "Point", coordinates: coords },
+            $maxDistance: radiusKm * 1000,
+          },
+        },
+      });
+
+      if (!nearbyPartnerDriver) {
+        results.push(order);
+      }
+    }
+
+    return res.status(200).json({ success: true, radiusKm, orders: results });
+  } catch (error) {
+    console.error("Admin company-fulfillable orders error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load unassigned deliveries." });
+  }
 });
 
 async function hasNearbyPartnerDriver(Driver, coords, radiusKm) {
@@ -407,37 +412,42 @@ async function hasNearbyPartnerDriver(Driver, coords, radiusKm) {
  *       - bearerAuth: []
  */
 router.get("/company/my-deliveries", async (req, res) => {
-  const { Order, Driver } = req.dbModels;
-  const driver = await Driver.findOne({ user: req.auth?.userId, isCompanyOwned: true });
-  if (!driver) {
-    return res.status(403).json({ success: false, message: "Only company drivers can access this list." });
-  }
-
-  const coords = driver.location?.coordinates;
-  if (!Array.isArray(coords) || coords.length !== 2) {
-    return res.status(400).json({ success: false, message: "Your driver profile has no registered location." });
-  }
-
-  const radiusKm = Number(req.query.radiusKm) > 0 ? Number(req.query.radiusKm) : 10;
-
-  const orders = await Order.find({
-    driver: null,
-    dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] },
-    "companyDriverResponses.driver": { $ne: driver._id },
-  })
-    .populate("store", "name address location")
-    .sort({ dateOrdered: -1 })
-    .limit(100);
-
-  const results = [];
-  for (const order of orders) {
-    const orderCoords = order.store?.location?.coordinates || order.customerLocation?.coordinates || coords;
-    if (!(await hasNearbyPartnerDriver(Driver, orderCoords, radiusKm))) {
-      results.push(order);
+  try {
+    const { Order, Driver } = req.dbModels;
+    const driver = await Driver.findOne({ user: req.auth?.userId, isCompanyOwned: true });
+    if (!driver) {
+      return res.status(403).json({ success: false, message: "Only company drivers can access this list." });
     }
-  }
 
-  return res.status(200).json({ success: true, radiusKm, orders: results });
+    const coords = driver.location?.coordinates;
+    if (!Array.isArray(coords) || coords.length !== 2) {
+      return res.status(400).json({ success: false, message: "Your driver profile has no registered location." });
+    }
+
+    const radiusKm = Number(req.query.radiusKm) > 0 ? Number(req.query.radiusKm) : 10;
+
+    const orders = await Order.find({
+      driver: null,
+      dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] },
+      "companyDriverResponses.driver": { $ne: driver._id },
+    })
+      .populate("store", "name address location")
+      .sort({ dateOrdered: -1 })
+      .limit(100);
+
+    const results = [];
+    for (const order of orders) {
+      const orderCoords = order.store?.location?.coordinates || order.customerLocation?.coordinates || coords;
+      if (!(await hasNearbyPartnerDriver(Driver, orderCoords, radiusKm))) {
+        results.push(order);
+      }
+    }
+
+    return res.status(200).json({ success: true, radiusKm, orders: results });
+  } catch (error) {
+    console.error("Company driver my-deliveries error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load your unassigned deliveries." });
+  }
 });
 
 /**
@@ -450,31 +460,36 @@ router.get("/company/my-deliveries", async (req, res) => {
  *       - bearerAuth: []
  */
 router.put("/:id/company-claim", async (req, res) => {
-  const { Order, Driver } = req.dbModels;
-  if (!mongoose.isValidObjectId(req.params.id)) {
-    return res.status(400).json({ success: false, message: "Invalid order id." });
-  }
+  try {
+    const { Order, Driver } = req.dbModels;
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid order id." });
+    }
 
-  const driver = await Driver.findOne({ user: req.auth?.userId, isCompanyOwned: true });
-  if (!driver) {
-    return res.status(403).json({ success: false, message: "Only company drivers can claim deliveries." });
-  }
+    const driver = await Driver.findOne({ user: req.auth?.userId, isCompanyOwned: true });
+    if (!driver) {
+      return res.status(403).json({ success: false, message: "Only company drivers can claim deliveries." });
+    }
 
-  const order = await Order.findById(req.params.id);
-  if (!order) {
-    return res.status(404).json({ success: false, message: "Order not found." });
-  }
-  if (order.driver) {
-    return res.status(409).json({ success: false, message: "This delivery has already been claimed." });
-  }
+    const order = await Order.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found." });
+    }
+    if (order.driver) {
+      return res.status(409).json({ success: false, message: "This delivery has already been claimed." });
+    }
 
-  order.driver = driver._id;
-  order.deliveryStatus = "Driver Assigned";
-  order.dispatchStatus = "driver_assigned";
-  order.companyDriverResponses.push({ driver: driver._id, status: "accepted" });
-  await order.save();
+    order.driver = driver._id;
+    order.deliveryStatus = "Driver Assigned";
+    order.dispatchStatus = "driver_assigned";
+    order.companyDriverResponses.push({ driver: driver._id, status: "accepted" });
+    await order.save();
 
-  return res.status(200).json({ success: true, message: "Delivery claimed.", order });
+    return res.status(200).json({ success: true, message: "Delivery claimed.", order });
+  } catch (error) {
+    console.error("Company driver claim error:", error);
+    return res.status(500).json({ success: false, message: "Unable to claim this delivery." });
+  }
 });
 
 /**
@@ -487,30 +502,35 @@ router.put("/:id/company-claim", async (req, res) => {
  *       - bearerAuth: []
  */
 router.put("/:id/company-reject", async (req, res) => {
-  const { Order, Driver } = req.dbModels;
-  if (!mongoose.isValidObjectId(req.params.id)) {
-    return res.status(400).json({ success: false, message: "Invalid order id." });
+  try {
+    const { Order, Driver } = req.dbModels;
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid order id." });
+    }
+
+    const driver = await Driver.findOne({ user: req.auth?.userId, isCompanyOwned: true });
+    if (!driver) {
+      return res.status(403).json({ success: false, message: "Only company drivers can reject deliveries." });
+    }
+
+    const order = await Order.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found." });
+    }
+
+    const alreadyResponded = (order.companyDriverResponses || []).some((entry) => String(entry.driver) === String(driver._id));
+    if (alreadyResponded) {
+      return res.status(409).json({ success: false, message: "You have already responded to this delivery." });
+    }
+
+    order.companyDriverResponses.push({ driver: driver._id, status: "rejected" });
+    await order.save();
+
+    return res.status(200).json({ success: true, message: "Delivery rejected." });
+  } catch (error) {
+    console.error("Company driver reject error:", error);
+    return res.status(500).json({ success: false, message: "Unable to reject this delivery." });
   }
-
-  const driver = await Driver.findOne({ user: req.auth?.userId, isCompanyOwned: true });
-  if (!driver) {
-    return res.status(403).json({ success: false, message: "Only company drivers can reject deliveries." });
-  }
-
-  const order = await Order.findById(req.params.id);
-  if (!order) {
-    return res.status(404).json({ success: false, message: "Order not found." });
-  }
-
-  const alreadyResponded = (order.companyDriverResponses || []).some((entry) => String(entry.driver) === String(driver._id));
-  if (alreadyResponded) {
-    return res.status(409).json({ success: false, message: "You have already responded to this delivery." });
-  }
-
-  order.companyDriverResponses.push({ driver: driver._id, status: "rejected" });
-  await order.save();
-
-  return res.status(200).json({ success: true, message: "Delivery rejected." });
 });
 
 /**
@@ -523,14 +543,19 @@ router.put("/:id/company-reject", async (req, res) => {
  *       - bearerAuth: []
  */
 router.get("/admin/company-rejections", requireAdmin, async (req, res) => {
-  const { Order } = req.dbModels;
-  const orders = await Order.find({ "companyDriverResponses.status": "rejected" })
-    .populate("store", "name address")
-    .populate("companyDriverResponses.driver", "name email")
-    .sort({ dateOrdered: -1 })
-    .limit(100);
+  try {
+    const { Order } = req.dbModels;
+    const orders = await Order.find({ "companyDriverResponses.status": "rejected" })
+      .populate("store", "name address")
+      .populate("companyDriverResponses.driver", "name email")
+      .sort({ dateOrdered: -1 })
+      .limit(100);
 
-  return res.status(200).json({ success: true, orders });
+    return res.status(200).json({ success: true, orders });
+  } catch (error) {
+    console.error("Admin company-rejections (orders) error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load rejected deliveries." });
+  }
 });
 
 /**
@@ -543,28 +568,33 @@ router.get("/admin/company-rejections", requireAdmin, async (req, res) => {
  *       - bearerAuth: []
  */
 router.delete("/:id/company-responses/:responseId", requireAdmin, async (req, res) => {
-  const { Order } = req.dbModels;
-  if (!mongoose.isValidObjectId(req.params.id)) {
-    return res.status(400).json({ success: false, message: "Invalid order id." });
-  }
+  try {
+    const { Order } = req.dbModels;
+    if (!mongoose.isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid order id." });
+    }
 
-  const order = await Order.findById(req.params.id);
-  if (!order) {
-    return res.status(404).json({ success: false, message: "Order not found." });
-  }
+    const order = await Order.findById(req.params.id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found." });
+    }
 
-  const response = order.companyDriverResponses.id(req.params.responseId);
-  if (!response) {
-    return res.status(404).json({ success: false, message: "Response not found." });
-  }
-  if (response.status !== "rejected") {
-    return res.status(400).json({ success: false, message: "Only rejected responses can be deleted." });
-  }
+    const response = order.companyDriverResponses.id(req.params.responseId);
+    if (!response) {
+      return res.status(404).json({ success: false, message: "Response not found." });
+    }
+    if (response.status !== "rejected") {
+      return res.status(400).json({ success: false, message: "Only rejected responses can be deleted." });
+    }
 
-  response.deleteOne();
-  await order.save();
+    response.deleteOne();
+    await order.save();
 
-  return res.status(200).json({ success: true, message: "Rejection removed; the order is re-opened." });
+    return res.status(200).json({ success: true, message: "Rejection removed; the order is re-opened." });
+  } catch (error) {
+    console.error("Delete company-driver response error:", error);
+    return res.status(500).json({ success: false, message: "Unable to delete this rejection." });
+  }
 });
 
 /**
