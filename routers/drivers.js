@@ -616,6 +616,80 @@ router.get("/me/completed-today", async (req, res) => {
   }
 });
 
+router.get("/me/dashboard", async (req, res) => {
+  try {
+    const userId = req.auth?.userId;
+    const { Driver, Order } = req.dbModels;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const driver = await Driver.findOne({ user: userId }).select("_id");
+    if (!driver) {
+      return res.status(404).json({ success: false, message: "Driver profile not found." });
+    }
+
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfWeek = new Date(startOfDay);
+    startOfWeek.setDate(startOfDay.getDate() - startOfDay.getDay());
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfQuarter = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1);
+    const startOfYear = new Date(now.getFullYear(), 0, 1);
+    const periodStarts = {
+      daily: startOfDay,
+      weekly: startOfWeek,
+      monthly: startOfMonth,
+      quarterly: startOfQuarter,
+      yearly: startOfYear,
+    };
+
+    const orders = await Order.find({
+      driver: driver._id,
+      deliveryStatus: "Delivered",
+      deliveredAt: { $gte: startOfYear, $lte: now },
+    })
+      .select("_id deliveredAt deliveryFee store deliveryDistanceKm")
+      .populate("store", "name")
+      .sort({ deliveredAt: -1 })
+      .lean();
+
+    const periods = Object.fromEntries(
+      Object.entries(periodStarts).map(([key, start]) => {
+        const matchingOrders = orders.filter((order) => new Date(order.deliveredAt) >= start);
+        const income = matchingOrders.reduce((sum, order) => sum + Number(order.deliveryFee || 0), 0);
+        const distanceKm = matchingOrders.reduce(
+          (sum, order) => sum + Number(order.deliveryDistanceKm || 0),
+          0
+        );
+
+        return [key, {
+          income,
+          deliveries: matchingOrders.length,
+          averageFee: matchingOrders.length ? income / matchingOrders.length : 0,
+          distanceKm,
+          start,
+          end: now,
+        }];
+      })
+    );
+
+    return res.status(200).json({
+      success: true,
+      periods,
+      recentDeliveries: orders.slice(0, 5).map((order) => ({
+        _id: order._id,
+        storeName: order.store?.name || "Store",
+        deliveryFee: Number(order.deliveryFee || 0),
+        deliveredAt: order.deliveredAt,
+      })),
+    });
+  } catch (error) {
+    console.error("Driver dashboard fetch error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load driver dashboard." });
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Driver wallet: deposits, commission balance, low-balance alerts, suspension.
 // ---------------------------------------------------------------------------

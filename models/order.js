@@ -218,6 +218,8 @@ const orderSchema = new mongoose.Schema({
     
 });
 
+orderSchema.index({ driver: 1, deliveryStatus: 1, deliveredAt: -1 });
+
 
 orderSchema.virtual('id').get(function () {
   return this._id.toHexString();
