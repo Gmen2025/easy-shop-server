@@ -41,6 +41,8 @@ const reviewSchema = new mongoose.Schema({
   },
 });
 
+reviewSchema.index({ store: 1, dateCreated: -1 });
+
 reviewSchema.virtual('id').get(function () {
   return this._id.toHexString();
 });

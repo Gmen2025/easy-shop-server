@@ -106,6 +106,8 @@ const productSchema = new mongoose.Schema({
   }
 })
 
+productSchema.index({ store: 1, dateCreated: -1 });
+
 productSchema.virtual('id').get(function () {
   return this._id.toHexString();
 });

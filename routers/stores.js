@@ -237,6 +237,161 @@ router.put("/admin/company-stores/:id", requireAdmin, async (req, res) => {
   }
 });
 
+router.get("/me/dashboard", async (req, res) => {
+  try {
+    const userId = req.auth?.userId;
+    const { Store, Product, Order, Review, Payout } = req.dbModels;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const store = await Store.findOne({ owner: userId, isCompanyOwned: true }).select("_id name");
+    if (!store) {
+      return res.status(404).json({ success: false, message: "Company store profile not found." });
+    }
+
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfWeek = new Date(startOfDay);
+    startOfWeek.setDate(startOfDay.getDate() - startOfDay.getDay());
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfQuarter = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1);
+    const startOfYear = new Date(now.getFullYear(), 0, 1);
+    const periodStarts = {
+      daily: startOfDay,
+      weekly: startOfWeek,
+      monthly: startOfMonth,
+      quarterly: startOfQuarter,
+      yearly: startOfYear,
+    };
+
+    const [products, readyFulfillments, deliveredOrders, placedOrders, reviews, payouts] = await Promise.all([
+      Product.find({ store: store._id })
+        .select("name price countInStock minStock soldCount approvalStatus rating numReviews")
+        .lean(),
+      Product.countDocuments({
+        companyStoreResponses: { $elemMatch: { store: store._id, status: "ready" } },
+      }),
+      Order.find({
+        store: store._id,
+        $or: [{ status: { $in: ["3", "Delivered"] } }, { deliveryStatus: "Delivered" }],
+      })
+        .select("_id orderItems itemsSubtotal totalPrice deliveryFee dateOrdered deliveredAt")
+        .populate({ path: "orderItems", populate: { path: "product", select: "name price store" } })
+        .sort({ deliveredAt: -1, dateOrdered: -1 })
+        .lean(),
+      Order.find({ store: store._id, dateOrdered: { $gte: startOfYear, $lte: now } })
+        .select("_id status deliveryStatus dateOrdered")
+        .lean(),
+      Review.find({ store: store._id, dateCreated: { $gte: startOfYear, $lte: now } })
+        .select("rating dateCreated")
+        .lean(),
+      Payout.find({ store: store._id }).select("amount status").lean(),
+    ]);
+
+    const delivered = deliveredOrders.map((order) => {
+      let sales = 0;
+      let units = 0;
+      for (const item of order.orderItems || []) {
+        if (item?.product && String(item.product.store) === String(store._id)) {
+          const quantity = Number(item.quantity || 0);
+          sales += Number(item.product.price || 0) * quantity;
+          units += quantity;
+        }
+      }
+      if (sales === 0) {
+        sales = Number(order.itemsSubtotal || 0) || Math.max(
+          0,
+          Number(order.totalPrice || 0) - Number(order.deliveryFee || 0)
+        );
+        units = (order.orderItems || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+      }
+
+      return {
+        ...order,
+        sales,
+        units,
+        completedAt: order.deliveredAt || order.dateOrdered,
+      };
+    });
+
+    const periods = Object.fromEntries(
+      Object.entries(periodStarts).map(([key, start]) => {
+        const completed = delivered.filter((order) => new Date(order.completedAt) >= start);
+        const periodOrders = placedOrders.filter((order) => new Date(order.dateOrdered) >= start);
+        const periodReviews = reviews.filter((review) => new Date(review.dateCreated) >= start);
+        const sales = completed.reduce((sum, order) => sum + order.sales, 0);
+        const completedOrderCount = completed.length;
+        const reviewTotal = periodReviews.reduce((sum, review) => sum + Number(review.rating || 0), 0);
+
+        return [key, {
+          sales,
+          earnings: sales,
+          orders: periodOrders.length,
+          completedOrders: completedOrderCount,
+          unitsSold: completed.reduce((sum, order) => sum + order.units, 0),
+          averageOrder: completedOrderCount ? sales / completedOrderCount : 0,
+          reviews: periodReviews.length,
+          averageRating: periodReviews.length ? reviewTotal / periodReviews.length : 0,
+          start,
+          end: now,
+        }];
+      })
+    );
+
+    const paidOut = payouts
+      .filter((payout) => payout.status === "paid")
+      .reduce((sum, payout) => sum + Number(payout.amount || 0), 0);
+    const pendingPayout = payouts
+      .filter((payout) => ["pending", "processing"].includes(payout.status))
+      .reduce((sum, payout) => sum + Number(payout.amount || 0), 0);
+    const lifetimeEarnings = delivered.reduce((sum, order) => sum + order.sales, 0);
+    const lowStock = products.filter(
+      (product) => product.countInStock > 0 && product.countInStock <= Number(product.minStock || 0)
+    ).length;
+
+    return res.status(200).json({
+      success: true,
+      store: { id: store._id, name: store.name },
+      periods,
+      products: {
+        total: products.length,
+        approved: products.filter((product) => product.approvalStatus === "approved").length,
+        pending: products.filter((product) => product.approvalStatus === "pending").length,
+        readyFulfillments,
+      },
+      inventory: {
+        unitsInStock: products.reduce((sum, product) => sum + Number(product.countInStock || 0), 0),
+        value: products.reduce(
+          (sum, product) => sum + Number(product.price || 0) * Number(product.countInStock || 0),
+          0
+        ),
+        lowStock,
+        outOfStock: products.filter((product) => product.countInStock <= 0).length,
+      },
+      orders: {
+        pending: placedOrders.filter(
+          (order) => !["3", "4", "Delivered", "Cancelled"].includes(order.status) && order.deliveryStatus !== "Delivered"
+        ).length,
+      },
+      payouts: {
+        paidOut,
+        pending: pendingPayout,
+        available: Math.max(0, lifetimeEarnings - paidOut - pendingPayout),
+      },
+      recentOrders: delivered.slice(0, 5).map((order) => ({
+        _id: order._id,
+        sales: order.sales,
+        units: order.units,
+        completedAt: order.completedAt,
+      })),
+    });
+  } catch (error) {
+    console.error("Company store dashboard fetch error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load company store dashboard." });
+  }
+});
+
 // Helper to compute store delivered revenue & balances for admin payout settlements
 async function computeStoreBalance(models, storeId) {
   const { Order, Payout } = models;
