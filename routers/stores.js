@@ -251,19 +251,15 @@ router.get("/me/dashboard", async (req, res) => {
     }
 
     const now = new Date();
-    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const startOfWeek = new Date(startOfDay);
-    startOfWeek.setDate(startOfDay.getDate() - startOfDay.getDay());
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startOfQuarter = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1);
-    const startOfYear = new Date(now.getFullYear(), 0, 1);
+    const startForDays = (days) => new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
     const periodStarts = {
-      daily: startOfDay,
-      weekly: startOfWeek,
-      monthly: startOfMonth,
-      quarterly: startOfQuarter,
-      yearly: startOfYear,
+      daily: startForDays(1),
+      weekly: startForDays(7),
+      monthly: startForDays(30),
+      quarterly: startForDays(90),
+      yearly: startForDays(365),
     };
+    const oldestPeriodStart = periodStarts.yearly;
 
     const [products, readyFulfillments, deliveredOrders, placedOrders, reviews, payouts] = await Promise.all([
       Product.find({ store: store._id })
@@ -280,10 +276,10 @@ router.get("/me/dashboard", async (req, res) => {
         .populate({ path: "orderItems", populate: { path: "product", select: "name price store" } })
         .sort({ deliveredAt: -1, dateOrdered: -1 })
         .lean(),
-      Order.find({ store: store._id, dateOrdered: { $gte: startOfYear, $lte: now } })
+      Order.find({ store: store._id, dateOrdered: { $gte: oldestPeriodStart, $lte: now } })
         .select("_id status deliveryStatus dateOrdered")
         .lean(),
-      Review.find({ store: store._id, dateCreated: { $gte: startOfYear, $lte: now } })
+      Review.find({ store: store._id, dateCreated: { $gte: oldestPeriodStart, $lte: now } })
         .select("rating dateCreated")
         .lean(),
       Payout.find({ store: store._id }).select("amount status").lean(),
