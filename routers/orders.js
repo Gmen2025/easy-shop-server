@@ -16,6 +16,13 @@ const { buildDriverOrderSummary, isDropoffRevealed } = require("../helpers/drive
 
 const ALLOWED_DELIVERY_STATUSES = ["Pending", "Driver Assigned", "Picked Up", "Delivered"];
 
+const requireAdmin = (req, res, next) => {
+  if (!req.auth?.isAdmin) {
+    return res.status(403).json({ success: false, message: "Admin access required" });
+  }
+  next();
+};
+
 const STATUS_LABELS = {
   0: 'Pending',
   1: 'Processing',
@@ -160,6 +167,157 @@ router.get(`/`, async (req, res) => {
   }
 
   res.send(orderList);
+});
+
+router.get("/admin/dashboard", requireAdmin, async (req, res) => {
+  try {
+    const { Order, Product, Payout } = req.dbModels;
+    const now = new Date();
+    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfWeek = new Date(startOfDay);
+    startOfWeek.setDate(startOfDay.getDate() - startOfDay.getDay());
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfQuarter = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1);
+    const startOfYear = new Date(now.getFullYear(), 0, 1);
+    const periodStarts = {
+      daily: startOfDay,
+      weekly: startOfWeek,
+      monthly: startOfMonth,
+      quarterly: startOfQuarter,
+      yearly: startOfYear,
+    };
+
+    const [deliveredOrders, currentYearOrders, products, payouts, outstandingOrders, activeDeliveries] = await Promise.all([
+      Order.find({
+        $or: [{ status: { $in: ["3", "Delivered"] } }, { deliveryStatus: "Delivered" }],
+      })
+        .select(
+          "_id orderItems itemsSubtotal totalPrice deliveryFee deliveryDistanceKm dateOrdered deliveredAt paymentStatus paymentMethod methodName paymentProvider"
+        )
+        .populate("orderItems", "quantity")
+        .sort({ deliveredAt: -1, dateOrdered: -1 })
+        .lean(),
+      Order.find({ dateOrdered: { $gte: startOfYear, $lte: now } })
+        .select("_id status deliveryStatus dateOrdered paymentStatus")
+        .lean(),
+      Product.find({})
+        .select("price countInStock minStock approvalStatus")
+        .lean(),
+      Payout.find({}).select("amount status").lean(),
+      Order.countDocuments({
+        status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
+        deliveryStatus: { $ne: "Delivered" },
+      }),
+      Order.countDocuments({ deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] } }),
+    ]);
+
+    const completed = deliveredOrders.map((order) => {
+      const deliveryIncome = Number(order.deliveryFee || 0);
+      const productSales = Number(order.itemsSubtotal || 0) || Math.max(
+        0,
+        Number(order.totalPrice || 0) - deliveryIncome
+      );
+      const unitsSold = (order.orderItems || []).reduce(
+        (sum, item) => sum + Number(item.quantity || 0),
+        0
+      );
+
+      return {
+        ...order,
+        productSales,
+        deliveryIncome,
+        totalSales: productSales + deliveryIncome,
+        unitsSold,
+        completedAt: order.deliveredAt || order.dateOrdered,
+        paymentMethodLabel: order.paymentMethod || order.methodName || order.paymentProvider || "Other",
+      };
+    });
+
+    const periods = Object.fromEntries(
+      Object.entries(periodStarts).map(([key, start]) => {
+        const periodCompleted = completed.filter((order) => new Date(order.completedAt) >= start);
+        const periodOrders = currentYearOrders.filter((order) => new Date(order.dateOrdered) >= start);
+        const productSales = periodCompleted.reduce((sum, order) => sum + order.productSales, 0);
+        const deliveryIncome = periodCompleted.reduce((sum, order) => sum + order.deliveryIncome, 0);
+        const totalSales = productSales + deliveryIncome;
+        const completedOrderCount = periodCompleted.length;
+        const paymentMethods = periodCompleted.reduce((totals, order) => {
+          const label = order.paymentMethodLabel;
+          totals[label] = (totals[label] || 0) + order.totalSales;
+          return totals;
+        }, {});
+
+        return [key, {
+          totalSales,
+          productSales,
+          deliveryIncome,
+          orders: periodOrders.length,
+          completedOrders: completedOrderCount,
+          cancelledOrders: periodOrders.filter(
+            (order) => ["4", "Cancelled"].includes(order.status)
+          ).length,
+          paidOrders: periodCompleted.filter((order) => order.paymentStatus === "completed").length,
+          pendingPaymentOrders: periodCompleted.filter((order) => order.paymentStatus === "pending").length,
+          unitsSold: periodCompleted.reduce((sum, order) => sum + order.unitsSold, 0),
+          deliveryDistanceKm: periodCompleted.reduce(
+            (sum, order) => sum + Number(order.deliveryDistanceKm || 0),
+            0
+          ),
+          averageOrder: completedOrderCount ? totalSales / completedOrderCount : 0,
+          averageDeliveryFee: completedOrderCount ? deliveryIncome / completedOrderCount : 0,
+          paymentMethods,
+          start,
+          end: now,
+        }];
+      })
+    );
+
+    const paidPayouts = payouts
+      .filter((payout) => payout.status === "paid")
+      .reduce((sum, payout) => sum + Number(payout.amount || 0), 0);
+    const pendingPayouts = payouts
+      .filter((payout) => ["pending", "processing"].includes(payout.status))
+      .reduce((sum, payout) => sum + Number(payout.amount || 0), 0);
+
+    return res.status(200).json({
+      success: true,
+      periods,
+      operations: { outstandingOrders, activeDeliveries },
+      inventory: {
+        products: products.length,
+        approvedProducts: products.filter((product) => product.approvalStatus === "approved").length,
+        unitsInStock: products.reduce((sum, product) => sum + Number(product.countInStock || 0), 0),
+        value: products.reduce(
+          (sum, product) => sum + Number(product.price || 0) * Number(product.countInStock || 0),
+          0
+        ),
+        lowStock: products.filter(
+          (product) => product.countInStock > 0 && product.countInStock <= Number(product.minStock || 0)
+        ).length,
+        outOfStock: products.filter((product) => product.countInStock <= 0).length,
+      },
+      payouts: { paid: paidPayouts, pending: pendingPayouts },
+      lifetime: completed.reduce(
+        (totals, order) => ({
+          totalSales: totals.totalSales + order.totalSales,
+          productSales: totals.productSales + order.productSales,
+          deliveryIncome: totals.deliveryIncome + order.deliveryIncome,
+          completedOrders: totals.completedOrders + 1,
+        }),
+        { totalSales: 0, productSales: 0, deliveryIncome: 0, completedOrders: 0 }
+      ),
+      recentSales: completed.slice(0, 5).map((order) => ({
+        _id: order._id,
+        totalSales: order.totalSales,
+        productSales: order.productSales,
+        deliveryIncome: order.deliveryIncome,
+        completedAt: order.completedAt,
+      })),
+    });
+  } catch (error) {
+    console.error("Admin dashboard fetch error:", error);
+    return res.status(500).json({ success: false, message: "Unable to load admin dashboard." });
+  }
 });
 
 /**
@@ -323,13 +481,6 @@ router.get(`/:id/tracking`, async (req, res) => {
     },
   });
 });
-
-const requireAdmin = (req, res, next) => {
-  if (!req.auth?.isAdmin) {
-    return res.status(403).json({ success: false, message: "Admin access required" });
-  }
-  next();
-};
 
 /**
  * @swagger
