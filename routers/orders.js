@@ -173,19 +173,15 @@ router.get("/admin/dashboard", requireAdmin, async (req, res) => {
   try {
     const { Order, Product, Payout } = req.dbModels;
     const now = new Date();
-    const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const startOfWeek = new Date(startOfDay);
-    startOfWeek.setDate(startOfDay.getDate() - startOfDay.getDay());
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const startOfQuarter = new Date(now.getFullYear(), Math.floor(now.getMonth() / 3) * 3, 1);
-    const startOfYear = new Date(now.getFullYear(), 0, 1);
+    const startForDays = (days) => new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
     const periodStarts = {
-      daily: startOfDay,
-      weekly: startOfWeek,
-      monthly: startOfMonth,
-      quarterly: startOfQuarter,
-      yearly: startOfYear,
+      daily: startForDays(1),
+      weekly: startForDays(7),
+      monthly: startForDays(30),
+      quarterly: startForDays(90),
+      yearly: startForDays(365),
     };
+    const oldestPeriodStart = periodStarts.yearly;
 
     const [deliveredOrders, currentYearOrders, products, payouts, outstandingOrders, activeDeliveries] = await Promise.all([
       Order.find({
@@ -197,7 +193,7 @@ router.get("/admin/dashboard", requireAdmin, async (req, res) => {
         .populate("orderItems", "quantity")
         .sort({ deliveredAt: -1, dateOrdered: -1 })
         .lean(),
-      Order.find({ dateOrdered: { $gte: startOfYear, $lte: now } })
+      Order.find({ dateOrdered: { $gte: oldestPeriodStart, $lte: now } })
         .select("_id status deliveryStatus dateOrdered paymentStatus")
         .lean(),
       Product.find({})
