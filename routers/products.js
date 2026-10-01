@@ -643,7 +643,12 @@ const haversineKmDistance = ([lng1, lat1], [lng2, lat2]) => {
 router.get('/company/my-products', async (req, res) => {
     try {
         const { Product, Store } = req.dbModels;
-        const store = await Store.findOne({ owner: req.auth?.userId, isCompanyOwned: true });
+        const userId = req.auth?.userId;
+        if (!userId) {
+            return res.status(401).json({ success: false, message: 'Unauthorized' });
+        }
+
+        const store = await Store.findOne({ owner: userId, isCompanyOwned: true });
         if (!store) {
             return res.status(403).json({ success: false, message: 'Only company stores can access this list.' });
         }
