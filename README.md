@@ -32,6 +32,30 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
   - Interactive Swagger UI
   - Comprehensive OpenAPI 3.0 specification
 
+### Scheduled delivery and store order dashboards
+
+- Order creation and updates accept `scheduledFor` or `scheduledDeliveryDate`.
+  Both represent the same ISO-8601 timestamp; conflicting values return HTTP 400.
+  The database stores `scheduledFor`, and serialized orders expose both names.
+- Driver queues, tracking, company-driver deliveries, and recent dashboard sales
+  include the delivery mode, scheduled timestamp, and delivery window.
+- Status updates that echo an unchanged schedule preserve dispatch information,
+  including when the original scheduled time has passed.
+- Checkout can identify its pickup store using `store`, `storeId`, or `pickupStoreId`.
+  Supplied IDs are validated against the selected database before order creation.
+- `GET /api/v1/stores/me/dashboard` returns the latest 20 store-scoped orders in
+  `recentOrders`, including pending orders, delivery schedules, items, and totals.
+  Revenue metrics still count completed orders only; `recentCompletedOrders`
+  retains the latest five completed-order summaries.
+- Existing `scheduledFor` records need no migration. Orders whose schedule or
+  store association was never saved cannot be reconstructed from missing data.
+
+Run the focused regression tests without MongoDB or external services:
+
+```bash
+node --test tests/delivery-schedule.test.js tests/order-dashboard.test.js
+```
+
 ## 🛠️ Tech Stack
 
 - **Runtime**: Node.js

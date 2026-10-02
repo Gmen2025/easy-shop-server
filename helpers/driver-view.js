@@ -1,5 +1,6 @@
 // Builds the driver-facing view of an order: pre-pickup, only an approximate drop
 // zone is exposed (no exact address/phone); full details unlock once picked up.
+const { getDeliverySchedule } = require("./delivery");
 
 const REVEALED_STATUSES = ["Picked Up", "Delivered"];
 
@@ -43,7 +44,7 @@ function buildDriverOrderSummary(order, options = {}) {
     queueBatchId: order.queueBatchId || null,
     queueSequence: order.queueSequence || 0,
     deliveryFee: order.deliveryFee,
-    deliveryMode: order.deliveryMode,
+    ...getDeliverySchedule(order),
     itemCount: (order.orderItems || []).reduce((sum, item) => sum + Number(item?.quantity || 0), 0),
     items: (order.orderItems || []).map((item) => ({
       name: item?.product?.name || "Item",

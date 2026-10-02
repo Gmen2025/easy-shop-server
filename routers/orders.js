@@ -6,7 +6,7 @@ const mongoose = require("mongoose");
 //const Preview = require('twilio/lib/rest/Preview');
 //const twilio = require("twilio");
 const { sendMailSafe } = require("../helpers/mailer");
-const { resolveDeliveryPlan } = require("../helpers/delivery");
+const { getDeliverySchedule, hasDeliveryPlanChange, resolveDeliveryPlan } = require("../helpers/delivery");
 const { isGoogleDistanceApiConfigured, getDrivingDistanceKm } = require("../helpers/google-distance");
 const { sendPushToUser } = require("../helpers/push-notify");
 const { assignDriverToOrder, syncDriverAvailability } = require("../service/dispatchService");
@@ -188,7 +188,7 @@ router.get("/admin/dashboard", requireAdmin, async (req, res) => {
         $or: [{ status: { $in: ["3", "Delivered"] } }, { deliveryStatus: "Delivered" }],
       })
         .select(
-          "_id orderItems itemsSubtotal totalPrice deliveryFee deliveryDistanceKm dateOrdered deliveredAt paymentStatus paymentMethod methodName paymentProvider"
+          "_id orderItems itemsSubtotal totalPrice deliveryFee deliveryDistanceKm dateOrdered deliveredAt paymentStatus paymentMethod methodName paymentProvider deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd"
         )
         .populate("orderItems", "quantity")
         .sort({ deliveredAt: -1, dateOrdered: -1 })
@@ -304,6 +304,7 @@ router.get("/admin/dashboard", requireAdmin, async (req, res) => {
       ),
       recentSales: completed.slice(0, 5).map((order) => ({
         _id: order._id,
+        ...getDeliverySchedule(order),
         totalSales: order.totalSales,
         productSales: order.productSales,
         deliveryIncome: order.deliveryIncome,
@@ -456,6 +457,7 @@ router.get(`/:id/tracking`, async (req, res) => {
     status: order.status,
     deliveryStatus: order.deliveryStatus,
     dispatchStatus: order.dispatchStatus,
+    ...getDeliverySchedule(order),
     driver: driver
       ? {
           driverId,
@@ -619,7 +621,7 @@ router.get("/company/my-deliveries", async (req, res) => {
           _id: order._id,
           store: orderStore,
           deliveryFee: order.deliveryFee,
-          deliveryMode: order.deliveryMode,
+          ...getDeliverySchedule(order),
           dateOrdered: order.dateOrdered,
           // Company drivers pick their own routes, so the full drop-off address/coordinates are
           // shown up front (unlike partner drivers, whose exact address unlocks after pickup).
@@ -889,7 +891,7 @@ router.post(`/`, async (req, res) => {
     });
   }
 
-  const requestedStoreId = req.body.store;
+  const requestedStoreId = req.body.store || req.body.storeId || req.body.pickupStoreId;
   const requestedDriverId = req.body.driver;
   const requestedDeliveryStatus = req.body.deliveryStatus;
 
@@ -1378,11 +1380,7 @@ router.put("/:id", async (req, res) => {
   if (req.body.paymentProvider !== undefined) updateFields.paymentProvider = req.body.paymentProvider;
   if (req.body.paymentStatus !== undefined) updateFields.paymentStatus = req.body.paymentStatus;
 
-  const hasDeliveryUpdate =
-    req.body.deliveryMode !== undefined ||
-    req.body.deliveryDistanceKm !== undefined ||
-    req.body.deliveryFee !== undefined ||
-    req.body.scheduledFor !== undefined;
+  const hasDeliveryUpdate = hasDeliveryPlanChange(req.body, existingOrder);
 
   if (hasDeliveryUpdate) {
     const deliveryPlanResult = resolveDeliveryPlan(req.body, { currentOrder: existingOrder });

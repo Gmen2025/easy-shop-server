@@ -13,6 +13,7 @@ const {
   reinstateDriverIfEligible,
 } = require("../helpers/driver-wallet");
 const { buildDriverOrderSummary } = require("../helpers/driver-view");
+const { getDeliverySchedule } = require("../helpers/delivery");
 
 const requireAdmin = (req, res, next) => {
   if (!req.auth?.isAdmin) {
@@ -596,7 +597,7 @@ router.get("/me/completed-today", async (req, res) => {
       deliveryStatus: "Delivered",
       deliveredAt: { $gte: since },
     })
-      .select("_id deliveredAt deliveryFee store")
+      .select("_id deliveredAt deliveryFee store deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd")
       .populate("store", "name")
       .sort({ deliveredAt: -1 });
 
@@ -605,6 +606,7 @@ router.get("/me/completed-today", async (req, res) => {
       count: orders.length,
       orders: orders.map((order) => ({
         _id: order._id,
+        ...getDeliverySchedule(order),
         storeName: order.store?.name || "",
         deliveryFee: order.deliveryFee,
         deliveredAt: order.deliveredAt,
@@ -644,7 +646,7 @@ router.get("/me/dashboard", async (req, res) => {
       deliveryStatus: "Delivered",
       deliveredAt: { $gte: periodStarts.yearly, $lte: now },
     })
-      .select("_id deliveredAt deliveryFee store deliveryDistanceKm")
+      .select("_id deliveredAt deliveryFee store deliveryDistanceKm deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd")
       .populate("store", "name")
       .sort({ deliveredAt: -1 })
       .lean();
@@ -674,6 +676,7 @@ router.get("/me/dashboard", async (req, res) => {
       periods,
       recentDeliveries: orders.slice(0, 5).map((order) => ({
         _id: order._id,
+        ...getDeliverySchedule(order),
         storeName: order.store?.name || "Store",
         deliveryFee: Number(order.deliveryFee || 0),
         deliveredAt: order.deliveredAt,

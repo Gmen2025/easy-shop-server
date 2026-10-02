@@ -45,6 +45,35 @@ function toDate(value) {
   return Number.isNaN(dateValue.getTime()) ? null : dateValue;
 }
 
+function getDeliverySchedule(order) {
+  const scheduledFor = order.scheduledFor || order.scheduledDeliveryDate || null;
+  return {
+    deliveryMode: order.deliveryMode,
+    scheduledFor,
+    scheduledDeliveryDate: scheduledFor,
+    deliveryWindowStart: order.deliveryWindowStart || null,
+    deliveryWindowEnd: order.deliveryWindowEnd || null,
+  };
+}
+
+function hasDeliveryPlanChange(payload, current) {
+  return (
+    (payload.deliveryMode !== undefined &&
+      normalizeDeliveryMode(payload.deliveryMode) !== current.deliveryMode) ||
+    (payload.deliveryDistanceKm !== undefined &&
+      Number(payload.deliveryDistanceKm) !== Number(current.deliveryDistanceKm)) ||
+    (payload.deliveryFee !== undefined &&
+      Number(payload.deliveryFee) !== Number(current.deliveryFee)) ||
+    ["scheduledFor", "scheduledDeliveryDate"].some((key) => {
+      if (payload[key] === undefined) return false;
+      const incomingDate = toDate(payload[key]);
+      const currentDate = toDate(current.scheduledFor || current.scheduledDeliveryDate);
+      if (payload[key] && !incomingDate) return true;
+      return incomingDate?.getTime() !== currentDate?.getTime();
+    })
+  );
+}
+
 function withHourOffset(dateValue, hourOffset) {
   return new Date(dateValue.getTime() + hourOffset * 60 * 60 * 1000);
 }
@@ -88,10 +117,9 @@ function resolveDeliveryPlan(payload, options = {}) {
   const current = options.currentOrder || {};
   const config = normalizeDeliveryConfig(options.deliveryConfig);
 
-  const requestedMode =
-    normalizeDeliveryMode(payload.deliveryMode) ||
-    normalizeDeliveryMode(current.deliveryMode) ||
-    DELIVERY_MODES.SAME_DAY;
+  const requestedMode = payload.deliveryMode !== undefined
+    ? normalizeDeliveryMode(payload.deliveryMode)
+    : normalizeDeliveryMode(current.deliveryMode) || DELIVERY_MODES.SAME_DAY;
 
   if (!requestedMode) {
     return {
@@ -114,8 +142,26 @@ function resolveDeliveryPlan(payload, options = {}) {
     };
   }
 
-  const scheduledInput =
-    payload.scheduledFor !== undefined ? payload.scheduledFor : current.scheduledFor;
+  if (payload.scheduledFor !== undefined && payload.scheduledDeliveryDate !== undefined) {
+    const canonicalDate = toDate(payload.scheduledFor);
+    const aliasDate = toDate(payload.scheduledDeliveryDate);
+    if (
+      (payload.scheduledFor && !canonicalDate) ||
+      (payload.scheduledDeliveryDate && !aliasDate) ||
+      canonicalDate?.getTime() !== aliasDate?.getTime()
+    ) {
+      return {
+        ok: false,
+        error: "scheduledFor and scheduledDeliveryDate must refer to the same date/time.",
+      };
+    }
+  }
+
+  const scheduledInput = payload.scheduledFor !== undefined
+    ? payload.scheduledFor
+    : payload.scheduledDeliveryDate !== undefined
+    ? payload.scheduledDeliveryDate
+    : current.scheduledFor || current.scheduledDeliveryDate;
   const scheduledFor = toDate(scheduledInput);
 
   if (requestedMode === DELIVERY_MODES.SCHEDULED) {
@@ -199,5 +245,7 @@ module.exports = {
   DELIVERY_MODES,
   DEFAULT_DELIVERY_CONFIG,
   normalizeDeliveryConfig,
+  getDeliverySchedule,
+  hasDeliveryPlanChange,
   resolveDeliveryPlan,
 };

@@ -133,6 +133,7 @@ const orderSchema = new mongoose.Schema({
     },
     scheduledFor: {
         type: Date,
+        alias: 'scheduledDeliveryDate',
         default: null
     },
     deliveryWindowStart: {
@@ -230,6 +231,9 @@ orderSchema.virtual('id').get(function () {
 });
 
 orderSchema.set('toJSON', {
+  virtuals: true,
+});
+orderSchema.set('toObject', {
   virtuals: true,
 });
 

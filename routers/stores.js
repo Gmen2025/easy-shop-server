@@ -2,6 +2,8 @@ const router = require("express").Router();
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const { normalizeDatabaseName, getAllowedDatabaseNames, getModelsForDb } = require("../helpers/db-manager");
+const { getDeliverySchedule } = require("../helpers/delivery");
+const { summarizeStoreOrder, buildStoreOrderSummary } = require("../helpers/store-order-view");
 
 const requireAdmin = (req, res, next) => {
   if (!req.auth?.isAdmin) return res.status(403).json({ success: false, message: "Admin access required" });
@@ -261,7 +263,7 @@ router.get("/me/dashboard", async (req, res) => {
     };
     const oldestPeriodStart = periodStarts.yearly;
 
-    const [products, readyFulfillments, deliveredOrders, placedOrders, reviews, payouts] = await Promise.all([
+    const [products, readyFulfillments, deliveredOrders, placedOrders, reviews, payouts, recentOrders] = await Promise.all([
       Product.find({ store: store._id })
         .select("name price countInStock minStock soldCount approvalStatus rating numReviews")
         .lean(),
@@ -272,7 +274,7 @@ router.get("/me/dashboard", async (req, res) => {
         store: store._id,
         $or: [{ status: { $in: ["3", "Delivered"] } }, { deliveryStatus: "Delivered" }],
       })
-        .select("_id orderItems itemsSubtotal totalPrice deliveryFee dateOrdered deliveredAt")
+        .select("_id orderItems itemsSubtotal totalPrice deliveryFee dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd")
         .populate({ path: "orderItems", populate: { path: "product", select: "name price store" } })
         .sort({ deliveredAt: -1, dateOrdered: -1 })
         .lean(),
@@ -283,33 +285,15 @@ router.get("/me/dashboard", async (req, res) => {
         .select("rating dateCreated")
         .lean(),
       Payout.find({ store: store._id }).select("amount status").lean(),
+      Order.find({ store: store._id })
+        .select("_id orderItems itemsSubtotal totalPrice deliveryFee status deliveryStatus dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd")
+        .populate({ path: "orderItems", populate: { path: "product", select: "name price store" } })
+        .sort({ dateOrdered: -1 })
+        .limit(20)
+        .lean(),
     ]);
 
-    const delivered = deliveredOrders.map((order) => {
-      let sales = 0;
-      let units = 0;
-      for (const item of order.orderItems || []) {
-        if (item?.product && String(item.product.store) === String(store._id)) {
-          const quantity = Number(item.quantity || 0);
-          sales += Number(item.product.price || 0) * quantity;
-          units += quantity;
-        }
-      }
-      if (sales === 0) {
-        sales = Number(order.itemsSubtotal || 0) || Math.max(
-          0,
-          Number(order.totalPrice || 0) - Number(order.deliveryFee || 0)
-        );
-        units = (order.orderItems || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
-      }
-
-      return {
-        ...order,
-        sales,
-        units,
-        completedAt: order.deliveredAt || order.dateOrdered,
-      };
-    });
+    const delivered = deliveredOrders.map((order) => summarizeStoreOrder(order, store._id));
 
     const periods = Object.fromEntries(
       Object.entries(periodStarts).map(([key, start]) => {
@@ -375,8 +359,10 @@ router.get("/me/dashboard", async (req, res) => {
         pending: pendingPayout,
         available: Math.max(0, lifetimeEarnings - paidOut - pendingPayout),
       },
-      recentOrders: delivered.slice(0, 5).map((order) => ({
+      recentOrders: recentOrders.map((order) => buildStoreOrderSummary(order, store._id)),
+      recentCompletedOrders: delivered.slice(0, 5).map((order) => ({
         _id: order._id,
+        ...getDeliverySchedule(order),
         sales: order.sales,
         units: order.units,
         completedAt: order.completedAt,
