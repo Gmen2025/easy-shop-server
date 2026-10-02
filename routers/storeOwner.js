@@ -97,6 +97,63 @@ async function getStoreOrderStats(req, storeId, sinceDate = null) {
 // POST /register-owner — create a user account + store with GPS location.
 // Public route (must be added to jwt.js unless-list).
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /api/v1/stores/register-owner:
+ *   post:
+ *     summary: Register a store owner and submit a store application
+ *     tags: [Store Owner]
+ *     security: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [fullName, storeName, email, password, latitude, longitude]
+ *             properties:
+ *               fullName: { type: string, example: Jane Doe }
+ *               storeName: { type: string, example: Jane's Market }
+ *               phone: { type: string, example: '+251911223344' }
+ *               email: { type: string, format: email, example: jane@example.com }
+ *               password: { type: string, format: password }
+ *               category: { type: string, example: Grocery }
+ *               address: { type: string }
+ *               city: { type: string }
+ *               country: { type: string }
+ *               description: { type: string }
+ *               bankAccount: { type: string }
+ *               openHour: { type: string, example: '09:00' }
+ *               closeHour: { type: string, example: '18:00' }
+ *               latitude: { type: number, example: 9.03 }
+ *               longitude: { type: number, example: 38.74 }
+ *     responses:
+ *       201:
+ *         description: Store owner account and pending store application created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 token: { type: string, description: JWT valid for seven days }
+ *                 owner:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     fullName: { type: string }
+ *                     email: { type: string, format: email }
+ *                     phone: { type: string }
+ *                     storeId: { type: string }
+ *                     storeName: { type: string }
+ *                     latitude: { type: number }
+ *                     longitude: { type: number }
+ *                     approvalStatus: { type: string, example: pending }
+ *       400:
+ *         description: Required fields missing, existing account password incorrect, or application already exists
+ *       500:
+ *         description: Server error
+ */
 router.post('/register-owner', async (req, res) => {
   try {
     const { User, Store } = req.dbModels;
@@ -181,6 +238,47 @@ router.post('/register-owner', async (req, res) => {
 // ---------------------------------------------------------------------------
 // GET /mine — resolve the authenticated owner's store (used right after login).
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /api/v1/stores/mine/by-owner:
+ *   get:
+ *     summary: Get the authenticated user's store
+ *     tags: [Store Owner]
+ *     responses:
+ *       200:
+ *         description: Store profile belonging to the authenticated user
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 store:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     name: { type: string }
+ *                     address: { type: string }
+ *                     phone: { type: string }
+ *                     email: { type: string, format: email }
+ *                     category: { type: string }
+ *                     city: { type: string }
+ *                     country: { type: string }
+ *                     description: { type: string }
+ *                     bankAccount: { type: string }
+ *                     openHour: { type: string }
+ *                     closeHour: { type: string }
+ *                     isOpen: { type: boolean }
+ *                     approvalStatus: { type: string, enum: [pending, approved, denied] }
+ *                     latitude: { type: number, nullable: true }
+ *                     longitude: { type: number, nullable: true }
+ *       401:
+ *         description: Not authenticated
+ *       404:
+ *         description: No store found for this account
+ *       500:
+ *         description: Server error
+ */
 router.get('/mine/by-owner', async (req, res) => {
   try {
     const { Store } = req.dbModels;
@@ -219,6 +317,68 @@ router.get('/mine/by-owner', async (req, res) => {
 // ---------------------------------------------------------------------------
 // PUT /mine/update — let the authenticated owner edit their own store profile.
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /api/v1/stores/mine/update:
+ *   put:
+ *     summary: Update the authenticated owner's store profile
+ *     tags: [Store Owner]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               storeName: { type: string }
+ *               name: { type: string, description: Alternative to storeName }
+ *               phone: { type: string }
+ *               category: { type: string }
+ *               address: { type: string }
+ *               city: { type: string }
+ *               country: { type: string }
+ *               description: { type: string }
+ *               bankAccount: { type: string }
+ *               openHour: { type: string }
+ *               closeHour: { type: string }
+ *               latitude: { type: number }
+ *               longitude: { type: number }
+ *     responses:
+ *       200:
+ *         description: Store profile updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string, example: Store profile updated. }
+ *                 store:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     name: { type: string }
+ *                     address: { type: string }
+ *                     phone: { type: string }
+ *                     email: { type: string, format: email }
+ *                     category: { type: string }
+ *                     city: { type: string }
+ *                     country: { type: string }
+ *                     description: { type: string }
+ *                     bankAccount: { type: string }
+ *                     openHour: { type: string }
+ *                     closeHour: { type: string }
+ *                     isOpen: { type: boolean }
+ *                     approvalStatus: { type: string }
+ *                     latitude: { type: number, nullable: true }
+ *                     longitude: { type: number, nullable: true }
+ *       401:
+ *         description: Not authenticated
+ *       404:
+ *         description: No store found for this account
+ *       500:
+ *         description: Server error
+ */
 router.put('/mine/update', async (req, res) => {
   try {
     const { Store } = req.dbModels;
@@ -279,6 +439,46 @@ router.put('/mine/update', async (req, res) => {
 // ---------------------------------------------------------------------------
 // GET /:id/dashboard — headline metrics for the store dashboard.
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /api/v1/stores/{id}/dashboard:
+ *   get:
+ *     summary: Get headline metrics for a store dashboard
+ *     tags: [Store Owner]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Store ID
+ *     responses:
+ *       200:
+ *         description: Sales, inventory, order, rating, and payout metrics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 todaySales: { type: number }
+ *                 monthlySales: { type: number }
+ *                 totalOrders: { type: integer }
+ *                 totalProducts: { type: integer }
+ *                 lowStock: { type: integer }
+ *                 outOfStock: { type: integer }
+ *                 pendingOrders: { type: integer }
+ *                 avgRating: { type: number }
+ *                 availableBalance: { type: number }
+ *                 pendingPayout: { type: number }
+ *       400:
+ *         description: Invalid store ID
+ *       403:
+ *         description: Not authorized to access this store
+ *       404:
+ *         description: Store not found
+ *       500:
+ *         description: Server error
+ */
 router.get('/:id/dashboard', async (req, res) => {
   try {
     const store = await getOwnedStore(req, res);
@@ -338,6 +538,52 @@ router.get('/:id/dashboard', async (req, res) => {
 // ---------------------------------------------------------------------------
 // GET /:id/sales?range=today|7d|30d|3m|1y — revenue breakdown.
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /api/v1/stores/{id}/sales:
+ *   get:
+ *     summary: Get a store's sales and revenue breakdown
+ *     tags: [Store Owner]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Store ID
+ *       - in: query
+ *         name: range
+ *         required: false
+ *         schema:
+ *           type: string
+ *           enum: [today, 7d, 30d, 3m, 1y]
+ *           default: 30d
+ *         description: Reporting period
+ *     responses:
+ *       200:
+ *         description: Sales totals for the requested period
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 range: { type: string, enum: [today, 7d, 30d, 3m, 1y] }
+ *                 gross: { type: number }
+ *                 discounts: { type: number }
+ *                 refunds: { type: number }
+ *                 commission: { type: number }
+ *                 net: { type: number }
+ *                 orders: { type: integer }
+ *                 avgOrder: { type: number }
+ *       400:
+ *         description: Invalid store ID
+ *       403:
+ *         description: Not authorized to access this store
+ *       404:
+ *         description: Store not found
+ *       500:
+ *         description: Server error
+ */
 router.get('/:id/sales', async (req, res) => {
   try {
     const store = await getOwnedStore(req, res);
@@ -373,6 +619,46 @@ router.get('/:id/sales', async (req, res) => {
 // ---------------------------------------------------------------------------
 // GET /:id/top-products — best sellers by soldCount.
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /api/v1/stores/{id}/top-products:
+ *   get:
+ *     summary: Get the store's ten best-selling products
+ *     tags: [Store Owner]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Store ID
+ *     responses:
+ *       200:
+ *         description: Best-selling products ordered by units sold
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 products:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       name: { type: string }
+ *                       sold: { type: integer }
+ *                       price: { type: number }
+ *                       stock: { type: integer }
+ *       400:
+ *         description: Invalid store ID
+ *       403:
+ *         description: Not authorized to access this store
+ *       404:
+ *         description: Store not found
+ *       500:
+ *         description: Server error
+ */
 router.get('/:id/top-products', async (req, res) => {
   try {
     const store = await getOwnedStore(req, res);
@@ -399,6 +685,115 @@ router.get('/:id/top-products', async (req, res) => {
 // PUT /:id/products/:productId — update a product.
 // POST /:id/products/:productId/stock — adjust stock ({ delta, reason }).
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /api/v1/stores/{id}/products:
+ *   get:
+ *     summary: List products and inventory for a store
+ *     tags: [Store Owner]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Store ID
+ *     responses:
+ *       200:
+ *         description: Store products with inventory and approval details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 products:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       name: { type: string }
+ *                       price: { type: number }
+ *                       stock: { type: integer }
+ *                       sold: { type: integer }
+ *                       minStock: { type: integer }
+ *                       category: { type: string }
+ *                       sku: { type: string }
+ *                       brand: { type: string }
+ *                       description: { type: string }
+ *                       image: { type: string }
+ *                       approvalStatus: { type: string }
+ *                       rejectionReason: { type: string }
+ *       400:
+ *         description: Invalid store ID
+ *       403:
+ *         description: Not authorized to access this store
+ *       404:
+ *         description: Store not found
+ *       500:
+ *         description: Server error
+ *   post:
+ *     summary: Submit a product for admin review
+ *     tags: [Store Owner]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Store ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name, price, category]
+ *             properties:
+ *               name: { type: string }
+ *               price: { type: number, minimum: 0 }
+ *               stock: { type: integer, minimum: 0 }
+ *               minStock: { type: integer, minimum: 0 }
+ *               sku: { type: string }
+ *               brand: { type: string }
+ *               description: { type: string }
+ *               weight: { type: string }
+ *               category: { type: string, description: Category ID or name }
+ *               image: { type: string }
+ *               images:
+ *                 type: array
+ *                 items: { type: string }
+ *     responses:
+ *       201:
+ *         description: Product submitted for admin review
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 message: { type: string }
+ *                 product:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     name: { type: string }
+ *                     price: { type: number }
+ *                     stock: { type: integer }
+ *                     sold: { type: integer }
+ *                     minStock: { type: integer }
+ *                     sku: { type: string }
+ *                     brand: { type: string }
+ *                     image: { type: string }
+ *                     approvalStatus: { type: string, example: pending }
+ *       400:
+ *         description: Product name, price, or a valid category is required
+ *       403:
+ *         description: Not authorized to access this store
+ *       404:
+ *         description: Store not found
+ *       500:
+ *         description: Server error
+ */
 router.get('/:id/products', async (req, res) => {
   try {
     const store = await getOwnedStore(req, res);
@@ -493,6 +888,66 @@ router.post('/:id/products', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/stores/{id}/products/{productId}:
+ *   put:
+ *     summary: Update a product listing or its inventory
+ *     description: Changes to catalog details or price put the product back into pending admin review; stock remains editable.
+ *     tags: [Store Owner]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Store ID
+ *       - in: path
+ *         name: productId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Product ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name: { type: string }
+ *               description: { type: string }
+ *               brand: { type: string }
+ *               sku: { type: string }
+ *               image: { type: string }
+ *               price: { type: number, minimum: 0 }
+ *               stock: { type: integer, minimum: 0 }
+ *               minStock: { type: integer, minimum: 0 }
+ *     responses:
+ *       200:
+ *         description: Product updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 product:
+ *                   type: object
+ *                   properties:
+ *                     id: { type: string }
+ *                     name: { type: string }
+ *                     price: { type: number }
+ *                     stock: { type: integer }
+ *                     minStock: { type: integer }
+ *                     approvalStatus: { type: string }
+ *       400:
+ *         description: Invalid product ID
+ *       403:
+ *         description: Not authorized to access this store
+ *       404:
+ *         description: Store or product not found
+ *       500:
+ *         description: Server error
+ */
 router.put('/:id/products/:productId', async (req, res) => {
   try {
     const store = await getOwnedStore(req, res);
@@ -537,6 +992,55 @@ router.put('/:id/products/:productId', async (req, res) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/stores/{id}/products/{productId}/stock:
+ *   post:
+ *     summary: Adjust a product's stock quantity
+ *     tags: [Store Owner]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Store ID
+ *       - in: path
+ *         name: productId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Product ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [delta]
+ *             properties:
+ *               delta: { type: integer, not: { enum: [0] }, description: Positive or negative stock adjustment }
+ *               reason: { type: string, example: Received new shipment }
+ *     responses:
+ *       200:
+ *         description: Product stock adjusted (never below zero)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 productId: { type: string }
+ *                 stock: { type: integer }
+ *                 delta: { type: integer }
+ *                 reason: { type: string }
+ *       400:
+ *         description: Invalid product ID or delta is zero/non-numeric
+ *       403:
+ *         description: Not authorized to access this store
+ *       404:
+ *         description: Store or product not found
+ *       500:
+ *         description: Server error
+ */
 router.post('/:id/products/:productId/stock', async (req, res) => {
   try {
     const store = await getOwnedStore(req, res);
@@ -567,6 +1071,56 @@ router.post('/:id/products/:productId/stock', async (req, res) => {
 // GET /:id/orders — orders containing this store's products.
 // PATCH /:id/orders/:orderId — update order status.
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /api/v1/stores/{id}/orders:
+ *   get:
+ *     summary: List orders containing products from a store
+ *     tags: [Store Owner]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Store ID
+ *     responses:
+ *       200:
+ *         description: Store orders, sorted newest first, with store-specific line items and totals
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 orders:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       customer: { type: string }
+ *                       customerEmail: { type: string, format: email }
+ *                       total: { type: number }
+ *                       status: { type: string }
+ *                       location: { type: string }
+ *                       time: { type: string, format: date-time }
+ *                       items:
+ *                         type: array
+ *                         items:
+ *                           type: object
+ *                           properties:
+ *                             name: { type: string }
+ *                             qty: { type: integer }
+ *                             price: { type: number }
+ *       400:
+ *         description: Invalid store ID
+ *       403:
+ *         description: Not authorized to access this store
+ *       404:
+ *         description: Store not found
+ *       500:
+ *         description: Server error
+ */
 router.get('/:id/orders', async (req, res) => {
   try {
     const store = await getOwnedStore(req, res);
@@ -597,6 +1151,55 @@ router.get('/:id/orders', async (req, res) => {
 
 const ALLOWED_STATUSES = ['Pending', 'Confirmed', 'Preparing', 'Ready for Pickup', 'Picked Up', 'Delivered', 'Cancelled'];
 
+/**
+ * @swagger
+ * /api/v1/stores/{id}/orders/{orderId}:
+ *   patch:
+ *     summary: Update an order's status for a store
+ *     description: Transitioning an order to Delivered decrements this store's item stock and increments sold counts once.
+ *     tags: [Store Owner]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Store ID
+ *       - in: path
+ *         name: orderId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Order ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [status]
+ *             properties:
+ *               status:
+ *                 type: string
+ *                 enum: [Pending, Confirmed, Preparing, 'Ready for Pickup', 'Picked Up', Delivered, Cancelled]
+ *     responses:
+ *       200:
+ *         description: Order status updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 orderId: { type: string }
+ *                 status: { type: string }
+ *       400:
+ *         description: Invalid order ID or unsupported status
+ *       403:
+ *         description: Not authorized to access this store
+ *       404:
+ *         description: Store or order not found
+ *       500:
+ *         description: Server error
+ */
 router.patch('/:id/orders/:orderId', async (req, res) => {
   try {
     const store = await getOwnedStore(req, res);
@@ -639,6 +1242,48 @@ router.patch('/:id/orders/:orderId', async (req, res) => {
 // ---------------------------------------------------------------------------
 // GET /:id/reviews — customer reviews for the store's products.
 // ---------------------------------------------------------------------------
+/**
+ * @swagger
+ * /api/v1/stores/{id}/reviews:
+ *   get:
+ *     summary: List customer reviews for a store's products
+ *     tags: [Store Owner]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *         description: Store ID
+ *     responses:
+ *       200:
+ *         description: Reviews sorted newest first
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 reviews:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       customer: { type: string }
+ *                       product: { type: string }
+ *                       rating: { type: number }
+ *                       comment: { type: string }
+ *                       ownerReply: { type: string }
+ *                       date: { type: string, format: date-time }
+ *       400:
+ *         description: Invalid store ID
+ *       403:
+ *         description: Not authorized to access this store
+ *       404:
+ *         description: Store not found
+ *       500:
+ *         description: Server error
+ */
 router.get('/:id/reviews', async (req, res) => {
   try {
     const store = await getOwnedStore(req, res);
