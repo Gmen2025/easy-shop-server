@@ -70,10 +70,11 @@ test("store dashboard returns pending scheduled orders and keeps completed-sales
         return query({ _id: storeId, name: "Company store" });
       } },
       Product: { find: () => query([]), countDocuments: async () => 0 },
+      OrderItem: { find: () => query([]) },
       Order: { find(filter) {
-        assert.equal(filter.store, storeId);
+        assert.deepEqual((filter.$and?.[0] || filter).$or[0], { store: storeId });
         orderQueryCount += 1;
-        if (filter.$or) return query([completed]);
+        if (filter.$and) return query([completed]);
         if (filter.dateOrdered) return query([pending, completed]);
         return query([pending, completed], (fields) => {
           for (const field of ["scheduledFor", "deliveryMode", "orderItems", "status", "dateOrdered"]) {
@@ -195,9 +196,10 @@ test("store dashboard limits recent orders to twenty without adding pending orde
     dbModels: {
       Store: { findOne: () => query({ _id: "store-a", name: "Store" }) },
       Product: { find: () => query([]), countDocuments: async () => 0 },
+      OrderItem: { find: () => query([]) },
       Order: { find: (filter) => {
-        assert.equal(filter.store, "store-a");
-        return query(filter.$or ? [] : orders);
+        assert.deepEqual((filter.$and?.[0] || filter).$or[0], { store: "store-a" });
+        return query(filter.$and ? [] : orders);
       } },
       Review: { find: () => query([]) },
       Payout: { find: () => query([]) },
@@ -210,6 +212,85 @@ test("store dashboard limits recent orders to twenty without adding pending orde
   assert.equal(res.body.periods.daily.sales, 0);
   assert.equal(res.body.periods.daily.completedOrders, 0);
   assert.equal(res.body.orders.pending, 25);
+});
+
+test("company dashboard includes ready-product orders without crediting unrelated items or rejected products", async () => {
+  const storeId = "company-store";
+  const dateOrdered = new Date(Date.now() - 60_000);
+  const products = [
+    { _id: "ready", store: "partner-store", companyStoreResponses: [{ store: storeId, status: "ready" }] },
+    { _id: "owned", store: storeId, companyStoreResponses: [] },
+    { _id: "rejected", store: "partner-store", companyStoreResponses: [{ store: storeId, status: "rejected" }] },
+    { _id: "other-ready", store: "partner-store", companyStoreResponses: [{ store: "other-company", status: "ready" }] },
+  ];
+  const orderItems = products.map((product) => ({
+    _id: `item-${product._id}`, quantity: 2, product: { ...product, name: product._id, price: 10 },
+  }));
+  const mixed = {
+    _id: "mixed", store: "partner-store", dateOrdered, deliveredAt: dateOrdered,
+    status: "3", deliveryStatus: "Delivered", totalPrice: 65, deliveryFee: 5,
+    orderItems: [orderItems[0], orderItems[2], orderItems[3]],
+  };
+  const orders = [
+    mixed,
+    { ...mixed, _id: "unassigned", store: null, status: "1", deliveryStatus: "Pending", deliveredAt: null },
+    { ...mixed, _id: "owned-order", store: "partner-store", orderItems: [orderItems[1]] },
+    { ...mixed, _id: "unrelated", orderItems: [orderItems[2], orderItems[3]] },
+    { ...mixed, _id: "assigned", store: storeId, orderItems: [] , itemsSubtotal: 30 },
+  ];
+  const req = {
+    auth: { userId: "owner" },
+    dbModels: {
+      Store: { findOne: () => query({ _id: storeId, name: "Company store" }) },
+      Product: {
+        find: (filter) => {
+          if (!filter.$or) return query(products.filter((product) => product.store === filter.store));
+          assert.deepEqual(filter.$or, [
+            { store: storeId },
+            { companyStoreResponses: { $elemMatch: { store: storeId, status: "ready" } } },
+          ]);
+          return query(products.filter((product) => product.store === storeId ||
+            product.companyStoreResponses.some((entry) => entry.store === storeId && entry.status === "ready")));
+        },
+        countDocuments: async () => 1,
+      },
+      OrderItem: { find: (filter) => {
+        assert.deepEqual(filter.product.$in, ["ready", "owned"]);
+        return query(orderItems.filter((item) => filter.product.$in.includes(item.product._id)));
+      } },
+      Order: { find: (filter) => {
+        const scope = filter.$and?.[0] || filter;
+        assert.deepEqual(scope.$or, [
+          { store: storeId }, { orderItems: { $in: ["item-ready", "item-owned"] } },
+        ]);
+        const scoped = orders.filter((order) => order.store === storeId ||
+          order.orderItems.some((item) => scope.$or[1].orderItems.$in.includes(item._id)));
+        return query(filter.$and ? scoped.filter((order) => order.status === "3") : scoped);
+      } },
+      Review: { find: () => query([]) },
+      Payout: { find: () => query([{ amount: 10, status: "paid" }, { amount: 5, status: "pending" }]) },
+    },
+  };
+  const res = response();
+  await handler(storeRouter, "/me/dashboard", "get")(req, res);
+  assert.equal(res.statusCode, 200);
+  for (const period of Object.values(res.body.periods)) {
+    assert.equal(period.orders, 4);
+    assert.equal(period.completedOrders, 3);
+    assert.equal(period.sales, 70);
+    assert.equal(period.earnings, 70);
+    assert.equal(period.unitsSold, 4);
+    assert.equal(period.averageOrder, 70 / 3);
+  }
+  assert.equal(res.body.orders.pending, 1);
+  assert.equal(res.body.payouts.available, 55);
+  assert.equal(res.body.products.total, 1);
+  assert.equal(res.body.products.readyFulfillments, 1);
+  assert.equal(res.body.recentOrders.length, 4);
+  assert.equal(res.body.recentOrders[0].sales, 20);
+  assert.equal(res.body.recentOrders[0].units, 2);
+  assert.equal(res.body.recentOrders[0].orderItems.length, 1);
+  assert.equal(res.body.recentOrders[0].orderItems[0].product._id, "ready");
 });
 
 test("status updates can echo elapsed scheduled dates without resetting dispatch metadata", async () => {

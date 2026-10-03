@@ -47,6 +47,12 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
   `recentOrders`, including pending orders, delivery schedules, items, and totals.
   Revenue metrics still count completed orders only; `recentCompletedOrders`
   retains the latest five completed-order summaries.
+- Company-store order scope includes directly assigned orders and orders containing
+  store-owned products or products with that store's `ready` fulfillment response.
+  For product-linked orders, sales and units count only that store's items, not
+  another store's items or delivery fees. Rejected responses do not qualify.
+  Existing ready responses are supported without reassigning product ownership or
+  migrating orders. Inventory remains scoped to store-owned products.
 - Existing `scheduledFor` records need no migration. Orders whose schedule or
   store association was never saved cannot be reconstructed from missing data.
 

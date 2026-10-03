@@ -128,3 +128,27 @@ test("pending store order summaries include dates, items, totals, and no invente
   assert.deepEqual(summary.scheduledDeliveryDate, scheduledFor);
   assert.equal(summary.orderItems[0].product.name, "Apples");
 });
+
+test("company fulfillment summaries do not substitute another store's revenue for free or missing products", () => {
+  const order = {
+    store: "partner",
+    itemsSubtotal: 100,
+    totalPrice: 105,
+    deliveryFee: 5,
+    orderItems: [
+      { quantity: 2, product: { _id: "free", store: "partner", price: 0 } },
+      { quantity: 10, product: { _id: "other", store: "partner", price: 10 } },
+      { quantity: 1, product: null },
+    ],
+  };
+  const free = buildStoreOrderSummary(order, "company", new Set(["free"]));
+  assert.equal(free.sales, 0);
+  assert.equal(free.units, 2);
+  assert.equal(free.orderItems.length, 1);
+  const unrelated = buildStoreOrderSummary(order, "company", new Set());
+  assert.equal(unrelated.sales, 0);
+  assert.equal(unrelated.units, 0);
+  assert.equal(unrelated.orderItems.length, 0);
+  const assigned = buildStoreOrderSummary({ ...order, store: "company", orderItems: [] }, "company", new Set());
+  assert.equal(assigned.sales, 100);
+});

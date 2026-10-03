@@ -242,7 +242,7 @@ router.put("/admin/company-stores/:id", requireAdmin, async (req, res) => {
 router.get("/me/dashboard", async (req, res) => {
   try {
     const userId = req.auth?.userId;
-    const { Store, Product, Order, Review, Payout } = req.dbModels;
+    const { Store, Product, Order, OrderItem, Review, Payout } = req.dbModels;
     if (!userId) {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
@@ -263,6 +263,23 @@ router.get("/me/dashboard", async (req, res) => {
     };
     const oldestPeriodStart = periodStarts.yearly;
 
+    const fulfillmentProducts = await Product.find({
+      $or: [
+        { store: store._id },
+        { companyStoreResponses: { $elemMatch: { store: store._id, status: "ready" } } },
+      ],
+    }).select("_id").lean();
+    const productIds = new Set(fulfillmentProducts.map((product) => String(product._id)));
+    const fulfillmentItems = await OrderItem.find({
+      product: { $in: fulfillmentProducts.map((product) => product._id) },
+    }).select("_id").lean();
+    const orderScope = {
+      $or: [
+        { store: store._id },
+        { orderItems: { $in: fulfillmentItems.map((item) => item._id) } },
+      ],
+    };
+
     const [products, readyFulfillments, deliveredOrders, placedOrders, reviews, payouts, recentOrders] = await Promise.all([
       Product.find({ store: store._id })
         .select("name price countInStock minStock soldCount approvalStatus rating numReviews")
@@ -271,29 +288,31 @@ router.get("/me/dashboard", async (req, res) => {
         companyStoreResponses: { $elemMatch: { store: store._id, status: "ready" } },
       }),
       Order.find({
-        store: store._id,
-        $or: [{ status: { $in: ["3", "Delivered"] } }, { deliveryStatus: "Delivered" }],
+        $and: [
+          orderScope,
+          { $or: [{ status: { $in: ["3", "Delivered"] } }, { deliveryStatus: "Delivered" }] },
+        ],
       })
-        .select("_id orderItems itemsSubtotal totalPrice deliveryFee dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd")
+        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd")
         .populate({ path: "orderItems", populate: { path: "product", select: "name price store" } })
         .sort({ deliveredAt: -1, dateOrdered: -1 })
         .lean(),
-      Order.find({ store: store._id, dateOrdered: { $gte: oldestPeriodStart, $lte: now } })
+      Order.find({ ...orderScope, dateOrdered: { $gte: oldestPeriodStart, $lte: now } })
         .select("_id status deliveryStatus dateOrdered")
         .lean(),
       Review.find({ store: store._id, dateCreated: { $gte: oldestPeriodStart, $lte: now } })
         .select("rating dateCreated")
         .lean(),
       Payout.find({ store: store._id }).select("amount status").lean(),
-      Order.find({ store: store._id })
-        .select("_id orderItems itemsSubtotal totalPrice deliveryFee status deliveryStatus dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd")
+      Order.find(orderScope)
+        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee status deliveryStatus dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd")
         .populate({ path: "orderItems", populate: { path: "product", select: "name price store" } })
         .sort({ dateOrdered: -1 })
         .limit(20)
         .lean(),
     ]);
 
-    const delivered = deliveredOrders.map((order) => summarizeStoreOrder(order, store._id));
+    const delivered = deliveredOrders.map((order) => summarizeStoreOrder(order, store._id, productIds));
 
     const periods = Object.fromEntries(
       Object.entries(periodStarts).map(([key, start]) => {
@@ -359,7 +378,7 @@ router.get("/me/dashboard", async (req, res) => {
         pending: pendingPayout,
         available: Math.max(0, lifetimeEarnings - paidOut - pendingPayout),
       },
-      recentOrders: recentOrders.map((order) => buildStoreOrderSummary(order, store._id)),
+      recentOrders: recentOrders.map((order) => buildStoreOrderSummary(order, store._id, productIds)),
       recentCompletedOrders: delivered.slice(0, 5).map((order) => ({
         _id: order._id,
         ...getDeliverySchedule(order),

@@ -1,16 +1,25 @@
 const { getDeliverySchedule } = require("./delivery");
 
-function summarizeStoreOrder(order, storeId) {
+function isStoreItem(item, storeId, productIds) {
+  return item?.product && (
+    String(item.product.store) === String(storeId) ||
+    productIds?.has(String(item.product._id))
+  );
+}
+
+function summarizeStoreOrder(order, storeId, productIds) {
   let sales = 0;
   let units = 0;
+  let matchedItems = 0;
   for (const item of order.orderItems || []) {
-    if (item?.product && String(item.product.store) === String(storeId)) {
+    if (isStoreItem(item, storeId, productIds)) {
+      matchedItems += 1;
       const quantity = Number(item.quantity || 0);
       sales += Number(item.product.price || 0) * quantity;
       units += quantity;
     }
   }
-  if (sales === 0) {
+  if (productIds ? matchedItems === 0 && String(order.store) === String(storeId) : sales === 0) {
     sales = Number(order.itemsSubtotal || 0) || Math.max(
       0,
       Number(order.totalPrice || 0) - Number(order.deliveryFee || 0)
@@ -26,8 +35,11 @@ function summarizeStoreOrder(order, storeId) {
   };
 }
 
-function buildStoreOrderSummary(order, storeId) {
-  const summary = summarizeStoreOrder(order, storeId);
+function buildStoreOrderSummary(order, storeId, productIds) {
+  const summary = summarizeStoreOrder(order, storeId, productIds);
+  const items = productIds && String(order.store) !== String(storeId)
+    ? (order.orderItems || []).filter((item) => isStoreItem(item, storeId, productIds))
+    : order.orderItems || [];
   return {
     _id: order._id,
     ...getDeliverySchedule(order),
@@ -39,7 +51,7 @@ function buildStoreOrderSummary(order, storeId) {
     units: summary.units,
     totalPrice: order.totalPrice,
     deliveryFee: order.deliveryFee,
-    orderItems: (order.orderItems || []).map((item) => ({
+    orderItems: items.map((item) => ({
       quantity: item.quantity,
       product: item.product
         ? { _id: item.product._id, name: item.product.name, price: item.product.price }
