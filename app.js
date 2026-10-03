@@ -12,6 +12,7 @@ const dbSelector = require('./helpers/db-selector');
 const { connectDefaultDatabase } = require('./helpers/db-manager');
 const { verifyMailerConnection } = require('./helpers/mailer');
 const { DRIVER_RESPONSE_EVENT } = require('./service/dispatchService');
+const { startDispatchScheduler } = require('./service/dispatchScheduler');
 const { saveDriverLocation } = require('./helpers/driver-location');
 
 // Safety net: an async route handler that forgets try/catch would otherwise crash the whole
@@ -255,6 +256,8 @@ connectDefaultDatabase().then(() => {
 
     io.driverSocketMap = new Map();
     app.set('io', io);
+    const dispatchTimer = startDispatchScheduler(io);
+    server.on('close', () => clearInterval(dispatchTimer));
 
     io.on('connection', (socket) => {
       socket.on('register_driver', (payload = {}) => {
@@ -388,4 +391,3 @@ connectDefaultDatabase().then(() => {
 
 //API Base URL: https://easy-shop-server-wldr.onrender.com/api/v1
 //Documentation: https://easy-shop-server-wldr.onrender.com/api-docs
-

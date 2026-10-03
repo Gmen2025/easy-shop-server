@@ -163,8 +163,11 @@ test("company-driver deliveries and assigned queues retain scheduled dates", asy
     auth: { userId: "driver-user" },
     query: {},
     dbModels: {
-      Driver: { findOne: (filter) => query(filter.user ? driver : null) },
-      Order: { find: () => query([order]) },
+      Driver: {
+        findOne: (filter) => query(filter.user ? driver : null),
+        find: (filter) => query(filter.isCompanyOwned === true ? [driver] : []),
+      },
+      Order: { find: () => query([order]), countDocuments: async () => 0 },
     },
   };
   const deliveries = response();

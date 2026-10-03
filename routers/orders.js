@@ -9,7 +9,8 @@ const { sendMailSafe } = require("../helpers/mailer");
 const { getDeliverySchedule, hasDeliveryPlanChange, resolveDeliveryPlan } = require("../helpers/delivery");
 const { isGoogleDistanceApiConfigured, getDrivingDistanceKm } = require("../helpers/google-distance");
 const { sendPushToUser } = require("../helpers/push-notify");
-const { assignDriverToOrder, syncDriverAvailability } = require("../service/dispatchService");
+const { assignDriverToOrder, syncDriverAvailability, MAX_ACTIVE_ORDERS_PER_DRIVER } = require("../service/dispatchService");
+const { resolvePickupStore, getCoordinates, DRIVER_RADIUS_METERS, findCompanyDriver } = require("../helpers/fulfillment-routing");
 const { getDriverLocation } = require("../helpers/driver-location");
 const { getCommissionRate, debitCommission } = require("../helpers/driver-wallet");
 const { buildDriverOrderSummary, isDropoffRevealed } = require("../helpers/driver-view");
@@ -550,19 +551,26 @@ router.get("/admin/company-fulfillable", requireAdmin, async (req, res) => {
   }
 });
 
-async function hasNearbyPartnerDriver(Driver, coords, radiusKm) {
-  const nearbyPartnerDriver = await Driver.findOne({
+async function hasNearbyPartnerDriver(Driver, Order, coords) {
+  const nearbyPartnerDrivers = await Driver.find({
     isCompanyOwned: { $ne: true },
     isSuspended: { $ne: true },
+    approvalStatus: "approved",
     $or: [{ isAvailable: true }, { availabilityStatus: true }],
     location: {
       $near: {
         $geometry: { type: "Point", coordinates: coords },
-        $maxDistance: radiusKm * 1000,
+        $maxDistance: DRIVER_RADIUS_METERS,
       },
     },
   });
-  return Boolean(nearbyPartnerDriver);
+  for (const driver of nearbyPartnerDrivers) {
+    const activeOrders = await Order.countDocuments({
+      driver: driver._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] },
+    });
+    if (activeOrders < MAX_ACTIVE_ORDERS_PER_DRIVER) return true;
+  }
+  return false;
 }
 
 /**
@@ -587,7 +595,7 @@ router.get("/company/my-deliveries", async (req, res) => {
       return res.status(400).json({ success: false, message: "Your driver profile has no registered location." });
     }
 
-    const radiusKm = Number(req.query.radiusKm) > 0 ? Number(req.query.radiusKm) : 10;
+    const radiusKm = DRIVER_RADIUS_METERS / 1000;
 
     const orders = await Order.find({
       driver: null,
@@ -604,19 +612,20 @@ router.get("/company/my-deliveries", async (req, res) => {
 
     const results = [];
     for (const order of orders) {
-      // order.store is only set once a delivery is actually dispatched; for these pre-dispatch,
-      // unassigned orders it's frequently still null, so derive the pickup store from the first
-      // order item's product here (same fallback dispatchService uses at real assignment time).
       let orderStore = order.store;
       if (!orderStore) {
-        const productWithStore = (order.orderItems || []).find((item) => item?.product?.store);
-        if (productWithStore) {
-          orderStore = await Store.findById(productWithStore.product.store).select("name address location");
-        }
+        const preferredStoreId = (order.orderItems || []).find((item) => item?.product?.store)?.product.store;
+        orderStore = await resolvePickupStore(Store, { customerLocation: order.customerLocation, preferredStoreId });
       }
 
-      const orderCoords = orderStore?.location?.coordinates || order.customerLocation?.coordinates || coords;
-      if (!(await hasNearbyPartnerDriver(Driver, orderCoords, radiusKm))) {
+      const orderCoords = getCoordinates(orderStore?.location) || getCoordinates(order.customerLocation);
+      if (!orderCoords) continue;
+      const excludedDriverIds = (order.companyDriverResponses || [])
+        .filter((entry) => entry.status === "rejected").map((entry) => entry.driver);
+      const fallback = !(await hasNearbyPartnerDriver(Driver, Order, orderCoords))
+        ? await findCompanyDriver(Driver, Order, orderCoords, { excludedDriverIds, maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER })
+        : null;
+      if (fallback && String(fallback._id) === String(driver._id)) {
         results.push({
           _id: order._id,
           store: orderStore,
@@ -662,7 +671,7 @@ router.get("/company/my-deliveries", async (req, res) => {
  */
 router.put("/:id/company-claim", async (req, res) => {
   try {
-    const { Order, Driver } = req.dbModels;
+    const { Order, Driver, Store } = req.dbModels;
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ success: false, message: "Invalid order id." });
     }
@@ -672,21 +681,40 @@ router.put("/:id/company-claim", async (req, res) => {
       return res.status(403).json({ success: false, message: "Only company drivers can claim deliveries." });
     }
 
-    const order = await Order.findById(req.params.id);
+    const order = await Order.findById(req.params.id).populate("store", "location");
     if (!order) {
       return res.status(404).json({ success: false, message: "Order not found." });
     }
     if (order.driver) {
       return res.status(409).json({ success: false, message: "This delivery has already been claimed." });
     }
+    if (order.deliveryStatus !== "Pending" ||
+      !["pending_assignment", "assignment_failed"].includes(order.dispatchStatus) ||
+      ["3", "4", "Delivered", "Cancelled"].includes(order.status)) {
+      return res.status(409).json({ success: false, message: "This order is not ready for dispatch." });
+    }
+    const pickupStore = order.store || await resolvePickupStore(Store, { customerLocation: order.customerLocation });
+    const orderCoords = getCoordinates(pickupStore?.location) || getCoordinates(order.customerLocation);
+    if (!orderCoords) {
+      return res.status(400).json({ success: false, message: "Pickup location is required for driver assignment." });
+    }
+    const fallback = !(await hasNearbyPartnerDriver(Driver, Order, orderCoords))
+      ? await findCompanyDriver(Driver, Order, orderCoords, {
+        excludedDriverIds: (order.companyDriverResponses || []).filter((entry) => entry.status === "rejected").map((entry) => entry.driver),
+        maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER,
+      })
+      : null;
+    if (!fallback || String(fallback._id) !== String(driver._id)) {
+      return res.status(409).json({ success: false, message: "This delivery belongs to another eligible driver." });
+    }
 
-    order.driver = driver._id;
-    order.deliveryStatus = "Driver Assigned";
-    order.dispatchStatus = "driver_assigned";
-    order.companyDriverResponses.push({ driver: driver._id, status: "accepted" });
-    await order.save();
+    const result = await assignDriverToOrder(String(order._id), req.app.get("io"), { dbName: req.dbName });
+    if (!result.success || String(result.driverId) !== String(driver._id)) {
+      return res.status(409).json({ success: false, message: "This delivery is no longer available to you." });
+    }
+    const assigned = await Order.findById(order._id);
 
-    return res.status(200).json({ success: true, message: "Delivery claimed.", order });
+    return res.status(200).json({ success: true, message: "Delivery claimed.", order: assigned });
   } catch (error) {
     console.error("Company driver claim error:", error);
     return res.status(500).json({ success: false, message: "Unable to claim this delivery." });
@@ -949,37 +977,15 @@ router.post(`/`, async (req, res) => {
     .select("deliveryConfig deliveryOrigin")
     .lean();
 
-  // Create an array of promises for creating OrderItem documents
-  const orderItemsIDS = Promise.all(
-    req.body.orderItems.map(async (orderItem) => {
-      let newOrderItem = new OrderItem({
-        quantity: orderItem.quantity,
-        product: orderItem.product,
-      });
-
-      // Save the OrderItem document and return its ID
-      newOrderItem = await newOrderItem.save();
-      return newOrderItem._id;
-    })
-  );
-
-  // Wait for all OrderItem documents to be created and get their IDs
-  const orderItemsIDSResolved = await orderItemsIDS;
-
-  // Fetch all OrderItem documents by their IDs
-  const orderItemsDocs = await OrderItem.find({
-    _id: { $in: orderItemsIDSResolved },
-  });
-
   // Calculate total price
   let itemsSubtotal = 0;
   let inferredStoreId = null;
-  for (const orderItem of orderItemsDocs) {
+  for (const orderItem of req.body.orderItems) {
     const product = await Product.findById(orderItem.product);
     if (!product) {
       return res
         .status(400)
-        .send(`Product not found for order item: ${orderItem._id}`);
+        .send(`Product not found for order item: ${orderItem.product}`);
     }
 
     // Block purchases of listings still pending/denied admin review, and orders that
@@ -1002,7 +1008,11 @@ router.post(`/`, async (req, res) => {
     }
   }
 
-  const resolvedStoreId = validatedStore?._id || inferredStoreId || null;
+  const pickupStore = await resolvePickupStore(Store, {
+    customerLocation: req.body.customerLocation,
+    preferredStoreId: validatedStore?._id || inferredStoreId,
+  });
+  const resolvedStoreId = pickupStore?._id || null;
 
   // Prefer an authoritative, server-computed distance over whatever the client sent, so the
   // delivery fee can't be manipulated by submitting a fake deliveryDistanceKm. The assigned
@@ -1032,6 +1042,11 @@ router.post(`/`, async (req, res) => {
     });
   }
   const deliveryPlan = deliveryPlanResult.value;
+
+  const orderItemsIDSResolved = await Promise.all(req.body.orderItems.map(async (item) => {
+    const orderItem = await new OrderItem({ quantity: item.quantity, product: item.product }).save();
+    return orderItem._id;
+  }));
 
   const totalPrice = Number(itemsSubtotal) + Number(deliveryPlan.deliveryFee || 0);
 
@@ -1105,6 +1120,9 @@ router.post(`/`, async (req, res) => {
     totalPrice: totalPrice,
     user: orderUserId,
     customer: orderUserId,
+    customerLocation: getCoordinates(req.body.customerLocation)
+      ? { type: "Point", coordinates: getCoordinates(req.body.customerLocation) }
+      : undefined,
     store: resolvedStoreId,
     driver: validatedDriver?._id || null,
   });
@@ -1115,6 +1133,9 @@ router.post(`/`, async (req, res) => {
   // Handle the case where the order could not be created
   if (!ord) {
     return res.status(404).send("the order cannot be created!");
+  }
+  if (!pickupStore) {
+    console.warn(`[Routing] Order ${ord._id} is pending an eligible pickup store.`);
   }
 
   if (shouldAutoDispatchOrder(ord)) {
@@ -1134,13 +1155,23 @@ router.post(`/`, async (req, res) => {
   // push/SMTP providers (awaiting these made the "Place Order" button look dead).
   res.status(201).json({
     success: true,
-    message: "Order created",
+    message: pickupStore ? "Order created" : "Order created; waiting for an eligible pickup store.",
+    assignmentPending: !pickupStore,
     order: ord,
   });
 
   // Push + email notifications run after the response (fire-and-forget).
   setImmediate(async () => {
     try {
+      if (pickupStore?.isCompanyOwned && pickupStore.owner) {
+        await sendPushToUser({
+          User,
+          userId: pickupStore.owner,
+          title: "New company store order",
+          body: `Order #${ord._id} is assigned to your store.`,
+          data: { type: "store_order_assigned", orderId: String(ord._id) },
+        });
+      }
       await sendPushToUser({
         User,
         userId: ord.user,

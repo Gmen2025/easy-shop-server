@@ -169,6 +169,10 @@ const orderSchema = new mongoose.Schema({
         ref: 'User',
         default: null
     },
+    customerLocation: {
+        type: { type: String, enum: ['Point'], default: 'Point' },
+        coordinates: { type: [Number], default: undefined },
+    },
     store: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Store',
