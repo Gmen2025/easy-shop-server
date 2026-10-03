@@ -149,6 +149,7 @@ test("company-driver deliveries and assigned queues retain scheduled dates", asy
   const scheduledFor = new Date(Date.now() + 86_400_000);
   const order = {
     _id: "scheduled-order",
+    companyOfferDriver: "driver-a",
     driver: "driver-a",
     deliveryMode: "SCHEDULED",
     scheduledFor,

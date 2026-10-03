@@ -63,12 +63,15 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
   nearest approved, open company store is assigned with no radius limit.
 - Dispatch checks approved, available, non-suspended partner drivers within 5 km
   of pickup (including eligible batch drivers), then assigns the nearest eligible
-  company driver at any distance. Active-order capacity still applies.
+  company driver at any distance as a claim/reject offer. Active-order capacity
+  still applies; rejecting excludes that driver and passes the offer to the next
+  eligible company driver on the next scan.
 - A sole eligible company account is the default fallback. Missing coordinates
   are never treated as zero distance; when several accounts cannot be ranked,
   assignment requires a valid location.
-- Company driver assignments persist even without a live socket and do not
-  require acceptance. They appear in `drivers/me/queue`; store orders appear in
+- Company driver offers appear in `orders/company/my-deliveries`. Claiming is
+  required before assignment; accepted deliveries persist even without a live
+  socket and appear in `drivers/me/queue`. Store orders appear in
   `stores/me/dashboard`. Push notifications go to the assigned company accounts.
 - A 30-second scan retries unassigned deliveries in each allowed database and
   dispatches scheduled/next-day orders only once their delivery window starts.
@@ -77,7 +80,8 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
   `assignmentPending: true` and an explicit waiting message. The scan assigns
   pickup when a store becomes available, including for future scheduled orders,
   without dispatching their drivers early. No eligible driver leaves the order
-  pending for the next scan.
+  pending for the next scan. Existing accepted/automatically assigned deliveries
+  stay in their active queues; this policy change does not unassign them.
 - Checkout accepts customer coordinates as GeoJSON or `{ latitude, longitude }`,
   persists GeoJSON on the order, and resolves pickup on the server rather than
   trusting an out-of-radius client selection. Product ownership is unchanged.

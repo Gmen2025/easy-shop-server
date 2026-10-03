@@ -124,7 +124,7 @@ function dispatchFixture({ partner = false, full = false, assigned = false, futu
         if (filter.isCompanyOwned === true) {
           companyQueries += 1;
           assert.equal(filter.location, undefined);
-          return query([candidate]);
+          return query(filter._id.$nin.some((id) => String(id) === String(candidate._id)) ? [] : [candidate]);
         }
         assert.equal(filter.isCompanyOwned.$ne, true);
         assert.equal(filter.location.$near.$maxDistance, 5000);
@@ -145,9 +145,24 @@ function dispatchFixture({ partner = false, full = false, assigned = false, futu
   return { order, candidate, models, io, counts: () => ({ assignments, companyQueries }) };
 }
 
-test("automatic dispatch persists out-of-radius company assignment without a socket or acceptance", async () => {
+test("automatic dispatch offers out-of-radius delivery without assigning it before acceptance", async () => {
   const fixture = dispatchFixture();
   const result = await assignDriverToOrder(String(fixture.order._id), fixture.io, { models: fixture.models });
+  assert.equal(result.success, true);
+  assert.equal(result.offered, true);
+  assert.equal(fixture.order.driver, null);
+  assert.equal(String(fixture.order.companyOfferDriver), String(fixture.candidate._id));
+  const assignments = fixture.counts().assignments;
+  await assignDriverToOrder(String(fixture.order._id), fixture.io, { models: fixture.models });
+  assert.equal(fixture.counts().assignments, assignments, "retry must not repeatedly notify an unchanged offer");
+});
+
+test("accepting a company offer assigns the driver without needing a live socket", async () => {
+  const fixture = dispatchFixture();
+  fixture.order.companyOfferDriver = fixture.candidate._id;
+  const result = await assignDriverToOrder(String(fixture.order._id), fixture.io, {
+    models: fixture.models, companyDriverId: String(fixture.candidate._id),
+  });
   assert.equal(result.success, true);
   assert.equal(result.companyFallback, true);
   assert.equal(result.socketId, null);
@@ -156,6 +171,7 @@ test("automatic dispatch persists out-of-radius company assignment without a soc
   assert.equal(fixture.order.deliveryStatus, "Driver Assigned");
   assert.equal(fixture.order.queueSequence, 1);
   assert.ok(fixture.order.queueBatchId);
+  assert.equal(fixture.order.companyOfferDriver, null);
 });
 
 test("eligible nearby partners take priority over company drivers", async () => {
@@ -163,6 +179,81 @@ test("eligible nearby partners take priority over company drivers", async () => 
   const result = await assignDriverToOrder(String(fixture.order._id), fixture.io, { models: fixture.models });
   assert.equal(result.success, true);
   assert.equal(fixture.counts().companyQueries, 0);
+});
+
+test("a rejected company driver does not receive the same offer on retry", async () => {
+  const fixture = dispatchFixture();
+  fixture.order.companyDriverResponses = [{ driver: fixture.candidate._id, status: "rejected" }];
+  const result = await assignDriverToOrder(String(fixture.order._id), fixture.io, { models: fixture.models });
+  assert.equal(result.success, false);
+  assert.equal(fixture.order.driver, null);
+  assert.equal(fixture.order.companyOfferDriver, null);
+});
+
+test("a company driver cannot accept an offer targeted at someone else", async () => {
+  const fixture = dispatchFixture();
+  fixture.order.companyOfferDriver = new mongoose.Types.ObjectId();
+  const result = await assignDriverToOrder(String(fixture.order._id), fixture.io, {
+    models: fixture.models, companyDriverId: String(fixture.candidate._id),
+  });
+  assert.equal(result.reason, "company_offer_unavailable");
+  assert.equal(fixture.counts().assignments, 0);
+});
+
+test("the offered delivery is listed with claim/reject data and rejection passes it to the next driver", async () => {
+  const fixture = dispatchFixture();
+  fixture.order.companyDriverResponses = [];
+  fixture.models.Driver.findOne = () => query(fixture.candidate);
+  fixture.models.Order.find = (filter) => {
+    if (filter.companyOfferDriver) {
+      assert.equal(String(filter.companyOfferDriver), String(fixture.candidate._id));
+      return query([fixture.order]);
+    }
+    return query([]);
+  };
+  await assignDriverToOrder(String(fixture.order._id), fixture.io, { models: fixture.models });
+  const response = () => ({
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.body = body; return this; },
+  });
+  const handler = (routePath, method) => orderRouter.stack
+    .find((entry) => entry.route?.path === routePath && entry.route.methods[method]).route.stack.at(-1).handle;
+  const req = { auth: { userId: fixture.candidate.user }, params: { id: String(fixture.order._id) }, dbModels: fixture.models };
+  const listed = response();
+  await handler("/company/my-deliveries", "get")(req, listed);
+  assert.equal(listed.statusCode, 200);
+  assert.equal(listed.body.orders.length, 1);
+  assert.equal(String(listed.body.orders[0]._id), String(fixture.order._id));
+
+  const update = fixture.models.Order.findOneAndUpdate;
+  fixture.models.Order.findOneAndUpdate = (filter, changes) => {
+    if (changes.$push) {
+      assert.equal(filter.driver, null);
+      assert.equal(String(filter.companyOfferDriver), String(fixture.candidate._id));
+      Object.assign(fixture.order, changes.$set);
+      fixture.order.companyDriverResponses.push(changes.$push.companyDriverResponses);
+      return query(fixture.order);
+    }
+    return update(filter, changes);
+  };
+  const rejected = response();
+  await handler("/:id/company-reject", "put")(req, rejected);
+  assert.equal(rejected.statusCode, 200);
+  assert.equal(fixture.order.companyOfferDriver, null);
+  assert.equal(fixture.order.companyDriverResponses[0].status, "rejected");
+  const nextDriver = { ...fixture.candidate, _id: new mongoose.Types.ObjectId() };
+  const findDriver = fixture.models.Driver.find;
+  fixture.models.Driver.find = (filter) => {
+    if (filter.isCompanyOwned === true) {
+      assert.ok(filter._id.$nin.some((id) => String(id) === String(fixture.candidate._id)));
+      return query([nextDriver]);
+    }
+    return findDriver(filter);
+  };
+  const next = await assignDriverToOrder(String(fixture.order._id), fixture.io, { models: fixture.models });
+  assert.equal(next.offered, true);
+  assert.equal(String(fixture.order.companyOfferDriver), String(nextDriver._id));
+  assert.equal(fixture.order.driver, null);
 });
 
 test("full company drivers leave deliveries pending with an explicit assignment failure", async () => {
@@ -186,7 +277,10 @@ test("already assigned and future scheduled orders are not dispatched", async ()
 
 test("conditional assignment cannot overwrite an order claimed concurrently", async () => {
   const fixture = dispatchFixture({ collision: true });
-  const result = await assignDriverToOrder(String(fixture.order._id), fixture.io, { models: fixture.models });
+  fixture.order.companyOfferDriver = fixture.candidate._id;
+  const result = await assignDriverToOrder(String(fixture.order._id), fixture.io, {
+    models: fixture.models, companyDriverId: String(fixture.candidate._id),
+  });
   assert.equal(result.success, false);
   assert.equal(result.reason, "order_already_assigned");
 });
@@ -211,7 +305,8 @@ test("orders with no pickup remain pending and are assigned after a company stor
   const second = await assignDriverToOrder(String(fixture.order._id), fixture.io, { models: fixture.models });
   assert.equal(second.success, true);
   assert.equal(fixture.order.store._id, "new-company");
-  assert.equal(String(fixture.order.driver), String(fixture.candidate._id));
+  assert.equal(fixture.order.driver, null);
+  assert.equal(String(fixture.order.companyOfferDriver), String(fixture.candidate._id));
 });
 
 test("future scheduled orders can receive pickup stores without dispatching their drivers early", async () => {

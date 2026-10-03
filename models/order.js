@@ -183,6 +183,11 @@ const orderSchema = new mongoose.Schema({
         ref: 'Driver',
         default: null
     },
+    companyOfferDriver: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Driver',
+        default: null
+    },
     // Company (non-partner) drivers can accept/reject deliveries not covered by nearby partner drivers.
     // They cannot delete these entries; only an admin can remove a 'rejected' entry (re-opening the order).
     companyDriverResponses: [{
