@@ -94,6 +94,25 @@ node --test tests/delivery-schedule.test.js tests/order-dashboard.test.js tests/
 
 ## 🛠️ Tech Stack
 
+### Checkout driving-distance configuration
+
+`POST /api/v1/settings/delivery/estimate-distance` requires an authenticated
+session and a backend `GOOGLE_MAPS_API_KEY` authorized for **Distance Matrix API**,
+with billing enabled. This is a server key, not the Android Maps SDK key or the
+mobile `EXPO_PUBLIC_GOOGLE_DIRECTIONS_API_KEY`. Restrict it to the required server
+APIs and stable outbound server IPs when available. `GOOGLE_ROUTES_API_KEY`
+configures the separate driver Routes API endpoint, not this checkout endpoint.
+
+The endpoint uses valid pickup-store coordinates (latitude, longitude) as the
+origin, otherwise the full store address or configured delivery hub. Missing API
+configuration returns 503, missing origin returns 422, and lookup failure returns
+502 with a diagnostic message. It never returns success with a null distance.
+Deploy changes and set environment variables on the actual API hosting service;
+editing a local environment file does not configure the deployed API.
+
+Run `node --test tests/google-distance.test.js tests/delivery-distance.test.js`
+for the focused checkout distance tests.
+
 - **Runtime**: Node.js
 - **Framework**: Express.js v4.21.2
 - **Database**: MongoDB with Mongoose ORM v8.10.0

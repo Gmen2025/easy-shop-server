@@ -10,14 +10,18 @@ function isGoogleDistanceApiConfigured() {
   return Boolean(getGoogleMapsApiKey());
 }
 
-// Returns the driving distance in km, or null if the API is not configured or the
-// lookup fails (caller should fall back to a manual/client-supplied distance).
-async function getDrivingDistanceKm(originAddress, destinationAddress) {
+// Strict callers receive actionable errors instead of an unavailable-distance null.
+async function getDrivingDistanceKm(originAddress, destinationAddress, { throwOnError = false } = {}) {
   const apiKey = getGoogleMapsApiKey();
   const origin = String(originAddress || "").trim();
   const destination = String(destinationAddress || "").trim();
 
   if (!apiKey || !origin || !destination) {
+    if (throwOnError) {
+      throw new Error(!apiKey
+        ? "Checkout driving distance is not configured. Set GOOGLE_MAPS_API_KEY on the backend and enable Distance Matrix API."
+        : "Pickup and delivery addresses are required to calculate driving distance.");
+    }
     return null;
   }
 
@@ -25,29 +29,35 @@ async function getDrivingDistanceKm(originAddress, destinationAddress) {
   url.searchParams.set("origins", origin);
   url.searchParams.set("destinations", destination);
   url.searchParams.set("units", "metric");
+  url.searchParams.set("mode", "driving");
   url.searchParams.set("key", apiKey);
 
   try {
-    const response = await fetch(url.toString());
+    const response = await fetch(url.toString(), { signal: AbortSignal.timeout(8000) });
     if (!response.ok) {
-      return null;
+      throw new Error(`Google Distance Matrix request failed (HTTP ${response.status}).`);
     }
 
     const data = await response.json();
     const element = data?.rows?.[0]?.elements?.[0];
 
     if (data?.status !== "OK" || !element || element.status !== "OK") {
-      return null;
+      const status = data?.status !== "OK" ? data?.status : element?.status;
+      throw new Error(`Google Distance Matrix could not calculate a driving distance (${status || "missing route"}). Check the backend API key, billing, API restrictions and addresses.`);
     }
 
     const meters = element.distance?.value;
-    if (!Number.isFinite(meters)) {
-      return null;
+    if (!Number.isFinite(meters) || meters < 0) {
+      throw new Error("Google Distance Matrix returned an invalid driving distance.");
     }
 
     return Math.round((meters / 1000) * 100) / 100;
   } catch (error) {
-    console.error("Google Distance Matrix lookup failed:", error.message);
+    const message = String(error.message || "Google Distance Matrix lookup failed.")
+      .split(apiKey).join("[redacted]")
+      .replace(/([?&]key=)[^&\s]+/gi, "$1[redacted]");
+    console.error("Google Distance Matrix lookup failed:", message);
+    if (throwOnError) throw new Error(message);
     return null;
   }
 }

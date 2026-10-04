@@ -2,6 +2,7 @@ const router = require('express').Router();
 const mongoose = require('mongoose');
 const { normalizeDeliveryConfig } = require('../helpers/delivery');
 const { isGoogleDistanceApiConfigured, getDrivingDistanceKm } = require('../helpers/google-distance');
+const { getCoordinates } = require('../helpers/fulfillment-routing');
 
 const MAINTENANCE_SETTING_KEY = 'maintenance-mode';
 const BANK_ACCOUNT_SETTING_KEY = 'bank-account-info';
@@ -456,8 +457,8 @@ router.put('/delivery', async (req, res) => {
  *     summary: Estimate delivery distance from the store origin to a shipping address
  *     description: Uses the Google Distance Matrix API (server-side key) to compute driving
  *       distance in km from the admin-configured origin address to the given destination.
- *       Returns distanceKm null if the Google API is not configured or the lookup fails, in
- *       which case the client should fall back to a manual distance entry.
+ *       Uses the assigned store coordinates when available. Missing configuration or failed
+ *       routing returns an error; no straight-line or client-supplied distance is substituted.
  *     tags: [Settings]
  *     requestBody:
  *       required: true
@@ -485,7 +486,10 @@ router.post('/delivery/estimate-distance', async (req, res) => {
     }
 
     if (!isGoogleDistanceApiConfigured()) {
-      return res.status(200).json({ success: true, distanceKm: null, message: 'Distance API not configured.' });
+      return res.status(503).json({
+        success: false,
+        message: 'Checkout driving distance is not configured. Set GOOGLE_MAPS_API_KEY on the backend and enable Distance Matrix API.',
+      });
     }
 
     const { SiteSetting, Store } = req.dbModels;
@@ -493,8 +497,11 @@ router.post('/delivery/estimate-distance', async (req, res) => {
     let originAddress = '';
 
     if (storeId && mongoose.isValidObjectId(storeId)) {
-      const store = await Store.findById(storeId).select('address').lean();
-      originAddress = store?.address || '';
+      const store = await Store.findById(storeId).select('address city country location').lean();
+      const coordinates = getCoordinates(store?.location);
+      originAddress = coordinates && (coordinates[0] !== 0 || coordinates[1] !== 0)
+        ? `${coordinates[1]},${coordinates[0]}`
+        : [store?.address, store?.city, store?.country].filter(Boolean).join(', ');
     }
 
     if (!originAddress) {
@@ -505,13 +512,14 @@ router.post('/delivery/estimate-distance', async (req, res) => {
     }
 
     if (!originAddress) {
-      return res.status(200).json({ success: true, distanceKm: null, message: 'Delivery origin address is not configured.' });
+      return res.status(422).json({ success: false, message: 'Delivery origin address is not configured.' });
     }
 
-    const distanceKm = await getDrivingDistanceKm(originAddress, destinationAddress);
+    const distanceKm = await getDrivingDistanceKm(originAddress, destinationAddress, { throwOnError: true });
     return res.status(200).json({ success: true, distanceKm });
   } catch (error) {
-    return res.status(500).json({ success: false, message: 'Failed to estimate delivery distance.', error: error.message });
+    console.error('Delivery distance estimation failed:', error.message);
+    return res.status(502).json({ success: false, message: error.message });
   }
 });
 
