@@ -14,6 +14,9 @@ const {
 } = require("../helpers/driver-wallet");
 const { buildDriverOrderSummary } = require("../helpers/driver-view");
 const { getDeliverySchedule } = require("../helpers/delivery");
+const { createDriverRouteHandler } = require("../service/driverRoute");
+
+router.post("/me/orders/:id/route", createDriverRouteHandler());
 
 const requireAdmin = (req, res, next) => {
   if (!req.auth?.isAdmin) {

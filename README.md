@@ -414,3 +414,24 @@ For support, email girma.m.halie19@gmail.com or open an issue on GitHub.
 ---
 
 ⭐ If you find this project helpful, please consider giving it a star on GitHub!
+# Driver driving routes
+
+`POST /api/v1/drivers/me/orders/:id/route` accepts
+`{ "origin": { "latitude": 9, "longitude": 38 } }` with the driver's bearer token
+and database header. Only approved, non-suspended drivers with that active
+assigned order can request routes. The destination comes from the pickup store
+before pickup and customer coordinates after pickup; missing coordinates return
+422 rather than routing to a placeholder.
+
+Configure `GOOGLE_ROUTES_API_KEY` in Render's server environment. Use a separate
+server key restricted to **Routes API**, enable that API and billing, and restrict
+to the service's outbound IP addresses where available. Never put this key in the
+mobile app. Deploy the backend before using the updated driver screen.
+
+Results contain `coordinates` (latitude/longitude objects), `distance` in km and
+`duration` in minutes. Requests have a 15-second upstream timeout and a per-driver,
+per-database 10-second process-local throttle (not a distributed quota). The app
+refreshes once per minute. Configure Google quotas/budget alerts for additional
+cost control, especially when running multiple server instances.
+
+Validate with `node --test tests/driver-route.test.js`.
