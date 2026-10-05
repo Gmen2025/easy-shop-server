@@ -4,6 +4,7 @@ const bcrypt = require("bcryptjs");
 const { normalizeDatabaseName, getAllowedDatabaseNames, getModelsForDb } = require("../helpers/db-manager");
 const { getDeliverySchedule } = require("../helpers/delivery");
 const { summarizeStoreOrder, buildStoreOrderSummary } = require("../helpers/store-order-view");
+const { reconcileUnassignedPickupStores } = require("../helpers/fulfillment-routing");
 
 const requireAdmin = (req, res, next) => {
   if (!req.auth?.isAdmin) return res.status(403).json({ success: false, message: "Admin access required" });
@@ -251,6 +252,8 @@ router.get("/me/dashboard", async (req, res) => {
     if (!store) {
       return res.status(404).json({ success: false, message: "Company store profile not found." });
     }
+
+    await reconcileUnassignedPickupStores(req.dbModels);
 
     const now = new Date();
     const startForDays = (days) => new Date(now.getTime() - days * 24 * 60 * 60 * 1000);

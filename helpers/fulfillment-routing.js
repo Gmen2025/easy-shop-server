@@ -29,6 +29,10 @@ function rankByDistance(candidates, coordinates) {
 
 async function resolvePickupStore(Store, { customerLocation, preferredStoreId } = {}) {
   const stores = await Store.find({ approvalStatus: "approved", isOpen: { $ne: false } }).lean();
+  return selectPickupStore(stores, { customerLocation, preferredStoreId });
+}
+
+function selectPickupStore(stores, { customerLocation, preferredStoreId } = {}) {
   const preferred = stores.find((store) => String(store._id) === String(preferredStoreId));
   const coordinates = getCoordinates(customerLocation) || getCoordinates(preferred?.location);
   const partners = rankByDistance(stores.filter((store) => !store.isCompanyOwned), coordinates)
@@ -40,6 +44,32 @@ async function resolvePickupStore(Store, { customerLocation, preferredStoreId } 
   return companies.find((store) => coordinates && getCoordinates(store.location)) ||
     companies.find((store) => String(store._id) === String(preferredStoreId)) ||
     companies[0] || null;
+}
+
+async function reconcileUnassignedPickupStores({ Store, Order }) {
+  const stores = await Store.find({ approvalStatus: "approved", isOpen: { $ne: false } }).lean();
+  if (!stores.length) return 0;
+  const scope = {
+    store: null,
+    status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
+    deliveryStatus: { $ne: "Delivered" },
+  };
+  const orders = await Order.find(scope)
+    .select("_id customerLocation orderItems")
+    .populate({ path: "orderItems", populate: { path: "product", select: "store" } })
+    .lean();
+  let assigned = 0;
+  for (const order of orders) {
+    const preferredStoreId = (order.orderItems || []).find((item) => item?.product?.store)?.product.store;
+    const pickup = selectPickupStore(stores, { customerLocation: order.customerLocation, preferredStoreId });
+    if (!pickup) continue;
+    const updated = await Order.findOneAndUpdate(
+      { ...scope, _id: order._id },
+      { $set: { store: pickup._id } }
+    );
+    if (updated) assigned += 1;
+  }
+  return assigned;
 }
 
 function isCompanyFulfillableProduct(product, companyLocation, radiusMeters = STORE_RADIUS_METERS) {
@@ -73,4 +103,5 @@ module.exports = {
   STORE_RADIUS_METERS, DRIVER_RADIUS_METERS, getCoordinates, distanceMeters,
   resolvePickupStore, findCompanyDriver,
   isCompanyFulfillableProduct,
+  reconcileUnassignedPickupStores,
 };

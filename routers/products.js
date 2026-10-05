@@ -5,7 +5,7 @@ const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const { sendPushToUser } = require('../helpers/push-notify');
-const { isCompanyFulfillableProduct } = require('../helpers/fulfillment-routing');
+const { isCompanyFulfillableProduct, reconcileUnassignedPickupStores } = require('../helpers/fulfillment-routing');
 
 cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -629,6 +629,8 @@ router.get('/company/my-products', async (req, res) => {
         if (!store) {
             return res.status(403).json({ success: false, message: 'Only company stores can access this list.' });
         }
+
+        await reconcileUnassignedPickupStores(req.dbModels);
 
         const radiusKm = Number(req.query.radiusKm) > 0 ? Number(req.query.radiusKm) : 10;
 

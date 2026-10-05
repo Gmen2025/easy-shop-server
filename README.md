@@ -65,6 +65,13 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
 
 ### Automatic company fallback routing
 
+- Before company-store dashboard/product requests and each scheduled retry scan,
+  unfinished orders with a null or missing pickup store are reconciled within the
+  selected database. This includes legacy orders with assigned drivers, picked-up
+  deliveries, future schedules, and missing dispatch metadata. Selection uses the
+  same partner-first/company fallback. Conditional writes only set `store`;
+  drivers, fees and schedules stay unchanged. Completed/cancelled orders and
+  existing store assignments are not rewritten.
 - Pickup assignment prefers an approved, open partner store within 10 km of the
   customer. A valid preferred partner in that radius is retained. Otherwise the
   nearest approved, open company store is assigned with no radius limit.

@@ -4,6 +4,7 @@ const mongoose = require("mongoose");
 const {
   getCoordinates, distanceMeters, resolvePickupStore, findCompanyDriver,
   isCompanyFulfillableProduct,
+  reconcileUnassignedPickupStores,
 } = require("../helpers/fulfillment-routing");
 const { assignDriverToOrder } = require("../service/dispatchService");
 const { dispatchPendingOrders } = require("../service/dispatchScheduler");
@@ -77,6 +78,54 @@ test("company products are not mistaken for nearby partner coverage", () => {
     assert.equal(isCompanyFulfillableProduct({ store: productStore }, location), true);
   }
   assert.equal(isCompanyFulfillableProduct({ store: store("nearby", 0.01) }, location), false);
+});
+
+test("legacy unfinished orders get pickup stores without changing drivers, fees or schedules", async () => {
+  const orders = [
+    { _id: "driver-assigned", store: null, driver: "driver", deliveryStatus: "Driver Assigned",
+      status: "2", deliveryFee: 19, customerLocation: { coordinates: [0, 0] } },
+    { _id: "future", driver: null, deliveryStatus: "Pending", status: "1",
+      dispatchStatus: "scheduled", scheduledFor: new Date("2099-01-01"), customerLocation: { coordinates: [2, 0] } },
+    { _id: "partner-order", store: null, deliveryStatus: "Pending", status: "1",
+      customerLocation: { coordinates: [1, 0] } },
+    { _id: "already-assigned", store: "original", status: "1" },
+    { _id: "completed", store: null, status: "3" },
+    { _id: "delivered", store: null, status: "1", deliveryStatus: "Delivered" },
+    { _id: "cancelled", store: null, status: "4" },
+    { _id: "raced", store: null, status: "1" },
+  ];
+  const matches = (order, scope) => order.store == null &&
+    !scope.status.$nin.includes(order.status) && order.deliveryStatus !== scope.deliveryStatus.$ne;
+  const models = {
+    Store: storeModel([store("near-company", 0, true), store("far-company", 2, true), store("partner", 1)]),
+    Order: {
+      find: (scope) => {
+        assert.equal(scope.driver, undefined);
+        assert.equal(scope.dispatchStatus, undefined);
+        return query(orders.filter((order) => matches(order, scope)));
+      },
+      findOneAndUpdate: async (scope, update) => {
+        assert.deepEqual(Object.keys(update.$set), ["store"]);
+        const order = orders.find((entry) => entry._id === scope._id);
+        if (order._id === "raced") order.store = "concurrent-store";
+        if (!matches(order, scope)) return null;
+        Object.assign(order, update.$set);
+        return order;
+      },
+    },
+  };
+  assert.equal(await reconcileUnassignedPickupStores(models), 3);
+  assert.equal(orders[0].store, "near-company");
+  assert.equal(orders[0].driver, "driver");
+  assert.equal(orders[0].deliveryFee, 19);
+  assert.equal(orders[1].store, "far-company");
+  assert.equal(orders[1].dispatchStatus, "scheduled");
+  assert.equal(orders[1].scheduledFor.toISOString(), "2099-01-01T00:00:00.000Z");
+  assert.equal(orders[2].store, "partner");
+  assert.equal(orders[3].store, "original");
+  for (const order of orders.slice(4, 7)) assert.equal(order.store, null);
+  assert.equal(orders[7].store, "concurrent-store");
+  assert.equal(await reconcileUnassignedPickupStores(models), 0);
 });
 
 test("company driver fallback selects the nearest approved available driver with capacity, without a radius", async () => {
@@ -370,7 +419,7 @@ test("retry scan respects databases and dispatches only pending or due scheduled
   const now = new Date();
   await dispatchPendingOrders({}, {
     now, databaseNames: ["E_Shopping", "E_ShopUSA"],
-    modelsForDb: (dbName) => ({ Order: { find: (filter) => {
+    modelsForDb: (dbName) => ({ Store: storeModel([]), Order: { find: (filter) => {
       assert.equal(filter.driver, null);
       assert.equal(filter.deliveryStatus, "Pending");
       assert.deepEqual(filter.$or[1], { dispatchStatus: "scheduled", deliveryWindowStart: { $lte: now } });

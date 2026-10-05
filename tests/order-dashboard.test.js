@@ -61,7 +61,7 @@ test("AdminStore product queue includes every unanswered product on its active a
     const req = {
       auth: { userId: "company-owner" }, query: {},
       dbModels: {
-        Store: { findOne: () => query({ _id: storeId, location }) },
+        Store: { find: () => query([]), findOne: () => query({ _id: storeId, location }) },
         Order: { find: (filter) => {
           assert.equal(filter.store, storeId);
           assert.deepEqual(filter.status.$nin, ["3", "4", "Delivered", "Cancelled"]);
@@ -125,7 +125,7 @@ test("store dashboard returns pending scheduled orders and keeps completed-sales
   const req = {
     auth: { userId: "owner-a" },
     dbModels: {
-      Store: { findOne(filter) {
+      Store: { find: () => query([]), findOne(filter) {
         assert.deepEqual(filter, { owner: "owner-a", isCompanyOwned: true });
         return query({ _id: storeId, name: "Company store" });
       } },
@@ -164,6 +164,49 @@ test("store dashboard returns pending scheduled orders and keeps completed-sales
   assert.equal(res.body.recentCompletedOrders.length, 1);
   assert.equal(res.body.activeOrders.length, 1);
   assert.equal(res.body.activeOrders[0]._id, pending._id);
+});
+
+test("AdminStore dashboard immediately includes legacy USA orders after persisting missing pickup assignments", async () => {
+  const company = { _id: "usa-company", name: "USA AdminStore", isCompanyOwned: true,
+    approvalStatus: "approved", location: { coordinates: [-87.65, 41.95] } };
+  const order = {
+    _id: "legacy-usa-order", store: null, driver: "existing-driver", status: "2",
+    deliveryStatus: "Driver Assigned", deliveryFee: 12, dateOrdered: new Date(),
+    customerLocation: { coordinates: [-87.66, 41.95] },
+    orderItems: [{ quantity: 3, product: { _id: "unowned", name: "Coffee", price: 5 } }],
+  };
+  const req = {
+    auth: { userId: "owner" }, dbName: "E_ShopUSA",
+    dbModels: {
+      Store: { find: () => query([company]), findOne: () => query(company) },
+      Product: { find: () => query([]), countDocuments: async () => 0 },
+      OrderItem: { find: () => query([]) },
+      Order: {
+        find: (filter) => {
+          if (filter.store === null) return query(order.store == null ? [order] : []);
+          assert.equal(filter.$and?.[0]?.$or[0]?.store || filter.$or[0].store, company._id);
+          return query(filter.$and ? [] : order.store === company._id ? [order] : []);
+        },
+        findOneAndUpdate: async (filter, update) => {
+          assert.equal(filter._id, order._id);
+          assert.equal(filter.store, null);
+          Object.assign(order, update.$set);
+          return order;
+        },
+      },
+      Review: { find: () => query([]) }, Payout: { find: () => query([]) },
+    },
+  };
+  const res = response();
+  await handler(storeRouter, "/me/dashboard", "get")(req, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(order.store, company._id);
+  assert.equal(order.driver, "existing-driver");
+  assert.equal(order.deliveryFee, 12);
+  assert.equal(res.body.activeOrders.length, 1);
+  assert.equal(res.body.activeOrders[0].orderItems[0].product.name, "Coffee");
+  assert.equal(res.body.activeOrders[0].units, 3);
+  assert.equal(res.body.orders.pending, 1);
 });
 
 test("admin recent sales include schedule metadata selected from the database", async () => {
@@ -261,7 +304,7 @@ test("store dashboard limits recent orders to twenty without adding pending orde
   const req = {
     auth: { userId: "store-owner" },
     dbModels: {
-      Store: { findOne: () => query({ _id: "store-a", name: "Store" }) },
+      Store: { find: () => query([]), findOne: () => query({ _id: "store-a", name: "Store" }) },
       Product: { find: () => query([]), countDocuments: async () => 0 },
       OrderItem: { find: () => query([]) },
       Order: { find: (filter) => {
@@ -314,7 +357,7 @@ test("company dashboard includes ready-product orders without crediting unrelate
   const req = {
     auth: { userId: "owner" },
     dbModels: {
-      Store: { findOne: () => query({ _id: storeId, name: "Company store" }) },
+      Store: { find: () => query([]), findOne: () => query({ _id: storeId, name: "Company store" }) },
       Product: {
         find: (filter) => {
           if (!filter.$or) return query(products.filter((product) => product.store === filter.store));

@@ -1,10 +1,12 @@
 const { getAllowedDatabaseNames, getModelsForDb } = require("../helpers/db-manager");
 const { assignDriverToOrder } = require("./dispatchService");
+const { reconcileUnassignedPickupStores } = require("../helpers/fulfillment-routing");
 
 async function dispatchPendingOrders(io, { databaseNames = getAllowedDatabaseNames(), modelsForDb = getModelsForDb, assign = assignDriverToOrder, now = new Date() } = {}) {
   for (const dbName of databaseNames) {
     try {
       const models = modelsForDb(dbName);
+      await reconcileUnassignedPickupStores(models);
       const orders = await models.Order.find({
         driver: null,
         deliveryStatus: "Pending",
