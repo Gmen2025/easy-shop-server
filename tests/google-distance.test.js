@@ -49,3 +49,23 @@ test("distance lookup redacts server key from network errors", async () => {
   await assert.rejects(helper.getDrivingDistanceKm("A", "B", { throwOnError: true }), (error) =>
     !error.message.includes("test-server-key") && error.message.includes("[redacted]"));
 });
+
+test("no-route and unresolved-location errors give location-specific guidance", async () => {
+  for (const [status, expected] of [
+    ["ZERO_RESULTS", /no driving route.*map pins.*coverage/],
+    ["NOT_FOUND", /could not locate.*store map pin and delivery address/],
+  ]) {
+    const helper = loadDistance({ fetch: async () => ({
+      ok: true,
+      json: async () => ({ status: "OK", rows: [{ elements: [{ status }] }] }),
+    }) });
+    await assert.rejects(helper.getDrivingDistanceKm("9.01,38.76", "9.03,38.74", {
+      throwOnError: true,
+    }), (error) => {
+      assert.match(error.message, expected);
+      assert.ok(error.message.includes(status));
+      assert.doesNotMatch(error.message, /API key|billing/);
+      return true;
+    });
+  }
+});

@@ -134,6 +134,15 @@ fallback as order creation. A missing/stale mobile store cache does not require 
 separate hub address when an eligible registered pickup store has an origin. Missing API
 configuration returns 503, missing origin returns 422, and lookup failure returns
 502 with a diagnostic message. It never returns success with a null distance.
+When `customerLocation` is supplied, its validated coordinates are also the driving
+destination, avoiding another Google lookup of address text such as Ethiopian
+shipping addresses. Both `{ latitude, longitude }` and GeoJSON-style
+`{ coordinates: [longitude, latitude] }` are supported. Invalid supplied coordinates
+return 400; omitted coordinates retain the address-based lookup for older clients.
+`ZERO_RESULTS` indicates no driving route between the locations, not a key or
+billing failure. Check both map pins, road access and local routing coverage.
+`NOT_FOUND` indicates Google could not resolve one of the locations. No estimated
+or straight-line distance is substituted for either failure.
 Deploy changes and set environment variables on the actual API hosting service;
 editing a local environment file does not configure the deployed API.
 

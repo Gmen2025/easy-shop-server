@@ -43,6 +43,12 @@ async function getDrivingDistanceKm(originAddress, destinationAddress, { throwOn
 
     if (data?.status !== "OK" || !element || element.status !== "OK") {
       const status = data?.status !== "OK" ? data?.status : element?.status;
+      if (status === "ZERO_RESULTS") {
+        throw new Error("Google Distance Matrix found no driving route between the pickup and delivery locations (ZERO_RESULTS). Check that both map pins are correct and accessible by road. Driving-route coverage may be unavailable in this area.");
+      }
+      if (status === "NOT_FOUND") {
+        throw new Error("Google Distance Matrix could not locate the pickup or delivery location (NOT_FOUND). Check the store map pin and delivery address.");
+      }
       throw new Error(`Google Distance Matrix could not calculate a driving distance (${status || "missing route"}). Check the backend API key, billing, API restrictions and addresses.`);
     }
 

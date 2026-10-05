@@ -474,7 +474,7 @@ router.put('/delivery', async (req, res) => {
  *                 description: Optional preferred pickup store. Server pickup eligibility still applies.
  *               customerLocation:
  *                 type: object
- *                 description: Shipping coordinates used to select a nearby partner or fallback AdminStore.
+ *                 description: Shipping coordinates used for the driving destination and to select a nearby partner or fallback AdminStore.
  *     responses:
  *       200:
  *         description: Distance estimate
@@ -487,6 +487,18 @@ router.post('/delivery/estimate-distance', async (req, res) => {
     if (!destinationAddress) {
       return res.status(400).json({ success: false, message: 'destinationAddress is required.' });
     }
+
+    const customerLocation = req.body?.customerLocation;
+    const destinationCoordinates = getCoordinates(customerLocation);
+    if (customerLocation != null && !destinationCoordinates) {
+      return res.status(400).json({
+        success: false,
+        message: 'customerLocation must contain valid delivery latitude and longitude coordinates.',
+      });
+    }
+    const destination = destinationCoordinates
+      ? `${destinationCoordinates[1]},${destinationCoordinates[0]}`
+      : destinationAddress;
 
     if (!isGoogleDistanceApiConfigured()) {
       return res.status(503).json({
@@ -504,7 +516,7 @@ router.post('/delivery/estimate-distance', async (req, res) => {
     }
 
     const store = await resolvePickupStore(Store, {
-      customerLocation: req.body?.customerLocation,
+      customerLocation,
       preferredStoreId: storeId,
     });
     if (store) {
@@ -528,7 +540,7 @@ router.post('/delivery/estimate-distance', async (req, res) => {
       });
     }
 
-    const distanceKm = await getDrivingDistanceKm(originAddress, destinationAddress, { throwOnError: true });
+    const distanceKm = await getDrivingDistanceKm(originAddress, destination, { throwOnError: true });
     return res.status(200).json({ success: true, distanceKm });
   } catch (error) {
     console.error('Delivery distance estimation failed:', error.message);

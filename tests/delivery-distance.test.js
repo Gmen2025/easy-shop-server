@@ -73,6 +73,46 @@ test("default zero coordinates use full store address instead of Gulf of Guinea"
   assert.equal(res.body.distanceKm, 10);
 });
 
+test("Ethiopian delivery uses geocoded coordinates rather than re-geocoding address text", async () => {
+  for (const customerLocation of [
+    { latitude: 9.03, longitude: 38.74 },
+    { coordinates: [38.74, 9.03] },
+  ]) {
+    const { handler, req, res } = fixture({
+      store: { location: { coordinates: [38.76, 9.01] } },
+      compute: async (origin, destination, options) => {
+        assert.equal(origin, "9.01,38.76");
+        assert.equal(destination, "9.03,38.74");
+        assert.equal(options.throwOnError, true);
+        return 4.25;
+      },
+    });
+    req.body.destinationAddress = "Delivery address, Addis Ababa, Ethiopia";
+    req.body.customerLocation = customerLocation;
+    await handler(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.distanceKm, 4.25);
+  }
+});
+
+test("invalid supplied delivery coordinates fail before calling Google", async () => {
+  for (const customerLocation of [
+    {}, { latitude: 91, longitude: 38.74 },
+    { latitude: 9.03, longitude: 181 },
+    { latitude: "9.03", longitude: 38.74 },
+    { coordinates: [38.74] },
+  ]) {
+    const { handler, req, res } = fixture({
+      compute: async () => assert.fail("Invalid coordinates must not reach Google"),
+    });
+    req.body.customerLocation = customerLocation;
+    await handler(req, res);
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.body.success, false);
+    assert.match(res.body.message, /customerLocation.*valid delivery/);
+  }
+});
+
 test("distance resolves nearest AdminStore when checkout has no cached store or hub", async () => {
   const { handler, req, res } = fixture({
     stores: [
