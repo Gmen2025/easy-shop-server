@@ -23,6 +23,47 @@ const scheduledOrder = {
   deliveryStatus: "Driver Assigned",
 };
 
+test("USA fees apply unchanged rates per mile for every delivery mode without changing stored kilometers", () => {
+  const config = {
+    sameDayBase: 0, sameDayPremium: 0, sameDayPerKm: 2,
+    nextDayBase: 0, nextDayPerKm: 2,
+    scheduledBase: 0, scheduledPerKm: 2,
+    scheduledPeakSurcharge: 0, scheduledOffPeakDiscount: 0,
+  };
+  for (const deliveryMode of ["SAME_DAY", "NEXT_DAY", "SCHEDULED"]) {
+    for (const databaseName of ["E_ShopUSA", "E_ShoppingUSA", "E_Shopping", "E_Shopping_2"]) {
+      const result = resolveDeliveryPlan({
+        deliveryMode, deliveryDistanceKm: 10, scheduledFor,
+      }, { now, deliveryConfig: config, databaseName });
+      assert.equal(result.ok, true);
+      assert.equal(result.value.deliveryFee, databaseName.includes("USA") ? 12.43 : 20);
+      assert.equal(result.value.deliveryDistanceKm, 10);
+    }
+  }
+});
+
+test("USA base fees, premiums and saved order fees are not converted", () => {
+  const options = { now, databaseName: "E_ShopUSA" };
+  assert.equal(resolveDeliveryPlan({
+    deliveryMode: "SAME_DAY", deliveryDistanceKm: 1.609344,
+  }, options).value.deliveryFee, 14);
+  assert.equal(resolveDeliveryPlan({
+    deliveryMode: "SAME_DAY", deliveryDistanceKm: 10,
+  }, options).value.deliveryFee, 19.21);
+  assert.equal(resolveDeliveryPlan({
+    deliveryMode: "NEXT_DAY", deliveryDistanceKm: 10,
+  }, options).value.deliveryFee, 7.73);
+  assert.equal(resolveDeliveryPlan({
+    deliveryMode: "NEXT_DAY", deliveryDistanceKm: 10,
+  }, { ...options, currentOrder: { deliveryFee: 30 } }).value.deliveryFee, 30);
+  for (const [hour, expected] of [[18, 11.16], [12, 9.16], [8, 9.66]]) {
+    assert.equal(resolveDeliveryPlan({
+      deliveryMode: "SCHEDULED", deliveryDistanceKm: 10,
+      scheduledFor: new Date(2099, 0, 1, hour),
+    }, options).value.deliveryFee, expected);
+  }
+});
+
 test("accepts either scheduled date name and persists one canonical date", () => {
   for (const key of ["scheduledFor", "scheduledDeliveryDate"]) {
     const result = resolveDeliveryPlan(

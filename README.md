@@ -96,6 +96,13 @@ node --test tests/delivery-schedule.test.js tests/order-dashboard.test.js tests/
 
 ### Checkout driving-distance configuration
 
+USA delivery fees use miles for `E_ShopUSA` (including `E_ShoppingUSA` alias).
+Existing `sameDayPerKm`, `nextDayPerKm`, and `scheduledPerKm` field names remain
+compatible, but their unchanged amounts are interpreted as per-mile rates in USA.
+Same-day, next-day and scheduled fees divide road kilometers by 1.609344
+before multiplying by the rate. Other databases remain per-kilometer. Stored
+`deliveryDistanceKm` stays in kilometers and existing order fees are preserved.
+
 `POST /api/v1/settings/delivery/estimate-distance` requires an authenticated
 session and a backend `GOOGLE_MAPS_API_KEY` authorized for **Distance Matrix API**,
 with billing enabled. This is a server key, not the Android Maps SDK key or the

@@ -1048,6 +1048,7 @@ router.post(`/`, async (req, res) => {
 
   const deliveryPlanResult = resolveDeliveryPlan(req.body, {
     deliveryConfig: deliverySetting?.deliveryConfig,
+    databaseName: req.dbName,
   });
   if (!deliveryPlanResult.ok) {
     return res.status(400).json({
@@ -1428,7 +1429,9 @@ router.put("/:id", async (req, res) => {
   const hasDeliveryUpdate = hasDeliveryPlanChange(req.body, existingOrder);
 
   if (hasDeliveryUpdate) {
-    const deliveryPlanResult = resolveDeliveryPlan(req.body, { currentOrder: existingOrder });
+    const deliveryPlanResult = resolveDeliveryPlan(req.body, {
+      currentOrder: existingOrder, databaseName: req.dbName,
+    });
     if (!deliveryPlanResult.ok) {
       return res.status(400).json({
         success: false,

@@ -92,16 +92,19 @@ function normalizeDeliveryConfig(config = {}) {
   }));
 }
 
-function computeDeliveryFee({ deliveryMode, deliveryDistanceKm, scheduledFor, config }) {
-  const distanceKm = parsePositiveNumber(deliveryDistanceKm) || 0;
+function computeDeliveryFee({ deliveryMode, deliveryDistanceKm, scheduledFor, config, databaseName }) {
+  const useMiles = ["e_shopusa", "e_shoppingusa"].includes(
+    String(databaseName || "").trim().toLowerCase()
+  );
+  const pricingDistance = (parsePositiveNumber(deliveryDistanceKm) || 0) / (useMiles ? 1.609344 : 1);
   const rates = normalizeDeliveryConfig(config);
 
   if (deliveryMode === DELIVERY_MODES.SAME_DAY) {
-    return roundCurrency(rates.sameDayBase + rates.sameDayPremium + distanceKm * rates.sameDayPerKm);
+    return roundCurrency(rates.sameDayBase + rates.sameDayPremium + pricingDistance * rates.sameDayPerKm);
   }
 
   if (deliveryMode === DELIVERY_MODES.NEXT_DAY) {
-    return roundCurrency(rates.nextDayBase + distanceKm * rates.nextDayPerKm);
+    return roundCurrency(rates.nextDayBase + pricingDistance * rates.nextDayPerKm);
   }
 
   const scheduledTime = toDate(scheduledFor);
@@ -109,7 +112,7 @@ function computeDeliveryFee({ deliveryMode, deliveryDistanceKm, scheduledFor, co
   const peakSurcharge = hour >= 17 && hour <= 20 ? rates.scheduledPeakSurcharge : 0;
   const offPeakDiscount = hour >= 10 && hour <= 15 ? -rates.scheduledOffPeakDiscount : 0;
 
-  return roundCurrency(rates.scheduledBase + distanceKm * rates.scheduledPerKm + peakSurcharge + offPeakDiscount);
+  return roundCurrency(rates.scheduledBase + pricingDistance * rates.scheduledPerKm + peakSurcharge + offPeakDiscount);
 }
 
 function resolveDeliveryPlan(payload, options = {}) {
@@ -216,6 +219,7 @@ function resolveDeliveryPlan(payload, options = {}) {
           deliveryDistanceKm,
           scheduledFor: normalizedScheduledFor,
           config,
+          databaseName: options.databaseName,
         })
       : parsePositiveNumber(feeCandidate);
 
