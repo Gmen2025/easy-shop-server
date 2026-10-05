@@ -3,9 +3,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
-const { getCoordinates } = require("../helpers/fulfillment-routing");
+const { getCoordinates, resolvePickupStore } = require("../helpers/fulfillment-routing");
 
-function fixture({ configured = true, store, hub = "", compute } = {}) {
+function fixture({ configured = true, store, stores, hub = "", compute } = {}) {
   const routes = {};
   const router = {
     get: () => {}, put: () => {},
@@ -19,7 +19,7 @@ function fixture({ configured = true, store, hub = "", compute } = {}) {
       isGoogleDistanceApiConfigured: () => configured,
       getDrivingDistanceKm: compute || (async () => 12.5),
     },
-    "../helpers/fulfillment-routing": { getCoordinates },
+    "../helpers/fulfillment-routing": { getCoordinates, resolvePickupStore },
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../routers/settings.js"), "utf8"), {
     module: { exports: {} }, require: (name) => {
@@ -31,7 +31,9 @@ function fixture({ configured = true, store, hub = "", compute } = {}) {
   const req = {
     body: { destinationAddress: "500 South State, Chicago, 60603, United States", storeId: "test-store" },
     dbModels: {
-      Store: { findById: () => query(store) },
+      Store: { find: () => ({ lean: async () => (stores || (store ? [{
+        _id: "test-store", isCompanyOwned: true, approvalStatus: "approved", ...store,
+      }] : [])).filter((entry) => entry.approvalStatus === "approved" && entry.isOpen !== false) }) },
       SiteSetting: { findOne: () => query({ deliveryOrigin: { address: hub } }) },
     },
   };
@@ -71,10 +73,45 @@ test("default zero coordinates use full store address instead of Gulf of Guinea"
   assert.equal(res.body.distanceKm, 10);
 });
 
+test("distance resolves nearest AdminStore when checkout has no cached store or hub", async () => {
+  const { handler, req, res } = fixture({
+    stores: [
+      { _id: "far", isCompanyOwned: true, approvalStatus: "approved", location: { coordinates: [-88, 42] } },
+      { _id: "near", isCompanyOwned: true, approvalStatus: "approved", location: { coordinates: [-87.65, 41.95] } },
+      { _id: "closed", isCompanyOwned: true, approvalStatus: "approved", isOpen: false, location: { coordinates: [-87.65, 41.95] } },
+    ],
+    compute: async (origin) => {
+      assert.equal(origin, "41.95,-87.65");
+      return 10;
+    },
+  });
+  req.body.storeId = null;
+  req.body.customerLocation = { latitude: 41.95, longitude: -87.65 };
+  await handler(req, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.distanceKm, 10);
+});
+
+test("distance retains nearby partner priority and ignores stale preferred store IDs", async () => {
+  const { handler, req, res } = fixture({
+    stores: [
+      { _id: "partner", approvalStatus: "approved", location: { coordinates: [-87.66, 41.95] } },
+      { _id: "company", isCompanyOwned: true, approvalStatus: "approved", location: { coordinates: [-87.65, 41.95] } },
+    ],
+    compute: async (origin) => {
+      assert.equal(origin, "41.95,-87.66");
+      return 10;
+    },
+  });
+  req.body.customerLocation = { coordinates: [-87.65, 41.95] };
+  await handler(req, res);
+  assert.equal(res.statusCode, 200);
+});
+
 test("unconfigured origin, API and denied lookup produce explicit failures, not success with null", async () => {
   for (const [options, status, message] of [
     [{ configured: false }, 503, /GOOGLE_MAPS_API_KEY/],
-    [{}, 422, /origin address/],
+    [{}, 422, /Register an approved, open AdminStore/],
     [{ hub: "Chicago", compute: async () => { throw new Error("Google lookup REQUEST_DENIED"); } },
       502, /REQUEST_DENIED/],
   ]) {

@@ -2,7 +2,7 @@ const router = require('express').Router();
 const mongoose = require('mongoose');
 const { normalizeDeliveryConfig } = require('../helpers/delivery');
 const { isGoogleDistanceApiConfigured, getDrivingDistanceKm } = require('../helpers/google-distance');
-const { getCoordinates } = require('../helpers/fulfillment-routing');
+const { getCoordinates, resolvePickupStore } = require('../helpers/fulfillment-routing');
 
 const MAINTENANCE_SETTING_KEY = 'maintenance-mode';
 const BANK_ACCOUNT_SETTING_KEY = 'bank-account-info';
@@ -471,7 +471,10 @@ router.put('/delivery', async (req, res) => {
  *                 type: string
  *               storeId:
  *                 type: string
- *                 description: Optional store id to use as the origin instead of the admin hub address.
+ *                 description: Optional preferred pickup store. Server pickup eligibility still applies.
+ *               customerLocation:
+ *                 type: object
+ *                 description: Shipping coordinates used to select a nearby partner or fallback AdminStore.
  *     responses:
  *       200:
  *         description: Distance estimate
@@ -496,8 +499,15 @@ router.post('/delivery/estimate-distance', async (req, res) => {
     const storeId = req.body?.storeId;
     let originAddress = '';
 
-    if (storeId && mongoose.isValidObjectId(storeId)) {
-      const store = await Store.findById(storeId).select('address city country location').lean();
+    if (storeId && !mongoose.isValidObjectId(storeId)) {
+      return res.status(400).json({ success: false, message: 'Invalid store id.' });
+    }
+
+    const store = await resolvePickupStore(Store, {
+      customerLocation: req.body?.customerLocation,
+      preferredStoreId: storeId,
+    });
+    if (store) {
       const coordinates = getCoordinates(store?.location);
       originAddress = coordinates && (coordinates[0] !== 0 || coordinates[1] !== 0)
         ? `${coordinates[1]},${coordinates[0]}`
@@ -512,7 +522,10 @@ router.post('/delivery/estimate-distance', async (req, res) => {
     }
 
     if (!originAddress) {
-      return res.status(422).json({ success: false, message: 'Delivery origin address is not configured.' });
+      return res.status(422).json({
+        success: false,
+        message: 'No delivery pickup origin is available. Register an approved, open AdminStore with valid coordinates or a full address in the selected database, or configure the delivery hub address.',
+      });
     }
 
     const distanceKm = await getDrivingDistanceKm(originAddress, destinationAddress, { throwOnError: true });

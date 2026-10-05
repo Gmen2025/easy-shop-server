@@ -120,7 +120,11 @@ APIs and stable outbound server IPs when available. `GOOGLE_ROUTES_API_KEY`
 configures the separate driver Routes API endpoint, not this checkout endpoint.
 
 The endpoint uses valid pickup-store coordinates (latitude, longitude) as the
-origin, otherwise the full store address or configured delivery hub. Missing API
+origin, otherwise the full store address or configured delivery hub. The distance
+endpoint resolves eligible pickup stores on the server using `customerLocation`
+and an optional preferred `storeId`, applying the same partner-first/AdminStore
+fallback as order creation. A missing/stale mobile store cache does not require a
+separate hub address when an eligible registered pickup store has an origin. Missing API
 configuration returns 503, missing origin returns 422, and lookup failure returns
 502 with a diagnostic message. It never returns success with a null distance.
 Deploy changes and set environment variables on the actual API hosting service;
