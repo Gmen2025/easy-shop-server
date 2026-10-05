@@ -3,6 +3,7 @@ const test = require("node:test");
 const mongoose = require("mongoose");
 const {
   getCoordinates, distanceMeters, resolvePickupStore, findCompanyDriver,
+  isCompanyFulfillableProduct,
 } = require("../helpers/fulfillment-routing");
 const { assignDriverToOrder } = require("../service/dispatchService");
 const { dispatchPendingOrders } = require("../service/dispatchScheduler");
@@ -51,14 +52,31 @@ test("outside the 10 km partner radius, nearest company wins without a radius li
   assert.ok(distanceMeters([0, 0], assigned.location.coordinates) > 10000);
 });
 
-test("sole eligible company is the default, but multiple companies require a rankable location", async () => {
+test("company fallback uses the preferred or stable available store when proximity cannot be ranked", async () => {
   assert.equal((await resolvePickupStore(storeModel([store("sole", 30, true)])))._id, "sole");
-  assert.equal(await resolvePickupStore(storeModel([store("a", 1, true), store("b", 2, true)])), null);
+  const companies = storeModel([store("b", 2, true), store("a", 1, true)]);
+  assert.equal((await resolvePickupStore(companies))._id, "a");
+  assert.equal((await resolvePickupStore(companies, { preferredStoreId: "b" }))._id, "b");
+  assert.equal((await resolvePickupStore(storeModel([
+    store("b", 2, true, { location: null }), store("a", 1, true, { location: null }),
+  ]), { customerLocation: { coordinates: [0, 0] } }))._id, "a");
   assert.equal(await resolvePickupStore(storeModel([]), { customerLocation: { coordinates: [0, 0] } }), null);
   assert.deepEqual(getCoordinates({ longitude: 0, latitude: 0 }), [0, 0]);
   for (const location of [{ coordinates: [181, 0] }, { coordinates: [null, null] }, {}, { coordinates: [0] }]) {
     assert.equal(getCoordinates(location), null);
   }
+});
+
+test("company products are not mistaken for nearby partner coverage", () => {
+  const location = { coordinates: [0, 0] };
+  for (const productStore of [
+    null, store("company", 0, true), store("far-partner", 1),
+    store("closed", 0, false, { isOpen: false }),
+    store("pending", 0, false, { approvalStatus: "pending" }),
+  ]) {
+    assert.equal(isCompanyFulfillableProduct({ store: productStore }, location), true);
+  }
+  assert.equal(isCompanyFulfillableProduct({ store: store("nearby", 0.01) }, location), false);
 });
 
 test("company driver fallback selects the nearest approved available driver with capacity, without a radius", async () => {

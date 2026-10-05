@@ -3,6 +3,7 @@ const test = require("node:test");
 const storeRouter = require("../routers/stores");
 const orderRouter = require("../routers/orders");
 const driverRouter = require("../routers/drivers");
+const productRouter = require("../routers/products");
 
 function query(value, onSelect = () => {}) {
   let fields;
@@ -43,6 +44,65 @@ function response() {
   };
 }
 
+test("AdminStore product queue includes every unanswered product on its active assigned orders", async () => {
+  const storeId = "company";
+  const nearbyPartner = {
+    _id: "partner", isCompanyOwned: false, isOpen: true, approvalStatus: "approved",
+    location: { coordinates: [0.01, 0] },
+  };
+  const products = [
+    { _id: "company-owned", store: { _id: storeId, isCompanyOwned: true, location: { coordinates: [0, 0] } } },
+    { _id: "unassigned", store: null },
+    { _id: "ordered-partner", store: nearbyPartner },
+    { _id: "unrelated-partner", store: nearbyPartner },
+    { _id: "ready", store: null, companyStoreResponses: [{ store: storeId, status: "ready" }] },
+  ];
+  for (const location of [{ coordinates: [0, 0] }, null]) {
+    const req = {
+      auth: { userId: "company-owner" }, query: {},
+      dbModels: {
+        Store: { findOne: () => query({ _id: storeId, location }) },
+        Order: { find: (filter) => {
+          assert.equal(filter.store, storeId);
+          assert.deepEqual(filter.status.$nin, ["3", "4", "Delivered", "Cancelled"]);
+          assert.equal(filter.deliveryStatus.$ne, "Delivered");
+          return query([{ orderItems: [{ product: "ordered-partner" }, null] }]);
+        } },
+        Product: { find: (filter) => {
+          assert.equal(filter.approvalStatus, "approved");
+          assert.equal(filter["companyStoreResponses.store"].$ne, storeId);
+          return query(products.filter((product) =>
+            !product.companyStoreResponses?.some((entry) => entry.store === storeId)));
+        } },
+      },
+    };
+    const res = response();
+    await handler(productRouter, "/company/my-products", "get")(req, res);
+    assert.equal(res.statusCode, 200);
+    assert.ok(res.body.products.some((product) => product._id === "ordered-partner"));
+    assert.ok(res.body.products.some((product) => product._id === "company-owned"));
+    assert.ok(res.body.products.some((product) => product._id === "unassigned"));
+    assert.ok(!res.body.products.some((product) => product._id === "ready"));
+    if (location) assert.ok(!res.body.products.some((product) => product._id === "unrelated-partner"));
+  }
+});
+
+test("admin and company product lists both retain nearby company-owned products", async () => {
+  const products = [
+    { _id: "owned", store: { isCompanyOwned: true, location: { coordinates: [0, 0] } } },
+    { _id: "nearby-partner", store: { isCompanyOwned: false, location: { coordinates: [0.01, 0] } } },
+    { _id: "unassigned", store: null },
+  ];
+  const req = {
+    query: { latitude: "0", longitude: "0" },
+    dbModels: { Product: { find: () => query(products) } },
+  };
+  const res = response();
+  await handler(productRouter, "/admin/company-fulfillable", "get")(req, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body.products.map((product) => product._id), ["owned", "unassigned"]);
+});
+
 test("store dashboard returns pending scheduled orders and keeps completed-sales metrics unchanged", async () => {
   const storeId = "store-a";
   const dateOrdered = new Date(Date.now() - 60_000);
@@ -76,6 +136,7 @@ test("store dashboard returns pending scheduled orders and keeps completed-sales
         orderQueryCount += 1;
         if (filter.$and) return query([completed]);
         if (filter.dateOrdered) return query([pending, completed]);
+        if (filter.deliveryStatus?.$ne) return query([pending]);
         return query([pending, completed], (fields) => {
           for (const field of ["scheduledFor", "deliveryMode", "orderItems", "status", "dateOrdered"]) {
             assert.ok(fields.includes(field));
@@ -89,7 +150,7 @@ test("store dashboard returns pending scheduled orders and keeps completed-sales
   const res = response();
   await handler(storeRouter, "/me/dashboard", "get")(req, res);
   assert.equal(res.statusCode, 200);
-  assert.equal(orderQueryCount, 3);
+  assert.equal(orderQueryCount, 4);
   assert.equal(res.body.periods.daily.orders, 2);
   assert.equal(res.body.periods.daily.completedOrders, 1);
   assert.equal(res.body.periods.daily.sales, 20);
@@ -101,6 +162,8 @@ test("store dashboard returns pending scheduled orders and keeps completed-sales
   assert.equal(res.body.recentOrders[0].completedAt, null);
   assert.equal(res.body.recentOrders[0].orderItems[0].product.name, "Apples");
   assert.equal(res.body.recentCompletedOrders.length, 1);
+  assert.equal(res.body.activeOrders.length, 1);
+  assert.equal(res.body.activeOrders[0]._id, pending._id);
 });
 
 test("admin recent sales include schedule metadata selected from the database", async () => {
@@ -189,7 +252,7 @@ test("store dashboard limits recent orders to twenty without adding pending orde
     _id: `order-${index}`,
     status: "1",
     deliveryStatus: "Pending",
-    dateOrdered: new Date(),
+    dateOrdered: new Date(Date.now() - (index === 24 ? 400 : 0) * 86_400_000),
     itemsSubtotal: 100,
     totalPrice: 105,
     deliveryFee: 5,
@@ -203,7 +266,11 @@ test("store dashboard limits recent orders to twenty without adding pending orde
       OrderItem: { find: () => query([]) },
       Order: { find: (filter) => {
         assert.deepEqual((filter.$and?.[0] || filter).$or[0], { store: "store-a" });
-        return query(filter.$and ? [] : orders);
+        if (filter.deliveryStatus?.$ne) {
+          assert.equal(filter.dateOrdered, undefined);
+          return query(orders);
+        }
+        return query(filter.$and ? [] : filter.dateOrdered ? orders.slice(0, 24) : orders);
       } },
       Review: { find: () => query([]) },
       Payout: { find: () => query([]) },
@@ -216,6 +283,8 @@ test("store dashboard limits recent orders to twenty without adding pending orde
   assert.equal(res.body.periods.daily.sales, 0);
   assert.equal(res.body.periods.daily.completedOrders, 0);
   assert.equal(res.body.orders.pending, 25);
+  assert.equal(res.body.activeOrders.length, 25);
+  assert.equal(res.body.activeOrders[24]._id, "order-24");
 });
 
 test("company dashboard includes ready-product orders without crediting unrelated items or rejected products", async () => {
@@ -269,7 +338,8 @@ test("company dashboard includes ready-product orders without crediting unrelate
         ]);
         const scoped = orders.filter((order) => order.store === storeId ||
           order.orderItems.some((item) => scope.$or[1].orderItems.$in.includes(item._id)));
-        return query(filter.$and ? scoped.filter((order) => order.status === "3") : scoped);
+        return query(filter.$and ? scoped.filter((order) => order.status === "3") :
+          filter.deliveryStatus?.$ne ? scoped.filter((order) => order.deliveryStatus !== "Delivered") : scoped);
       } },
       Review: { find: () => query([]) },
       Payout: { find: () => query([{ amount: 10, status: "paid" }, { amount: 5, status: "pending" }]) },

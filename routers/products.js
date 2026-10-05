@@ -5,6 +5,7 @@ const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const { sendPushToUser } = require('../helpers/push-notify');
+const { isCompanyFulfillableProduct } = require('../helpers/fulfillment-routing');
 
 cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -591,29 +592,14 @@ router.get('/admin/company-fulfillable', requireAdmin, async (req, res) => {
             return res.status(400).json({ success: false, message: 'latitude and longitude are required.' });
         }
 
-        const toRad = (deg) => (deg * Math.PI) / 180;
-        const haversineKm = ([lng1, lat1], [lng2, lat2]) => {
-            const R = 6371;
-            const dLat = toRad(lat2 - lat1);
-            const dLng = toRad(lng2 - lng1);
-            const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
-            return 2 * R * Math.asin(Math.sqrt(a));
-        };
-
         const { Product } = req.dbModels;
         const products = await Product.find({ approvalStatus: 'approved' })
             .populate('category', 'name')
-            .populate('store', 'name location isCompanyOwned')
+            .populate('store', 'name location isCompanyOwned isOpen approvalStatus')
             .sort({ dateCreated: -1 });
 
-        const point = [longitude, latitude];
-        const uncovered = products.filter((product) => {
-            const store = product.store;
-            if (!store || store.isCompanyOwned) return true;
-            const coords = store.location?.coordinates;
-            if (!Array.isArray(coords) || coords.length !== 2) return true;
-            return haversineKm(point, coords) > radiusKm;
-        });
+        const uncovered = products.filter((product) =>
+            isCompanyFulfillableProduct(product, { coordinates: [longitude, latitude] }, radiusKm * 1000));
 
         return res.status(200).json({ success: true, radiusKm, products: uncovered });
     } catch (error) {
@@ -621,15 +607,6 @@ router.get('/admin/company-fulfillable', requireAdmin, async (req, res) => {
         return res.status(500).json({ success: false, message: 'Unable to load unassigned products.' });
     }
 });
-
-const haversineKmDistance = ([lng1, lat1], [lng2, lat2]) => {
-    const toRad = (deg) => (deg * Math.PI) / 180;
-    const R = 6371;
-    const dLat = toRad(lat2 - lat1);
-    const dLng = toRad(lng2 - lng1);
-    const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
-    return 2 * R * Math.asin(Math.sqrt(a));
-};
 
 /**
  * @swagger
@@ -642,7 +619,7 @@ const haversineKmDistance = ([lng1, lat1], [lng2, lat2]) => {
  */
 router.get('/company/my-products', async (req, res) => {
     try {
-        const { Product, Store } = req.dbModels;
+        const { Product, Store, Order } = req.dbModels;
         const userId = req.auth?.userId;
         if (!userId) {
             return res.status(401).json({ success: false, message: 'Unauthorized' });
@@ -653,28 +630,27 @@ router.get('/company/my-products', async (req, res) => {
             return res.status(403).json({ success: false, message: 'Only company stores can access this list.' });
         }
 
-        const coords = store.location?.coordinates;
-        if (!Array.isArray(coords) || coords.length !== 2) {
-            return res.status(400).json({ success: false, message: 'Your store profile has no registered location.' });
-        }
-
         const radiusKm = Number(req.query.radiusKm) > 0 ? Number(req.query.radiusKm) : 10;
+
+        const assignedOrders = await Order.find({
+            store: store._id,
+            status: { $nin: ['3', '4', 'Delivered', 'Cancelled'] },
+            deliveryStatus: { $ne: 'Delivered' },
+        }).select('orderItems').populate('orderItems', 'product').lean();
+        const orderedProductIds = new Set(assignedOrders.flatMap((order) =>
+            (order.orderItems || []).filter((item) => item?.product).map((item) => String(item.product))));
 
         const products = await Product.find({
             approvalStatus: 'approved',
             'companyStoreResponses.store': { $ne: store._id },
         })
             .populate('category', 'name')
-            .populate('store', 'name location isCompanyOwned')
+            .populate('store', 'name location isCompanyOwned isOpen approvalStatus')
             .sort({ dateCreated: -1 });
 
-        const uncovered = products.filter((product) => {
-            const productStore = product.store;
-            if (!productStore) return true;
-            const productCoords = productStore.location?.coordinates;
-            if (!Array.isArray(productCoords) || productCoords.length !== 2) return true;
-            return haversineKmDistance(coords, productCoords) > radiusKm;
-        });
+        const uncovered = products.filter((product) =>
+            orderedProductIds.has(String(product._id)) ||
+            isCompanyFulfillableProduct(product, store.location, radiusKm * 1000));
 
         return res.status(200).json({ success: true, radiusKm, products: uncovered });
     } catch (error) {

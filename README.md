@@ -45,6 +45,8 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
   Supplied IDs are validated against the selected database before order creation.
 - `GET /api/v1/stores/me/dashboard` returns the latest 20 store-scoped orders in
   `recentOrders`, including pending orders, delivery schedules, items, and totals.
+  `activeOrders` includes all unfinished, non-cancelled store-scoped orders, without
+  the recent-history limit or a one-year cutoff. Pending counts use this full list.
   Revenue metrics still count completed orders only; `recentCompletedOrders`
   retains the latest five completed-order summaries.
 - Company-store order scope includes directly assigned orders and orders containing
@@ -53,6 +55,11 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
   another store's items or delivery fees. Rejected responses do not qualify.
   Existing ready responses are supported without reassigning product ownership or
   migrating orders. Inventory remains scoped to store-owned products.
+  Directly assigned company orders show and count all products, regardless of
+  catalog ownership. The fulfillment product queue includes unanswered approved
+  products from active assigned orders even when their catalog partner is nearby.
+  Nearby company-owned products are not treated as partner coverage; ready/rejected
+  products remain out of the action queue and assigned-order details retain all items.
 - Existing `scheduledFor` records need no migration. Orders whose schedule or
   store association was never saved cannot be reconstructed from missing data.
 
@@ -66,9 +73,11 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
   company driver at any distance as a claim/reject offer. Active-order capacity
   still applies; rejecting excludes that driver and passes the offer to the next
   eligible company driver on the next scan.
-- A sole eligible company account is the default fallback. Missing coordinates
-  are never treated as zero distance; when several accounts cannot be ranked,
-  assignment requires a valid location.
+- Company-store fallback uses the nearest eligible store when coordinates allow
+  ranking. Otherwise it retains an eligible preferred company store, or chooses
+  an available company store by stable ID order. Missing coordinates are never
+  treated as zero distance. Company drivers still require a rankable location
+  when multiple eligible drivers are available.
 - Company driver offers appear in `orders/company/my-deliveries`. Claiming is
   required before assignment; accepted deliveries persist even without a live
   socket and appear in `drivers/me/queue`. Store orders appear in

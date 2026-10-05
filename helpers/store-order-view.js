@@ -11,11 +11,12 @@ function summarizeStoreOrder(order, storeId, productIds) {
   let sales = 0;
   let units = 0;
   let matchedItems = 0;
+  const assignedCompanyOrder = productIds && String(order.store) === String(storeId);
   for (const item of order.orderItems || []) {
-    if (isStoreItem(item, storeId, productIds)) {
+    if (assignedCompanyOrder || isStoreItem(item, storeId, productIds)) {
       matchedItems += 1;
       const quantity = Number(item.quantity || 0);
-      sales += Number(item.product.price || 0) * quantity;
+      sales += Number(item.product?.price || 0) * quantity;
       units += quantity;
     }
   }

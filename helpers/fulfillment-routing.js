@@ -37,9 +37,16 @@ async function resolvePickupStore(Store, { customerLocation, preferredStoreId } 
     return partners.find((store) => String(store._id) === String(preferredStoreId)) || partners[0];
   }
   const companies = rankByDistance(stores.filter((store) => store.isCompanyOwned), coordinates);
-  if (companies.length === 1) return companies[0];
-  if (!coordinates) return null;
-  return companies.find((store) => getCoordinates(store.location)) || null;
+  return companies.find((store) => coordinates && getCoordinates(store.location)) ||
+    companies.find((store) => String(store._id) === String(preferredStoreId)) ||
+    companies[0] || null;
+}
+
+function isCompanyFulfillableProduct(product, companyLocation, radiusMeters = STORE_RADIUS_METERS) {
+  const store = product.store;
+  if (!store || store.isCompanyOwned || store.isOpen === false ||
+    (store.approvalStatus && store.approvalStatus !== "approved")) return true;
+  return distanceMeters(getCoordinates(companyLocation), getCoordinates(store.location)) > radiusMeters;
 }
 
 async function findCompanyDriver(Driver, Order, coordinates, { excludedDriverIds = [], maxActiveOrders = 3 } = {}) {
@@ -65,4 +72,5 @@ async function findCompanyDriver(Driver, Order, coordinates, { excludedDriverIds
 module.exports = {
   STORE_RADIUS_METERS, DRIVER_RADIUS_METERS, getCoordinates, distanceMeters,
   resolvePickupStore, findCompanyDriver,
+  isCompanyFulfillableProduct,
 };

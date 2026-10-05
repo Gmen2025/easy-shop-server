@@ -193,3 +193,18 @@ test("company fulfillment summaries do not substitute another store's revenue fo
   const assigned = buildStoreOrderSummary({ ...order, store: "company", orderItems: [] }, "company", new Set());
   assert.equal(assigned.sales, 100);
 });
+
+test("directly assigned company orders count all products, not just catalog-owned or ready products", () => {
+  const summary = buildStoreOrderSummary({
+    store: "company",
+    orderItems: [
+      { quantity: 2, product: { _id: "owned", store: "company", name: "Apples", price: 10 } },
+      { quantity: 3, product: { _id: "unassigned", name: "Coffee", price: 5 } },
+      { quantity: 1, product: { _id: "partner", store: "partner", price: 20 } },
+      { quantity: 1, product: null },
+    ],
+  }, "company", new Set(["owned"]));
+  assert.equal(summary.sales, 55);
+  assert.equal(summary.units, 7);
+  assert.equal(summary.orderItems.length, 4);
+});
