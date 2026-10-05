@@ -35,6 +35,7 @@ test("Routes request keeps the key in headers and returns km, minutes and coordi
       json: async () => ({ error: { message: "Denied server-only-test" } }),
     });
     await assert.rejects(computeDrivingRoute([0, 0], [1, 1]), (error) =>
+      error.status === 502 &&
       error.message.includes("[redacted]") && !error.message.includes("server-only-test"));
     global.fetch = async () => ({ ok: true, json: async () => ({ routes: [] }) });
     await assert.rejects(computeDrivingRoute([0, 0], [1, 1]), (error) => error.status === 422);
@@ -100,4 +101,31 @@ test("unauthorized, suspended, unassigned and invalid-location requests never ca
     await createDriverRouteHandler({ compute: async () => { assert.fail("Google must not be called"); } })(req, res);
     assert.equal(res.statusCode, expected);
   }
+});
+
+test("route failures preserve safe provider diagnostics and rate limits report remaining wait", async () => {
+  let time = 100000;
+  const handler = createDriverRouteHandler({
+    now: () => time,
+    compute: async () => {
+      const error = new Error("Google Routes request failed: Routes API is disabled.");
+      error.status = 502;
+      throw error;
+    },
+  });
+  const first = fixture();
+  await handler(first.req, first.res);
+  assert.equal(first.res.statusCode, 502);
+  assert.match(first.res.body.message, /Routes API is disabled/);
+  time += 4000;
+  const second = fixture();
+  let retryAfter;
+  second.res.set = (name, value) => {
+    assert.equal(name, "Retry-After");
+    retryAfter = value;
+    return second.res;
+  };
+  await handler(second.req, second.res);
+  assert.equal(second.res.statusCode, 429);
+  assert.equal(retryAfter, "6");
 });

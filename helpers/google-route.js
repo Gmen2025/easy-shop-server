@@ -52,8 +52,12 @@ async function computeDrivingRoute(origin, destination) {
   const data = await response.json();
   if (!response.ok) {
     const reason = String(data.error?.message || `HTTP ${response.status}`)
-      .split(key).join("[redacted]");
-    throw new Error(`Google Routes request failed: ${reason}`);
+      .split(key).join("[redacted]")
+      .replace(/AIza[A-Za-z0-9_-]+/g, "[redacted]")
+      .replace(/([?&]key=)[^&\s]+/gi, "$1[redacted]");
+    const error = new Error(`Google Routes request failed: ${reason}`);
+    error.status = 502;
+    throw error;
   }
   const route = data.routes?.[0];
   if (!route) {

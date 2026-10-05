@@ -113,6 +113,12 @@ editing a local environment file does not configure the deployed API.
 Run `node --test tests/google-distance.test.js tests/delivery-distance.test.js`
 for the focused checkout distance tests.
 
+The driver route endpoint uses `GOOGLE_ROUTES_API_KEY` and **Routes API**.
+Google rejection messages are returned with key values redacted so missing API
+enablement, application restrictions or billing can be diagnosed. Its rate limiter
+returns the remaining cooldown in `Retry-After`. Run
+`node --test tests/driver-route.test.js` for route and throttling tests.
+
 - **Runtime**: Node.js
 - **Framework**: Express.js v4.21.2
 - **Database**: MongoDB with Mongoose ORM v8.10.0

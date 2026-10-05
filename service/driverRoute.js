@@ -26,7 +26,7 @@ function createDriverRouteHandler({ compute = computeDrivingRoute, now = Date.no
       for (const [key, expiry] of requests) if (expiry <= time) requests.delete(key);
       const key = `${req.dbName}:${driver._id}`;
       if (requests.has(key)) {
-        res.set("Retry-After", "10");
+        res.set("Retry-After", String(Math.max(1, Math.ceil((requests.get(key) - time) / 1000))));
         return res.status(429).json({ message: "Please wait before requesting another driving route." });
       }
       requests.set(key, time + 10000);
