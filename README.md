@@ -81,6 +81,12 @@ company profiles previously auto-suspended specifically for low balance, without
 changing wallet amounts or clearing manual/other suspensions. Availability,
 capacity and rejection rules still apply. Partner-driver wallet rules are unchanged.
 Validate with `node --test tests/driver-wallet.test.js tests/fulfillment-routing.test.js`.
+The company-driver delivery-list response includes `driverEligibility` with
+approval, availability, suspension and active-capacity status. This explains why
+an approved driver may still receive no offers. Admins can enable an offline
+company driver's availability through the company-driver update endpoint using
+`isAvailable: true`; suspension, approval and capacity checks still apply.
+Validate with `node --test tests/company-driver-availability.test.js`.
 
 - Before company-store dashboard/product requests and each scheduled retry scan,
   unfinished orders with a null or missing pickup store are reconciled within the

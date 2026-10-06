@@ -15,6 +15,7 @@ const {
 const { buildDriverOrderSummary } = require("../helpers/driver-view");
 const { getDeliverySchedule } = require("../helpers/delivery");
 const { createDriverRouteHandler } = require("../service/driverRoute");
+const { MAX_ACTIVE_ORDERS_PER_DRIVER } = require("../service/dispatchService");
 
 router.post("/me/orders/:id/route", createDriverRouteHandler());
 
@@ -227,6 +228,24 @@ router.put("/admin/company-drivers/:id", requireAdmin, async (req, res) => {
     }
 
     const { name, email, phone, password, vehicleType, address } = req.body || {};
+
+    if (req.body.isAvailable !== undefined) {
+      if (typeof req.body.isAvailable !== "boolean") {
+        return res.status(400).json({ success: false, message: "isAvailable must be a boolean." });
+      }
+      if (req.body.isAvailable && (driver.isSuspended || driver.approvalStatus !== "approved")) {
+        return res.status(409).json({ success: false, message: "Only approved, non-suspended drivers can be made available." });
+      }
+      if (req.body.isAvailable) {
+        const activeOrders = await req.dbModels.Order.countDocuments({
+          driver: driver._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] },
+        });
+        if (activeOrders >= MAX_ACTIVE_ORDERS_PER_DRIVER) {
+          return res.status(409).json({ success: false, message: "This driver is already at delivery capacity." });
+        }
+      }
+      driver.isAvailable = req.body.isAvailable;
+    }
 
     if (name !== undefined) driver.name = name;
     if (phone !== undefined) driver.phone = phone;

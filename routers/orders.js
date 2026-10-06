@@ -10,7 +10,8 @@ const { getDeliverySchedule, hasDeliveryPlanChange, resolveDeliveryPlan } = requ
 const { isGoogleDistanceApiConfigured, getDrivingDistanceKm } = require("../helpers/google-distance");
 const { sendPushToUser } = require("../helpers/push-notify");
 const { assignDriverToOrder, syncDriverAvailability, MAX_ACTIVE_ORDERS_PER_DRIVER } = require("../service/dispatchService");
-const { resolvePickupStore, getCoordinates, DRIVER_RADIUS_METERS, findCompanyDriver } = require("../helpers/fulfillment-routing");
+const { resolvePickupStore, getCoordinates, DRIVER_RADIUS_METERS, findCompanyDriver, getCompanyDriverEligibility } = require("../helpers/fulfillment-routing");
+const { restoreCompanyDriversSuspendedForBalance } = require("../helpers/driver-wallet");
 const { getDriverLocation } = require("../helpers/driver-location");
 const { getCommissionRate, debitCommission } = require("../helpers/driver-wallet");
 const { buildDriverOrderSummary, isDropoffRevealed } = require("../helpers/driver-view");
@@ -587,6 +588,7 @@ async function hasNearbyPartnerDriver(Driver, Order, coords) {
 router.get("/company/my-deliveries", async (req, res) => {
   try {
     const { Order, Driver, Store } = req.dbModels;
+    await restoreCompanyDriversSuspendedForBalance(Driver);
     const driver = await Driver.findOne({ user: req.auth?.userId, isCompanyOwned: true });
     if (!driver) {
       return res.status(403).json({ success: false, message: "Only company drivers can access this list." });
@@ -664,7 +666,13 @@ router.get("/company/my-deliveries", async (req, res) => {
       }
     }
 
-    return res.status(200).json({ success: true, radiusKm, orders: results });
+    const activeOrders = await Order.countDocuments({
+      driver: driver._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] },
+    });
+    return res.status(200).json({
+      success: true, radiusKm, orders: results,
+      driverEligibility: getCompanyDriverEligibility(driver, activeOrders, MAX_ACTIVE_ORDERS_PER_DRIVER),
+    });
   } catch (error) {
     console.error("Company driver my-deliveries error:", error);
     return res.status(500).json({ success: false, message: "Unable to load your unassigned deliveries." });

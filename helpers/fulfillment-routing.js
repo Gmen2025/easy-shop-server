@@ -2,6 +2,30 @@ const STORE_RADIUS_METERS = 10000;
 const DRIVER_RADIUS_METERS = 5000;
 const { restoreCompanyDriversSuspendedForBalance } = require("./driver-wallet");
 
+function getCompanyDriverEligibility(driver, activeOrders, maxActiveOrders = 3) {
+  const available = driver.isAvailable === true || driver.availabilityStatus === true;
+  let message = "Eligible for delivery offers. Orders must be pending, ready for dispatch and selected for you.";
+  if (driver.approvalStatus !== "approved") {
+    message = "Your driver profile is not approved for dispatch. Contact the administrator.";
+  } else if (driver.isSuspended) {
+    message = "Your driver profile is suspended. Contact the administrator to check the suspension.";
+  } else if (activeOrders >= maxActiveOrders) {
+    message = `Your delivery capacity is full (${activeOrders}/${maxActiveOrders}). Complete an active delivery before claiming another.`;
+  } else if (!available) {
+    message = "Your driver profile is offline/unavailable. Ask the administrator to enable availability; approval alone does not enable dispatch.";
+  }
+  return {
+    approvalStatus: driver.approvalStatus || "unknown",
+    isAvailable: available,
+    isSuspended: Boolean(driver.isSuspended),
+    activeOrders,
+    maxActiveOrders,
+    eligible: driver.approvalStatus === "approved" && !driver.isSuspended &&
+      available && activeOrders < maxActiveOrders,
+    message,
+  };
+}
+
 function getCoordinates(location) {
   const coordinates = Array.isArray(location?.coordinates)
     ? location.coordinates
@@ -102,6 +126,7 @@ async function findCompanyDriver(Driver, Order, coordinates, { excludedDriverIds
 }
 
 module.exports = {
+  getCompanyDriverEligibility,
   STORE_RADIUS_METERS, DRIVER_RADIUS_METERS, getCoordinates, distanceMeters,
   resolvePickupStore, findCompanyDriver,
   isCompanyFulfillableProduct,
