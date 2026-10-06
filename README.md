@@ -65,6 +65,11 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
 
 ### Automatic company fallback routing
 
+Login and profile responses determine company-store ownership by looking for an
+owner's company-owned store explicitly, rather than inspecting an arbitrary first
+store. Owners who also have a partner store still receive the AdminStore role flag.
+Validate with `node --test tests/company-profile.test.js`.
+
 Company-owned AdminDrivers do not require a prepaid wallet balance to receive
 deliveries. Commission accounting remains unchanged, but low balances do not
 warn or automatically suspend company drivers. Driver selection restores approved

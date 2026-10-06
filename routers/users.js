@@ -130,7 +130,7 @@ router.post("/login", async (req, res) => {
       isCompanyOwnedDriver = Boolean(driver?.isCompanyOwned);
     }
     if (user.isStoreOwner) {
-      const store = await req.dbModels.Store.findOne({ owner: user._id }).select("isCompanyOwned");
+      const store = await req.dbModels.Store.findOne({ owner: user._id, isCompanyOwned: true }).select("isCompanyOwned");
       isCompanyOwnedStore = Boolean(store?.isCompanyOwned);
     }
 
@@ -1566,7 +1566,7 @@ router.get("/profile", async (req, res) => {
       userJson.isCompanyOwnedDriver = Boolean(driver?.isCompanyOwned);
     }
     if (user.isStoreOwner) {
-      const store = await req.dbModels.Store.findOne({ owner: userId }).select("isCompanyOwned");
+      const store = await req.dbModels.Store.findOne({ owner: userId, isCompanyOwned: true }).select("isCompanyOwned");
       userJson.isCompanyOwnedStore = Boolean(store?.isCompanyOwned);
     }
 
