@@ -125,7 +125,12 @@ Validate with `node --test tests/company-driver-availability.test.js`.
   blocking the offer response. Actual claims retain serialized capacity checks.
   Test with `node --test tests/company-offer-response.test.js`.
   Company claims likewise return after assignment persistence and capacity updates,
-  without waiting on push delivery. Partner acceptance notification behavior is unchanged.
+  without waiting on driver/store push delivery. The database-wide assignment lock
+  covers each capacity check and assignment write, but is released before push
+  delivery or the 30-second partner response wait. A partner retry reacquires the
+  lock before selecting and assigning another driver; unrelated company claims do
+  not queue behind partner decisions. Partner acceptance behavior is unchanged.
+  Test with `node --test tests/fulfillment-routing.test.js tests/company-offer-response.test.js`.
 - A 30-second scan retries unassigned deliveries in each allowed database and
   dispatches scheduled/next-day orders only once their delivery window starts.
   Completed, cancelled, and already assigned deliveries are excluded.

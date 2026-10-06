@@ -265,6 +265,127 @@ test("company claim completes after persistence even when user notification look
   }
 });
 
+test("company claim does not wait behind another order's partner response in the same database", async () => {
+  const partner = dispatchFixture({ partner: true });
+  const company = dispatchFixture();
+  company.order.companyOfferDriver = company.candidate._id;
+  let partnerListener;
+  const waitingForPartner = new Promise((resolve) => {
+    partner.io.on = (event, listener) => {
+      partnerListener = listener;
+      resolve();
+    };
+  });
+  const partnerAssignment = assignDriverToOrder(String(partner.order._id), partner.io, {
+    models: partner.models, dbName: "E_Shopping",
+  });
+  await waitingForPartner;
+  let timer;
+  try {
+    const result = await Promise.race([
+      assignDriverToOrder(String(company.order._id), company.io, {
+        models: company.models, dbName: "E_Shopping",
+        companyDriverId: String(company.candidate._id),
+      }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Company claim queued behind partner response")), 200);
+      }),
+    ]);
+    assert.equal(result.success, true);
+    assert.equal(String(company.order.driver), String(company.candidate._id));
+  } finally {
+    clearTimeout(timer);
+    partnerListener({
+      orderId: String(partner.order._id),
+      driverId: String(partner.candidate._id), accepted: true,
+    });
+    await partnerAssignment;
+  }
+});
+
+test("company claim persists a missing pickup store without waiting on its notification", async () => {
+  const f = dispatchFixture();
+  const pickupStore = { ...f.order.store, owner: "store-owner" };
+  f.order.store = null;
+  f.order.customerLocation = { coordinates: [0, 0] };
+  f.order.companyOfferDriver = f.candidate._id;
+  f.models.Store = storeModel([pickupStore]);
+  f.models.User.findById = () => ({ select: () => new Promise(() => {}) });
+  const update = f.models.Order.findOneAndUpdate;
+  f.models.Order.findOneAndUpdate = (filter, changes) => {
+    if (changes.store) {
+      assert.equal(filter.store, null);
+      f.order.store = pickupStore;
+      return query(f.order);
+    }
+    return update(filter, changes);
+  };
+  let timer;
+  try {
+    const result = await Promise.race([
+      assignDriverToOrder(String(f.order._id), f.io, {
+        models: f.models, dbName: "missing-store-test", companyDriverId: String(f.candidate._id),
+      }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Claim blocked on store notification")), 200);
+      }),
+    ]);
+    assert.equal(result.success, true);
+    assert.equal(f.order.deliveryStatus, "Driver Assigned");
+    assert.equal(f.order.store, pickupStore);
+  } finally {
+    clearTimeout(timer);
+  }
+});
+
+test("concurrent company claims still serialize capacity checks and cannot exceed the driver limit", async () => {
+  const first = dispatchFixture();
+  const second = dispatchFixture();
+  second.candidate._id = first.candidate._id;
+  const fixtures = [first, second];
+  for (const f of fixtures) {
+    f.order.companyOfferDriver = f.candidate._id;
+    f.models.Order.countDocuments = async () => {
+      const activeCount = 2 + fixtures.filter((entry) => entry.order.driver).length;
+      await new Promise(setImmediate);
+      return activeCount;
+    };
+    f.models.Driver.findByIdAndUpdate = async (id, update) => {
+      Object.assign(f.candidate, update);
+      return f.candidate;
+    };
+  }
+  const results = await Promise.all(fixtures.map((f) =>
+    assignDriverToOrder(String(f.order._id), f.io, {
+      models: f.models, dbName: "capacity-test", companyDriverId: String(f.candidate._id),
+    })));
+  assert.equal(results.filter((result) => result.success).length, 1);
+  assert.equal(fixtures.filter((f) => f.order.driver).length, 1);
+  assert.equal(first.order.queueSequence, 3);
+  assert.equal(first.candidate.isAvailable, false);
+});
+
+test("a rejected partner is retried through the serialized assignment path", async () => {
+  const f = dispatchFixture({ partner: true });
+  const company = dispatchFixture().candidate;
+  f.models.Driver.find = (filter) => query(filter.isCompanyOwned === true
+    ? [company]
+    : filter._id?.$nin?.some((id) => String(id) === String(f.candidate._id)) ? [] : [f.candidate]);
+  f.models.Driver.findById = async () => f.candidate;
+  f.io.on = (event, listener) => queueMicrotask(() => listener({
+    orderId: String(f.order._id), driverId: String(f.candidate._id), accepted: false,
+  }));
+  const result = await assignDriverToOrder(String(f.order._id), f.io, {
+    models: f.models, dbName: "partner-retry-test",
+  });
+  assert.equal(result.success, true);
+  assert.equal(result.offered, true);
+  assert.equal(result.driverId, String(company._id));
+  assert.equal(f.order.driver, null);
+  assert.equal(f.order.deliveryStatus, "Pending");
+  assert.equal(f.order.companyOfferDriver, company._id);
+});
+
 test("eligible nearby partners take priority over company drivers", async () => {
   const fixture = dispatchFixture({ partner: true });
   const result = await assignDriverToOrder(String(fixture.order._id), fixture.io, { models: fixture.models });

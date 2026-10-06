@@ -283,7 +283,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
 
   const attemptedDriverIds = new Set();
 
-  while (true) {
+  const prepareAssignment = async () => {
     const order = await Order.findById(orderId)
       .populate("store")
       .populate("customer", "name phone street apartment city zip country")
@@ -309,12 +309,14 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
       store = await resolvePickupStore(Store, { customerLocation: order.customerLocation, preferredStoreId });
       if (store) {
         const assignedStore = await Order.findOneAndUpdate({ _id: order._id, store: null }, { store: store._id });
-        if (!assignedStore) continue;
+        if (!assignedStore) return { retry: true };
         if (store.isCompanyOwned && store.owner) {
-          await sendPushToUser({
+          sendPushToUser({
             User, userId: store.owner, title: "New company store order",
             body: `Order #${order._id} is assigned to your store.`,
             data: { type: "store_order_assigned", orderId: String(order._id) },
+          }).catch((error) => {
+            console.error(`[Dispatch] Store assignment notification failed for ${order._id}:`, error.message);
           });
         }
       }
@@ -393,7 +395,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
 
     const activeCountBeforeAssignment = await countActiveOrders(Order, candidate._id);
     if (activeCountBeforeAssignment >= MAX_ACTIVE_ORDERS_PER_DRIVER) {
-      continue;
+      return { retry: true };
     }
 
     const lockDriver = await Driver.findOneAndUpdate(
@@ -408,7 +410,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
     );
 
     if (!lockDriver) {
-      continue;
+      return { retry: true };
     }
 
     // Reuse the driver's current batch id (if they already have active orders) so the
@@ -462,13 +464,23 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
         queueBatchId: null,
         queueSequence: 0,
       });
-      continue;
+      return { retry: true };
     }
 
     // Cap capacity: once this assignment fills the driver's slots, stop routing new orders to them.
     if (queueSequence >= MAX_ACTIVE_ORDERS_PER_DRIVER) {
       await markDriverAvailability(Driver, lockDriver._id, false);
     }
+
+    return { updatedOrder, lockDriver, socketId, queueSequence };
+  };
+
+  while (true) {
+    // Serialize capacity checks and persistence, not push delivery or partner decisions.
+    const assignment = await serializeDriverAssignment(dbName, prepareAssignment);
+    if (assignment.retry) continue;
+    if (!assignment.updatedOrder) return assignment;
+    const { updatedOrder, lockDriver, socketId, queueSequence } = assignment;
 
     // Pre-acceptance/pre-pickup payload: approximate drop zone only, no exact address or phone.
     const driverSummary = buildDriverOrderSummary(updatedOrder, { forceReveal: Boolean(lockDriver.isCompanyOwned) });
@@ -541,7 +553,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
       };
     }
 
-    await Order.findByIdAndUpdate(order._id, {
+    await Order.findByIdAndUpdate(updatedOrder._id, {
       status: "Pending",
       deliveryStatus: "Pending",
       dispatchStatus: "pending_assignment",
@@ -554,10 +566,9 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
 }
 
 const dispatchLocks = new Map();
-async function serializeDriverAssignment(orderId, ioInstance, options = {}) {
-  const dbName = options.dbName || DEFAULT_DB_NAME;
+async function serializeDriverAssignment(dbName, prepareAssignment) {
   const previous = dispatchLocks.get(dbName) || Promise.resolve();
-  const job = previous.then(() => assignDriverToOrder(orderId, ioInstance, options));
+  const job = previous.then(prepareAssignment);
   const settled = job.then(() => undefined, () => undefined);
   dispatchLocks.set(dbName, settled);
   try {
@@ -567,7 +578,7 @@ async function serializeDriverAssignment(orderId, ioInstance, options = {}) {
   }
 }
 
-exports.assignDriverToOrder = serializeDriverAssignment;
+exports.assignDriverToOrder = assignDriverToOrder;
 exports.offerCompanyDelivery = offerCompanyDelivery;
 exports.DRIVER_REQUEST_EVENT = DRIVER_REQUEST_EVENT;
 exports.DRIVER_RESPONSE_EVENT = DRIVER_RESPONSE_EVENT;
