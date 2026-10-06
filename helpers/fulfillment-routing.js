@@ -1,5 +1,6 @@
 const STORE_RADIUS_METERS = 10000;
 const DRIVER_RADIUS_METERS = 5000;
+const { restoreCompanyDriversSuspendedForBalance } = require("./driver-wallet");
 
 function getCoordinates(location) {
   const coordinates = Array.isArray(location?.coordinates)
@@ -80,6 +81,7 @@ function isCompanyFulfillableProduct(product, companyLocation, radiusMeters = ST
 }
 
 async function findCompanyDriver(Driver, Order, coordinates, { excludedDriverIds = [], maxActiveOrders = 3 } = {}) {
+  await restoreCompanyDriversSuspendedForBalance(Driver);
   const drivers = await Driver.find({
     isCompanyOwned: true,
     approvalStatus: "approved",

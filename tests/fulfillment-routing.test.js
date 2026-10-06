@@ -134,7 +134,7 @@ test("company driver fallback selects the nearest approved available driver with
     store("offline", 0, true, { isAvailable: false }),
     store("suspended", 0, true, { isSuspended: true }),
   ].map((entry) => ({ isAvailable: true, ...entry }));
-  const Driver = { find: (filter) => {
+  const Driver = { updateMany: async () => {}, find: (filter) => {
     assert.equal(filter.approvalStatus, "approved");
     assert.equal(filter.isSuspended.$ne, true);
     assert.equal(filter.location, undefined);
@@ -147,7 +147,7 @@ test("company driver fallback selects the nearest approved available driver with
 });
 
 test("the sole company driver with spare capacity is the default even when another driver is full", async () => {
-  const Driver = { find: () => query([
+  const Driver = { updateMany: async () => {}, find: () => query([
     { _id: "full", location: { coordinates: [0, 0] } },
     { _id: "sole" },
   ]) };
@@ -187,6 +187,7 @@ function dispatchFixture({ partner = false, full = false, assigned = false, futu
       findByIdAndUpdate: async (id, update) => Object.assign(order, update),
     },
     Driver: {
+      updateMany: async () => {},
       find: (filter) => {
         if (filter.isCompanyOwned === true) {
           companyQueries += 1;
@@ -358,6 +359,52 @@ test("Ethio sole company driver dashboard recovers pending orders without an exi
   assert.equal(response.body.orders[0].items[0].name, "Ordered product");
   assert.equal(String(fixture.order.companyOfferDriver), String(fixture.candidate._id));
   assert.equal(fixture.order.driver, null, "Dashboard recovery must offer, not auto-claim");
+});
+
+test("Ethio dashboard restores a sole AdminDriver auto-suspended for an empty wallet and offers pending products", async () => {
+  const fixture = dispatchFixture();
+  Object.assign(fixture.candidate, {
+    isSuspended: true, autoSuspended: true, isAvailable: false, walletBalance: -20,
+    suspensionReason: "Wallet balance too low to cover platform commission.",
+  });
+  fixture.order.companyOfferDriver = null;
+  fixture.order.companyDriverResponses = [];
+  fixture.order.customerLocation = { coordinates: [38.7906911, 8.993362] };
+  fixture.order.orderItems = [{ quantity: 1, product: { name: "Pending Ethio product" } }];
+  fixture.models.Driver.updateMany = async (filter, update) => {
+    assert.equal(filter.autoSuspended, true);
+    assert.equal(filter.isCompanyOwned, true);
+    if (fixture.candidate.isSuspended && fixture.candidate.autoSuspended &&
+      fixture.candidate.suspensionReason === filter.suspensionReason) {
+      Object.assign(fixture.candidate, update.$set);
+    }
+  };
+  const findDrivers = fixture.models.Driver.find;
+  fixture.models.Driver.find = (filter) => {
+    if (filter.isCompanyOwned === true) {
+      assert.equal(fixture.candidate.isSuspended, false);
+      assert.equal(fixture.candidate.isAvailable, true);
+    }
+    return findDrivers(filter);
+  };
+  fixture.models.Driver.findOne = () => query(fixture.candidate);
+  fixture.models.Order.find = (filter) => query(filter.$or ? [fixture.order] : []);
+  const handler = orderRouter.stack.find((entry) =>
+    entry.route?.path === "/company/my-deliveries" && entry.route.methods.get).route.stack.at(-1).handle;
+  const response = {
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.body = body; return this; },
+  };
+  await handler({
+    auth: { userId: fixture.candidate.user }, dbName: "E_Shopping",
+    dbModels: fixture.models, app: { get: () => fixture.io },
+  }, response);
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.orders.length, 1);
+  assert.equal(response.body.orders[0].items[0].name, "Pending Ethio product");
+  assert.equal(fixture.candidate.walletBalance, -20);
+  assert.equal(fixture.candidate.isSuspended, false);
+  assert.equal(String(fixture.order.companyOfferDriver), String(fixture.candidate._id));
 });
 
 test("dashboard recovery leaves unoffered deliveries for nearby partner drivers", async () => {

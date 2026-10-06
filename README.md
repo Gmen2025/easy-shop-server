@@ -65,6 +65,14 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
 
 ### Automatic company fallback routing
 
+Company-owned AdminDrivers do not require a prepaid wallet balance to receive
+deliveries. Commission accounting remains unchanged, but low balances do not
+warn or automatically suspend company drivers. Driver selection restores approved
+company profiles previously auto-suspended specifically for low balance, without
+changing wallet amounts or clearing manual/other suspensions. Availability,
+capacity and rejection rules still apply. Partner-driver wallet rules are unchanged.
+Validate with `node --test tests/driver-wallet.test.js tests/fulfillment-routing.test.js`.
+
 - Before company-store dashboard/product requests and each scheduled retry scan,
   unfinished orders with a null or missing pickup store are reconciled within the
   selected database. This includes legacy orders with assigned drivers, picked-up

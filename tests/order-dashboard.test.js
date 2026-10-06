@@ -271,6 +271,7 @@ test("company-driver deliveries and assigned queues retain scheduled dates", asy
     query: {},
     dbModels: {
       Driver: {
+        updateMany: async () => {},
         findOne: (filter) => query(filter.user ? driver : null),
         find: (filter) => query(filter.isCompanyOwned === true ? [driver] : []),
       },

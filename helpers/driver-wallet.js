@@ -25,6 +25,9 @@ function getSuspendThreshold() {
 }
 
 async function checkBalanceThresholds({ User, driver }) {
+  if (driver.isCompanyOwned) {
+    return reinstateDriverIfEligible({ User, driver });
+  }
   const lowThreshold = getLowBalanceThreshold();
   const suspendThreshold = getSuspendThreshold();
   const now = new Date();
@@ -69,7 +72,10 @@ async function checkBalanceThresholds({ User, driver }) {
 
 async function reinstateDriverIfEligible({ Driver, User, driver }) {
   // Only auto-reinstate drivers the system suspended for low balance, never an admin-issued suspension.
-  if (driver.isSuspended && driver.autoSuspended && driver.walletBalance > getSuspendThreshold()) {
+  if (driver.isSuspended && driver.autoSuspended &&
+    (driver.isCompanyOwned
+      ? driver.suspensionReason === "Wallet balance too low to cover platform commission."
+      : driver.walletBalance > getSuspendThreshold())) {
     driver.isSuspended = false;
     driver.autoSuspended = false;
     driver.suspensionReason = "";
@@ -82,11 +88,31 @@ async function reinstateDriverIfEligible({ Driver, User, driver }) {
       User,
       userId: driver.user,
       title: "You're back online",
-      body: "Your wallet balance has been topped up. You are now live and ready to accept deliveries.",
+      body: driver.isCompanyOwned
+        ? "Company drivers do not require a prepaid wallet balance. Your low-balance suspension has been removed."
+        : "Your wallet balance has been topped up. You are now live and ready to accept deliveries.",
       data: { type: "driver_reinstated", driverId: String(driver._id) },
     });
   }
   return driver;
+}
+
+async function restoreCompanyDriversSuspendedForBalance(Driver) {
+  return Driver.updateMany({
+    isCompanyOwned: true,
+    approvalStatus: "approved",
+    isSuspended: true,
+    autoSuspended: true,
+    suspensionReason: "Wallet balance too low to cover platform commission.",
+  }, { $set: {
+    isSuspended: false,
+    autoSuspended: false,
+    suspensionReason: "",
+    suspendedAt: null,
+    isAvailable: true,
+    availabilityStatus: true,
+    lowBalanceNotifiedAt: null,
+  } });
 }
 
 async function creditWallet({ Driver, WalletTransaction, User, driverId, amount, provider, reference, notes, createdBy, type = "deposit" }) {
@@ -157,4 +183,5 @@ module.exports = {
   debitCommission,
   checkBalanceThresholds,
   reinstateDriverIfEligible,
+  restoreCompanyDriversSuspendedForBalance,
 };
