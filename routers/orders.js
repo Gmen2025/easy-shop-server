@@ -598,7 +598,7 @@ router.get("/company/my-deliveries", async (req, res) => {
       driver: null,
       dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] },
       "companyDriverResponses.driver": { $ne: driver._id },
-      companyOfferDriver: driver._id,
+      $or: [{ companyOfferDriver: driver._id }, { companyOfferDriver: null }],
       deliveryStatus: "Pending",
       status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
     })
@@ -622,7 +622,19 @@ router.get("/company/my-deliveries", async (req, res) => {
       if (!orderCoords) continue;
       const excludedDriverIds = (order.companyDriverResponses || [])
         .filter((entry) => entry.status === "rejected").map((entry) => entry.driver);
+      if (!order.companyOfferDriver && await hasNearbyPartnerDriver(Driver, Order, orderCoords)) {
+        continue;
+      }
       const fallback = await findCompanyDriver(Driver, Order, orderCoords, { excludedDriverIds, maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER });
+      if (!order.companyOfferDriver && fallback && String(fallback._id) === String(driver._id)) {
+        const result = await assignDriverToOrder(String(order._id), req.app.get("io"), {
+          dbName: req.dbName, models: req.dbModels,
+        });
+        if (!result.success || !result.offered || String(result.driverId) !== String(driver._id)) {
+          continue;
+        }
+        order.companyOfferDriver = driver._id;
+      }
       if (fallback && String(fallback._id) === String(driver._id) &&
         String(order.companyOfferDriver) === String(driver._id)) {
         results.push({

@@ -272,8 +272,8 @@ test("the offered delivery is listed with claim/reject data and rejection passes
   fixture.order.companyDriverResponses = [];
   fixture.models.Driver.findOne = () => query(fixture.candidate);
   fixture.models.Order.find = (filter) => {
-    if (filter.companyOfferDriver) {
-      assert.equal(String(filter.companyOfferDriver), String(fixture.candidate._id));
+    if (filter.$or) {
+      assert.equal(String(filter.$or[0].companyOfferDriver), String(fixture.candidate._id));
       return query([fixture.order]);
     }
     return query([]);
@@ -321,6 +321,91 @@ test("the offered delivery is listed with claim/reject data and rejection passes
   assert.equal(next.offered, true);
   assert.equal(String(fixture.order.companyOfferDriver), String(nextDriver._id));
   assert.equal(fixture.order.driver, null);
+});
+
+test("Ethio sole company driver dashboard recovers pending orders without an existing offer", async () => {
+  const fixture = dispatchFixture();
+  delete fixture.candidate.location;
+  fixture.order.companyOfferDriver = null;
+  fixture.order.companyDriverResponses = [];
+  fixture.order.dispatchStatus = "assignment_failed";
+  fixture.order.orderItems = [{ quantity: 2, product: { name: "Ordered product", image: "product.jpg" } }];
+  fixture.models.Driver.findOne = () => query(fixture.candidate);
+  fixture.models.Order.find = (filter) => {
+    if (filter.$or) {
+      assert.equal(filter.driver, null);
+      assert.equal(filter.deliveryStatus, "Pending");
+      assert.deepEqual(filter.$or, [
+        { companyOfferDriver: fixture.candidate._id }, { companyOfferDriver: null },
+      ]);
+      return query([fixture.order]);
+    }
+    return query([]);
+  };
+  const handler = orderRouter.stack.find((entry) =>
+    entry.route?.path === "/company/my-deliveries" && entry.route.methods.get).route.stack.at(-1).handle;
+  const response = {
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.body = body; return this; },
+  };
+  await handler({
+    auth: { userId: fixture.candidate.user }, dbName: "E_Shopping",
+    dbModels: fixture.models, app: { get: () => fixture.io },
+  }, response);
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.orders.length, 1);
+  assert.equal(response.body.orders[0].itemCount, 2);
+  assert.equal(response.body.orders[0].items[0].name, "Ordered product");
+  assert.equal(String(fixture.order.companyOfferDriver), String(fixture.candidate._id));
+  assert.equal(fixture.order.driver, null, "Dashboard recovery must offer, not auto-claim");
+});
+
+test("dashboard recovery leaves unoffered deliveries for nearby partner drivers", async () => {
+  const fixture = dispatchFixture({ partner: true });
+  const companyDriver = { ...fixture.candidate, _id: new mongoose.Types.ObjectId(), isCompanyOwned: true };
+  fixture.order.companyOfferDriver = null;
+  fixture.order.companyDriverResponses = [];
+  fixture.models.Driver.findOne = () => query(companyDriver);
+  fixture.models.Order.find = (filter) => query(filter.$or ? [fixture.order] : []);
+  const handler = orderRouter.stack.find((entry) =>
+    entry.route?.path === "/company/my-deliveries" && entry.route.methods.get).route.stack.at(-1).handle;
+  const response = {
+    status(code) { this.statusCode = code; return this; },
+    json(body) { this.body = body; return this; },
+  };
+  await handler({
+    auth: { userId: companyDriver.user }, dbName: "E_Shopping",
+    dbModels: fixture.models, app: { get: () => fixture.io },
+  }, response);
+  assert.equal(response.statusCode, 200);
+  assert.equal(response.body.orders.length, 0);
+  assert.equal(fixture.counts().assignments, 0);
+  assert.equal(fixture.counts().companyQueries, 0);
+});
+
+test("dashboard recovery does not offer deliveries to a full or rejecting company driver", async () => {
+  for (const rejected of [false, true]) {
+    const fixture = dispatchFixture({ full: !rejected });
+    fixture.order.companyOfferDriver = null;
+    fixture.order.companyDriverResponses = rejected
+      ? [{ driver: fixture.candidate._id, status: "rejected" }] : [];
+    fixture.models.Driver.findOne = () => query(fixture.candidate);
+    fixture.models.Order.find = (filter) => query(filter.$or ? [fixture.order] : []);
+    const handler = orderRouter.stack.find((entry) =>
+      entry.route?.path === "/company/my-deliveries" && entry.route.methods.get).route.stack.at(-1).handle;
+    const response = {
+      status(code) { this.statusCode = code; return this; },
+      json(body) { this.body = body; return this; },
+    };
+    await handler({
+      auth: { userId: fixture.candidate.user }, dbName: "E_Shopping",
+      dbModels: fixture.models, app: { get: () => fixture.io },
+    }, response);
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.body.orders.length, 0);
+    assert.equal(fixture.counts().assignments, 0);
+    assert.equal(fixture.order.companyOfferDriver, null);
+  }
 });
 
 test("full company drivers leave deliveries pending with an explicit assignment failure", async () => {

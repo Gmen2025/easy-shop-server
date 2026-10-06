@@ -89,6 +89,13 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
   required before assignment; accepted deliveries persist even without a live
   socket and appear in `drivers/me/queue`. Store orders appear in
   `stores/me/dashboard`. Push notifications go to the assigned company accounts.
+- Refreshing the company-driver delivery list also recovers pending/failed
+  deliveries that have no company offer yet, using the same dispatch service
+  within the selected database. Recovery preserves nearby-partner priority,
+  approval, availability, suspension, capacity and rejection rules; it creates
+  an offer, never auto-claims the order. The sole eligible company driver does
+  not need GPS to rank against other drivers, but the order still needs valid
+  pickup/customer coordinates. Future scheduled orders remain excluded until due.
 - A 30-second scan retries unassigned deliveries in each allowed database and
   dispatches scheduled/next-day orders only once their delivery window starts.
   Completed, cancelled, and already assigned deliveries are excluded.
