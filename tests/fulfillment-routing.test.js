@@ -351,7 +351,7 @@ test("Ethio sole company driver dashboard recovers pending orders without an exi
   };
   await handler({
     auth: { userId: fixture.candidate.user }, dbName: "E_Shopping",
-    dbModels: fixture.models, app: { get: () => fixture.io },
+    dbModels: fixture.models,
   }, response);
   assert.equal(response.statusCode, 200);
   assert.equal(response.body.orders.length, 1);

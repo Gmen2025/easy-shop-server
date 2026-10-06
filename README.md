@@ -119,6 +119,11 @@ Validate with `node --test tests/company-driver-availability.test.js`.
   an offer, never auto-claims the order. The sole eligible company driver does
   not need GPS to rank against other drivers, but the order still needs valid
   pickup/customer coordinates. Future scheduled orders remain excluded until due.
+- Dashboard offer recovery uses the shared conditional offer write directly,
+  without waiting behind the database-wide assignment queue or a partner's
+  response timer. Push notification delivery runs after persistence without
+  blocking the offer response. Actual claims retain serialized capacity checks.
+  Test with `node --test tests/company-offer-response.test.js`.
 - A 30-second scan retries unassigned deliveries in each allowed database and
   dispatches scheduled/next-day orders only once their delivery window starts.
   Completed, cancelled, and already assigned deliveries are excluded.

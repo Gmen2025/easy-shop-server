@@ -245,6 +245,30 @@ async function syncDriverAvailability(Driver, Order, driverId) {
   }
 }
 
+async function offerCompanyDelivery({ Order, User, order, candidate }) {
+  if (String(order.companyOfferDriver) !== String(candidate._id)) {
+    const offered = await Order.findOneAndUpdate({
+      _id: order._id, driver: null, deliveryStatus: "Pending",
+      companyDriverResponses: { $not: { $elemMatch: { driver: candidate._id, status: "rejected" } } },
+      $and: [{ $or: [{ companyOfferDriver: null }, { companyOfferDriver: order.companyOfferDriver || null }] }],
+      status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
+      $or: [
+        { dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] } },
+        { dispatchStatus: "scheduled", deliveryWindowStart: { $lte: new Date() } },
+      ],
+    }, { companyOfferDriver: candidate._id, dispatchStatus: "pending_assignment" }, { new: true });
+    if (!offered) return { success: false, reason: "order_already_assigned" };
+    sendPushToUser({
+      User, userId: candidate.user, title: "Company delivery available",
+      body: `Order #${order._id} is available to claim or reject.`,
+      data: { type: "company_delivery_offer", orderId: String(order._id) },
+    }).catch((error) => {
+      console.error(`[Dispatch] Company offer notification failed for ${order._id}:`, error.message);
+    });
+  }
+  return { success: true, offered: true, orderId: String(order._id), driverId: String(candidate._id) };
+}
+
 async function assignDriverToOrder(orderId, ioInstance, options = {}) {
   if (!orderId) {
     throw new Error("orderId is required.");
@@ -364,24 +388,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
     attemptedDriverIds.add(String(candidate._id));
 
     if (candidate.isCompanyOwned && !options.companyDriverId) {
-      if (String(order.companyOfferDriver) !== String(candidate._id)) {
-        const offered = await Order.findOneAndUpdate({
-          _id: order._id, driver: null, deliveryStatus: "Pending",
-          companyDriverResponses: { $not: { $elemMatch: { driver: candidate._id, status: "rejected" } } },
-          status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
-          $or: [
-            { dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] } },
-            { dispatchStatus: "scheduled", deliveryWindowStart: { $lte: new Date() } },
-          ],
-        }, { companyOfferDriver: candidate._id, dispatchStatus: "pending_assignment" }, { new: true });
-        if (!offered) return { success: false, reason: "order_already_assigned" };
-        await sendPushToUser({
-          User, userId: candidate.user, title: "Company delivery available",
-          body: `Order #${order._id} is available to claim or reject.`,
-          data: { type: "company_delivery_offer", orderId: String(order._id) },
-        });
-      }
-      return { success: true, offered: true, orderId: String(order._id), driverId: String(candidate._id) };
+      return offerCompanyDelivery({ Order, User, order, candidate });
     }
 
     const activeCountBeforeAssignment = await countActiveOrders(Order, candidate._id);
@@ -555,6 +562,7 @@ async function serializeDriverAssignment(orderId, ioInstance, options = {}) {
 }
 
 exports.assignDriverToOrder = serializeDriverAssignment;
+exports.offerCompanyDelivery = offerCompanyDelivery;
 exports.DRIVER_REQUEST_EVENT = DRIVER_REQUEST_EVENT;
 exports.DRIVER_RESPONSE_EVENT = DRIVER_RESPONSE_EVENT;
 exports.syncDriverAvailability = syncDriverAvailability;

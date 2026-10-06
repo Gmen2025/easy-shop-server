@@ -9,7 +9,7 @@ const { sendMailSafe } = require("../helpers/mailer");
 const { getDeliverySchedule, hasDeliveryPlanChange, resolveDeliveryPlan } = require("../helpers/delivery");
 const { isGoogleDistanceApiConfigured, getDrivingDistanceKm } = require("../helpers/google-distance");
 const { sendPushToUser } = require("../helpers/push-notify");
-const { assignDriverToOrder, syncDriverAvailability, MAX_ACTIVE_ORDERS_PER_DRIVER } = require("../service/dispatchService");
+const { assignDriverToOrder, offerCompanyDelivery, syncDriverAvailability, MAX_ACTIVE_ORDERS_PER_DRIVER } = require("../service/dispatchService");
 const { resolvePickupStore, getCoordinates, DRIVER_RADIUS_METERS, findCompanyDriver, getCompanyDriverEligibility } = require("../helpers/fulfillment-routing");
 const { restoreCompanyDriversSuspendedForBalance } = require("../helpers/driver-wallet");
 const { getDriverLocation } = require("../helpers/driver-location");
@@ -629,8 +629,8 @@ router.get("/company/my-deliveries", async (req, res) => {
       }
       const fallback = await findCompanyDriver(Driver, Order, orderCoords, { excludedDriverIds, maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER });
       if (!order.companyOfferDriver && fallback && String(fallback._id) === String(driver._id)) {
-        const result = await assignDriverToOrder(String(order._id), req.app.get("io"), {
-          dbName: req.dbName, models: req.dbModels,
+        const result = await offerCompanyDelivery({
+          Order, User: req.dbModels.User, order, candidate: fallback,
         });
         if (!result.success || !result.offered || String(result.driverId) !== String(driver._id)) {
           continue;
