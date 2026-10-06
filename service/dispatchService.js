@@ -483,7 +483,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
       autoAssigned: Boolean(lockDriver.isCompanyOwned),
     });
 
-    await sendPushToTokens({
+    const assignmentNotification = sendPushToTokens({
       tokens: Array.isArray(lockDriver.pushTokens) ? lockDriver.pushTokens : [],
       title: queueSequence > 1 ? "New delivery added to your route" : "New delivery assigned",
       body: `Order #${updatedOrder._id} is ready for pickup.`,
@@ -496,12 +496,17 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
     });
 
     if (lockDriver.isCompanyOwned) {
-      await sendPushToUser({
+      assignmentNotification.catch((error) => {
+        console.error(`[Dispatch] Assignment notification failed for ${updatedOrder._id}:`, error.message);
+      });
+      sendPushToUser({
         User,
         userId: lockDriver.user,
         title: "New company delivery assigned",
         body: `Order #${updatedOrder._id} is now in your delivery queue.`,
         data: { type: "delivery_assigned", orderId: String(updatedOrder._id) },
+      }).catch((error) => {
+        console.error(`[Dispatch] Company assignment notification failed for ${updatedOrder._id}:`, error.message);
       });
       return {
         success: true, orderId: String(updatedOrder._id),
@@ -509,6 +514,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
       };
     }
 
+    await assignmentNotification;
     const decision = await waitForDriverDecision(ioInstance, {
       orderId: String(updatedOrder._id),
       driverId: String(lockDriver._id),

@@ -231,6 +231,7 @@ test("accepting a company offer assigns the driver without needing a live socket
   const result = await assignDriverToOrder(String(fixture.order._id), fixture.io, {
     models: fixture.models, companyDriverId: String(fixture.candidate._id),
   });
+
   assert.equal(result.success, true);
   assert.equal(result.companyFallback, true);
   assert.equal(result.socketId, null);
@@ -240,6 +241,28 @@ test("accepting a company offer assigns the driver without needing a live socket
   assert.equal(fixture.order.queueSequence, 1);
   assert.ok(fixture.order.queueBatchId);
   assert.equal(fixture.order.companyOfferDriver, null);
+});
+
+test("company claim completes after persistence even when user notification lookup stalls", async () => {
+  const fixture = dispatchFixture();
+  fixture.order.companyOfferDriver = fixture.candidate._id;
+  fixture.models.User.findById = () => ({ select: () => new Promise(() => {}) });
+  let timer;
+  try {
+    const result = await Promise.race([
+      assignDriverToOrder(String(fixture.order._id), fixture.io, {
+        models: fixture.models, companyDriverId: String(fixture.candidate._id),
+      }),
+      new Promise((resolve, reject) => {
+        timer = setTimeout(() => reject(new Error("Claim blocked on notification")), 200);
+      }),
+    ]);
+    assert.equal(result.success, true);
+    assert.equal(fixture.order.deliveryStatus, "Driver Assigned");
+    assert.equal(String(fixture.order.driver), String(fixture.candidate._id));
+  } finally {
+    clearTimeout(timer);
+  }
 });
 
 test("eligible nearby partners take priority over company drivers", async () => {

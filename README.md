@@ -124,6 +124,8 @@ Validate with `node --test tests/company-driver-availability.test.js`.
   response timer. Push notification delivery runs after persistence without
   blocking the offer response. Actual claims retain serialized capacity checks.
   Test with `node --test tests/company-offer-response.test.js`.
+  Company claims likewise return after assignment persistence and capacity updates,
+  without waiting on push delivery. Partner acceptance notification behavior is unchanged.
 - A 30-second scan retries unassigned deliveries in each allowed database and
   dispatches scheduled/next-day orders only once their delivery window starts.
   Completed, cancelled, and already assigned deliveries are excluded.
