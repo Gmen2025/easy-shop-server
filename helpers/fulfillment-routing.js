@@ -9,6 +9,9 @@ function getCompanyDriverEligibility(driver, activeOrders, maxActiveOrders = 3) 
     message = "Your driver profile is not approved for dispatch. Contact the administrator.";
   } else if (driver.isSuspended) {
     message = "Your driver profile is suspended. Contact the administrator to check the suspension.";
+    if (driver.suspensionReason?.trim()) {
+      message += ` Reason: ${driver.suspensionReason.trim()}`;
+    }
   } else if (activeOrders >= maxActiveOrders) {
     message = `Your delivery capacity is full (${activeOrders}/${maxActiveOrders}). Complete an active delivery before claiming another.`;
   } else if (!available) {

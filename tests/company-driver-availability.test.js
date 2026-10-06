@@ -20,6 +20,15 @@ test("dispatch eligibility distinguishes approval, suspension, offline status an
   }
 });
 
+test("suspended drivers see their saved reason without bypassing suspension", () => {
+  const result = getCompanyDriverEligibility({
+    approvalStatus: "approved", isAvailable: false, isSuspended: true,
+    suspensionReason: "Suspended by admin.",
+  }, 0);
+  assert.equal(result.eligible, false);
+  assert.match(result.message, /Reason: Suspended by admin\./);
+});
+
 test("admin can enable approved company driver availability but cannot bypass approval, suspension or capacity", async () => {
   const route = router.stack.find((entry) =>
     entry.route?.path === "/admin/company-drivers/:id" && entry.route.methods.put).route;
