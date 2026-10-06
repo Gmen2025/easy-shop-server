@@ -8,6 +8,17 @@ const { sendPushToUser } = require("../helpers/push-notify");
 
 const getUserModel = (req) => req.dbModels.User;
 
+const getCompanyStoreRole = async (req, user) => {
+  const store = await req.dbModels.Store.findOne({
+    owner: user._id, isCompanyOwned: true,
+  }).select("isCompanyOwned approvalStatus");
+  return {
+    isCompanyOwnedStore: Boolean(store),
+    isStoreOwner: Boolean(user.isStoreOwner || store),
+    storeOwnerApprovalStatus: store?.approvalStatus || user.storeOwnerApprovalStatus || null,
+  };
+};
+
 const getBackendBaseUrl = (req) => {
   const protocol = req.protocol || "http";
   const host = req.get("host");
@@ -124,14 +135,10 @@ router.post("/login", async (req, res) => {
     );
 
     let isCompanyOwnedDriver = false;
-    let isCompanyOwnedStore = false;
+    const companyStoreRole = await getCompanyStoreRole(req, user);
     if (user.isDriver) {
       const driver = await req.dbModels.Driver.findOne({ user: user._id }).select("isCompanyOwned");
       isCompanyOwnedDriver = Boolean(driver?.isCompanyOwned);
-    }
-    if (user.isStoreOwner) {
-      const store = await req.dbModels.Store.findOne({ owner: user._id, isCompanyOwned: true }).select("isCompanyOwned");
-      isCompanyOwnedStore = Boolean(store?.isCompanyOwned);
     }
 
     return res.send({
@@ -141,9 +148,8 @@ router.post("/login", async (req, res) => {
       phone: user.phone,
       isAdmin: user.isAdmin,
       isDriver: user.isDriver,
-      isStoreOwner: user.isStoreOwner,
+      ...companyStoreRole,
       isCompanyOwnedDriver,
-      isCompanyOwnedStore,
       role: user.role,
       isEmailVerified: user.isEmailVerified,
       token: token,
@@ -1565,10 +1571,7 @@ router.get("/profile", async (req, res) => {
       const driver = await req.dbModels.Driver.findOne({ user: userId }).select("isCompanyOwned");
       userJson.isCompanyOwnedDriver = Boolean(driver?.isCompanyOwned);
     }
-    if (user.isStoreOwner) {
-      const store = await req.dbModels.Store.findOne({ owner: userId, isCompanyOwned: true }).select("isCompanyOwned");
-      userJson.isCompanyOwnedStore = Boolean(store?.isCompanyOwned);
-    }
+    Object.assign(userJson, await getCompanyStoreRole(req, user));
 
     return res.status(200).json({
       success: true,

@@ -68,6 +68,10 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
 Login and profile responses determine company-store ownership by looking for an
 owner's company-owned store explicitly, rather than inspecting an arbitrary first
 store. Owners who also have a partner store still receive the AdminStore role flag.
+Company-store ownership is checked even if the user's cached `isStoreOwner` flag
+is false. Login/profile responses restore that role and report the owned store's
+approval status from the selected database. Driver-only accounts with no company
+store ownership do not receive store access; stored user records are not rewritten.
 Validate with `node --test tests/company-profile.test.js`.
 
 Company-owned AdminDrivers do not require a prepaid wallet balance to receive
