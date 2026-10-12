@@ -3,6 +3,21 @@ const router = express.Router();
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const { inventoryEnabled, updateManagedOrder } = require("../helpers/store-inventory");
+
+router.use(async (req, res, next) => {
+  if (/^\/[^/]+\/products(?:\/|$)/.test(req.path)) {
+    try {
+      if (await inventoryEnabled(req.dbModels)) {
+        return res.status(409).json({ success: false, message: "Store inventory has migrated. Use the store-specific inventory endpoints; the shared catalog is Admin-managed." });
+      }
+    } catch (error) {
+      console.error("Store inventory mode check failed:", error.message);
+      return res.status(500).json({ success: false, message: "Unable to verify inventory mode." });
+    }
+  }
+  next();
+});
 
 // ---------------------------------------------------------------------------
 // Store-owner endpoints: registration, dashboard, sales, products, inventory,
@@ -1218,6 +1233,10 @@ router.patch('/:id/orders/:orderId', async (req, res) => {
       .populate({ path: 'orderItems', populate: { path: 'product', select: 'store countInStock soldCount' } });
     if (!order) return res.status(404).json({ success: false, message: 'Order not found for this store.' });
 
+    if (order.inventoryManaged) {
+      const saved = await updateManagedOrder(req.dbModels, order._id, { status });
+      return res.json({ success: true, orderId: saved.id, status: saved.status });
+    }
     const wasDelivered = order.status === 'Delivered';
     order.status = status;
 
@@ -1235,7 +1254,7 @@ router.patch('/:id/orders/:orderId', async (req, res) => {
     const saved = await order.save();
     return res.json({ success: true, orderId: saved.id, status: saved.status });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.status || 500).json({ success: false, message: err.message });
   }
 });
 

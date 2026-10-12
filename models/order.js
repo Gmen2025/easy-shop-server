@@ -114,6 +114,11 @@ const orderSchema = new mongoose.Schema({
         type: String,
         default: ''
     },
+    paymentCurrency: String,
+    paymentAmount: Number,
+    exchangeRate: mongoose.Schema.Types.Mixed,
+    internationalShipping: mongoose.Schema.Types.Mixed,
+    internationalShippingFee: Number,
     paymentPaidAt: {
         type: Date,
         default: null
@@ -131,6 +136,7 @@ const orderSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
+    quotedDeliveryDistanceKm: { type: Number },
     scheduledFor: {
         type: Date,
         alias: 'scheduledDeliveryDate',
@@ -156,6 +162,31 @@ const orderSchema = new mongoose.Schema({
     itemsSubtotal: {
         type: Number,
         default: 0
+    },
+    inventoryManaged: { type: Boolean, default: false },
+    checkoutGroup: { type: mongoose.Schema.Types.ObjectId, ref: 'CheckoutGroup', default: null },
+    requiredVehicle: { type: String, enum: ['motorcycle', 'car', 'van', 'truck'] },
+    cargo: { type: mongoose.Schema.Types.Mixed },
+    refundStatus: { type: String, enum: ['pending', 'failed', 'refunded', 'not_required'] },
+    refundId: { type: String },
+    refundAttempt: { type: Number, default: 0 },
+    storefrontId: { type: mongoose.Schema.Types.ObjectId, ref: "Store", default: null },
+    fulfillmentStatus: {
+        type: String,
+        enum: ['payment_pending', 'pending', 'accepted', 'unassigned', 'completed', 'cancelled'],
+    },
+    fulfillmentDeadline: { type: Date, default: null },
+    fulfillmentAttempts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Store' }],
+    reservedItems: [{
+        product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },
+        quantity: Number,
+        price: Number,
+    }],
+    assignedStoreSnapshot: {
+        storeId: { type: mongoose.Schema.Types.ObjectId, ref: 'Store' },
+        name: String,
+        address: String,
+        logo: String,
     },
     totalPrice: {
         type: Number
@@ -233,6 +264,8 @@ orderSchema.index({ store: 1, deliveredAt: -1 });
 orderSchema.index({ store: 1, dateOrdered: -1 });
 orderSchema.index({ status: 1, deliveredAt: -1 });
 orderSchema.index({ deliveryStatus: 1, deliveredAt: -1 });
+orderSchema.index({ inventoryManaged: 1, fulfillmentStatus: 1, fulfillmentDeadline: 1 });
+orderSchema.index({ checkoutGroup: 1, paymentProvider: 1, refundStatus: 1 });
 
 
 orderSchema.virtual('id').get(function () {

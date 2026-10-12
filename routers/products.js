@@ -6,6 +6,36 @@ const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const { sendPushToUser } = require('../helpers/push-notify');
 const { isCompanyFulfillableProduct, reconcileUnassignedPickupStores } = require('../helpers/fulfillment-routing');
+const { aggregateCatalog, inventoryEnabled } = require('../helpers/store-inventory');
+router.use(async (req, res, next) => {
+    if (["POST", "PUT", "DELETE", "PATCH"].includes(req.method) &&
+        !req.path.startsWith("/admin/") && !req.path.includes("/company-") &&
+        !req.path.includes("/company-responses/") && !req.auth?.isAdmin) {
+        try {
+            if (await inventoryEnabled(req.dbModels)) {
+                return res.status(403).json({ success: false, message: "Only Admin can change the shared catalog. Manage your store inventory instead." });
+            }
+        } catch (error) {
+            console.error("Catalog permission check failed:", error.message);
+            return res.status(500).json({ success: false, message: "Unable to verify catalog permissions." });
+        }
+    }
+    next();
+});
+router.use(async (req, res, next) => {
+    if (req.path === "/company/my-products" || /\/company-(ready|reject)$/.test(req.path)) {
+        try {
+            if (await inventoryEnabled(req.dbModels)) {
+                if (req.method === "GET") return res.json({ products: [] });
+                return res.status(409).json({ success: false, message: "Respond to store order assignments instead of shared-product requests." });
+            }
+        } catch (error) {
+            console.error("Store fulfillment mode check failed:", error.message);
+            return res.status(500).json({ success: false, message: "Unable to load fulfillment mode." });
+        }
+    }
+    next();
+});
 
 cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -106,7 +136,7 @@ router.get(`/`, async(req, res) => {
             res.status(500).json({ success: false });
         }
         
-        res.send(productList);
+        res.send(await aggregateCatalog(req.dbModels, productList));
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
@@ -148,7 +178,7 @@ router.get(`/`, async(req, res) => {
         return res.status(404).json({ message: 'The product with the given ID was not found.' });
     }
 
-    res.send(product);
+    res.send((await aggregateCatalog(req.dbModels, [product]))[0]);
   })
  
 /**

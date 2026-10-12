@@ -5,6 +5,8 @@ const { normalizeDatabaseName, getAllowedDatabaseNames, getModelsForDb } = requi
 const { getDeliverySchedule } = require("../helpers/delivery");
 const { summarizeStoreOrder, buildStoreOrderSummary } = require("../helpers/store-order-view");
 const { reconcileUnassignedPickupStores } = require("../helpers/fulfillment-routing");
+const { inventoryEnabled } = require("../helpers/store-inventory");
+router.use(require("./store-inventory"));
 
 const requireAdmin = (req, res, next) => {
   if (!req.auth?.isAdmin) return res.status(403).json({ success: false, message: "Admin access required" });
@@ -265,6 +267,9 @@ router.get("/me/dashboard", async (req, res) => {
       yearly: startForDays(365),
     };
     const oldestPeriodStart = periodStarts.yearly;
+    const managed = await inventoryEnabled(req.dbModels);
+    const locations = managed ? await Store.find({ owner: userId }).select("_id").lean() : [store];
+    const storeIds = locations.map((location) => location._id);
 
     const fulfillmentProducts = await Product.find({
       $or: [
@@ -277,13 +282,16 @@ router.get("/me/dashboard", async (req, res) => {
       product: { $in: fulfillmentProducts.map((product) => product._id) },
     }).select("_id").lean();
     const orderScope = {
+      fulfillmentStatus: { $ne: "payment_pending" },
       $or: [
-        { store: store._id },
-        { orderItems: { $in: fulfillmentItems.map((item) => item._id) } },
+        managed ? { store: { $in: storeIds } } : { store: store._id },
+        managed
+          ? { inventoryManaged: { $ne: true }, orderItems: { $in: fulfillmentItems.map((item) => item._id) } }
+          : { orderItems: { $in: fulfillmentItems.map((item) => item._id) } },
       ],
     };
 
-    const [products, readyFulfillments, deliveredOrders, placedOrders, reviews, payouts, recentOrders, activeOrders] = await Promise.all([
+    let [products, readyFulfillments, deliveredOrders, placedOrders, reviews, payouts, recentOrders, activeOrders] = await Promise.all([
       Product.find({ store: store._id })
         .select("name price countInStock minStock soldCount approvalStatus rating numReviews")
         .lean(),
@@ -296,7 +304,7 @@ router.get("/me/dashboard", async (req, res) => {
           { $or: [{ status: { $in: ["3", "Delivered"] } }, { deliveryStatus: "Delivered" }] },
         ],
       })
-        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd")
+        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd assignedStoreSnapshot fulfillmentStatus inventoryManaged checkoutGroup requiredVehicle")
         .populate({ path: "orderItems", populate: { path: "product", select: "name price store" } })
         .sort({ deliveredAt: -1, dateOrdered: -1 })
         .lean(),
@@ -308,7 +316,7 @@ router.get("/me/dashboard", async (req, res) => {
         .lean(),
       Payout.find({ store: store._id }).select("amount status").lean(),
       Order.find(orderScope)
-        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee status deliveryStatus dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd")
+        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee status deliveryStatus dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd assignedStoreSnapshot fulfillmentStatus inventoryManaged checkoutGroup requiredVehicle")
         .populate({ path: "orderItems", populate: { path: "product", select: "name price store" } })
         .sort({ dateOrdered: -1 })
         .limit(20)
@@ -318,11 +326,16 @@ router.get("/me/dashboard", async (req, res) => {
         status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
         deliveryStatus: { $ne: "Delivered" },
       })
-        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee status deliveryStatus dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd")
+        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee status deliveryStatus dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd assignedStoreSnapshot fulfillmentStatus inventoryManaged checkoutGroup requiredVehicle")
         .populate({ path: "orderItems", populate: { path: "product", select: "name price store" } })
         .sort({ dateOrdered: -1 })
         .lean(),
     ]);
+    if (managed) {
+      const stocks = await req.dbModels.StoreInventory.find({ store: { $in: storeIds } }).populate("product", "approvalStatus").lean();
+      products = stocks.map((stock) => ({ ...stock, countInStock: stock.countInStock - stock.reserved, approvalStatus: stock.product?.approvalStatus || "approved" }));
+      readyFulfillments = activeOrders.filter((order) => order.fulfillmentStatus === "accepted").length;
+    }
 
     const delivered = deliveredOrders.map((order) => summarizeStoreOrder(order, store._id, productIds));
 
@@ -407,7 +420,10 @@ router.get("/me/dashboard", async (req, res) => {
 // Helper to compute store delivered revenue & balances for admin payout settlements
 async function computeStoreBalance(models, storeId) {
   const { Order, Payout } = models;
-  const match = { store: new mongoose.Types.ObjectId(storeId), status: 'Delivered' };
+  const match = {
+    store: new mongoose.Types.ObjectId(storeId),
+    $or: [{ status: { $in: ["3", "Delivered"] } }, { deliveryStatus: "Delivered" }],
+  };
   const orders = await Order.find(match).populate({
     path: 'orderItems',
     populate: { path: 'product', select: 'name price store' }
@@ -415,6 +431,10 @@ async function computeStoreBalance(models, storeId) {
 
   let gross = 0;
   for (const order of orders) {
+    if (order.inventoryManaged) {
+      gross += summarizeStoreOrder(order, storeId, new Set()).sales;
+      continue;
+    }
     let storeTotal = 0;
     for (const item of order.orderItems || []) {
       if (item?.product && String(item.product.store) === String(storeId)) {
@@ -1057,17 +1077,29 @@ router.delete(`/:id`, requireAdmin, async (req, res) => {
       return res.status(404).json({ success: false, message: "Store not found!" });
     }
 
-    const { Store, User } = getModelsForDb(dbNameFound);
-    if (store.owner) {
+    const models = getModelsForDb(dbNameFound);
+    const { Store, User, StoreInventory } = models;
+    if (await inventoryEnabled(models)) {
+      await Store.db.transaction(async (session) => {
+        const hasBranches = await Store.countDocuments({ parentStore: store._id }).session(session);
+        if (hasBranches) throw Object.assign(new Error("Remove or reassign this store's branches before deleting it."), { status: 409 });
+        const reserved = await StoreInventory.countDocuments({ store: store._id, reserved: { $gt: 0 } }).session(session);
+        if (reserved) throw Object.assign(new Error("Complete or cancel reserved store orders before deleting this location."), { status: 409 });
+        await Store.findByIdAndDelete(store._id, { session });
+        await StoreInventory.deleteMany({ store: store._id }, { session });
+      });
+    } else {
+      await Store.findByIdAndDelete(req.params.id);
+    }
+    if (store.owner && !await Store.exists({ owner: store.owner })) {
       await User.findByIdAndUpdate(store.owner, {
         $set: { isStoreOwner: false, storeOwnerApprovalStatus: null },
       });
     }
 
-    await Store.findByIdAndDelete(req.params.id);
     return res.status(200).json({ success: true, message: "Store owner was successfully deleted!" });
   } catch (err) {
-    return res.status(500).json({ success: false, error: err?.message || err });
+    return res.status(err.status || 500).json({ success: false, message: err?.message || "Unable to delete store." });
   }
 });
 

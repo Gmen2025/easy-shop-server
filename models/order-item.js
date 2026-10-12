@@ -6,6 +6,7 @@ const orderItemSchema = new mongoose.Schema({
         type: Number,
         required: true
     },
+    unitPrice: { type: Number, min: 0 },
     product: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Product'

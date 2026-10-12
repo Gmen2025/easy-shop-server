@@ -11,19 +11,19 @@ function summarizeStoreOrder(order, storeId, productIds) {
   let sales = 0;
   let units = 0;
   let matchedItems = 0;
-  const assignedCompanyOrder = productIds && String(order.store) === String(storeId);
+  const assignedCompanyOrder = order.inventoryManaged || (productIds && String(order.store) === String(storeId));
   for (const item of order.orderItems || []) {
     if (assignedCompanyOrder || isStoreItem(item, storeId, productIds)) {
       matchedItems += 1;
       const quantity = Number(item.quantity || 0);
-      sales += Number(item.product?.price || 0) * quantity;
+      sales += Number(item.unitPrice ?? item.product?.price ?? 0) * quantity;
       units += quantity;
     }
   }
   if (productIds ? matchedItems === 0 && String(order.store) === String(storeId) : sales === 0) {
     sales = Number(order.itemsSubtotal || 0) || Math.max(
       0,
-      Number(order.totalPrice || 0) - Number(order.deliveryFee || 0)
+      Number(order.totalPrice || 0) - Number(order.deliveryFee || 0) - Number(order.internationalShippingFee || 0)
     );
     units = (order.orderItems || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
   }
@@ -38,7 +38,7 @@ function summarizeStoreOrder(order, storeId, productIds) {
 
 function buildStoreOrderSummary(order, storeId, productIds) {
   const summary = summarizeStoreOrder(order, storeId, productIds);
-  const items = productIds && String(order.store) !== String(storeId)
+  const items = !order.inventoryManaged && productIds && String(order.store) !== String(storeId)
     ? (order.orderItems || []).filter((item) => isStoreItem(item, storeId, productIds))
     : order.orderItems || [];
   return {
@@ -52,10 +52,18 @@ function buildStoreOrderSummary(order, storeId, productIds) {
     units: summary.units,
     totalPrice: order.totalPrice,
     deliveryFee: order.deliveryFee,
+    assignedStore: order.assignedStoreSnapshot || null,
+    fulfillmentStatus: order.fulfillmentStatus,
+    checkoutGroup: order.checkoutGroup,
+    requiredVehicle: order.requiredVehicle,
+    ...(order.internationalShipping ? { internationalShipping: {
+      hub: order.internationalShipping.hub, status: order.internationalShipping.status,
+    }, internationalShippingFee: order.internationalShippingFee } : {}),
     orderItems: items.map((item) => ({
       quantity: item.quantity,
+      unitPrice: item.unitPrice,
       product: item.product
-        ? { _id: item.product._id, name: item.product.name, price: item.product.price }
+        ? { _id: item.product._id, name: item.product.name, price: item.unitPrice ?? item.product.price }
         : null,
     })),
   };

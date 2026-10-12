@@ -250,7 +250,13 @@ router.put("/admin/company-drivers/:id", requireAdmin, async (req, res) => {
     if (name !== undefined) driver.name = name;
     if (phone !== undefined) driver.phone = phone;
     if (address !== undefined) driver.address = address;
-    if (vehicleType !== undefined) driver.vehicleType = vehicleType;
+    if (vehicleType !== undefined) {
+      if ((driver.activeRideTrip || driver.pendingRideOffer) && vehicleType !== driver.vehicleType) {
+        return res.status(409).json({ success: false, message: "Finish the passenger ride and respond to offers before changing vehicle type." });
+      }
+      if (vehicleType !== driver.vehicleType) driver.$where = { activeRideTrip: null, pendingRideOffer: null };
+      driver.vehicleType = vehicleType;
+    }
     if (parsedPoint.value) driver.location = parsedPoint.value;
 
     const user = driver.user ? await User.findById(driver.user) : null;
@@ -269,12 +275,23 @@ router.put("/admin/company-drivers/:id", requireAdmin, async (req, res) => {
       user.passwordHash = bcrypt.hashSync(password, 10);
     }
 
-    if (user) await user.save();
-    const saved = await driver.save();
+    let saved;
+    if (driver.$where) {
+      saved = await Driver.db.transaction(async (session) => {
+        if (user) await user.save({ session });
+        return driver.save({ session });
+      });
+    } else {
+      if (user) await user.save();
+      saved = await driver.save();
+    }
 
     return res.status(200).json({ success: true, message: "Company driver updated.", driver: saved });
   } catch (error) {
     console.error("Company driver update error:", error);
+    if (error.name === "DocumentNotFoundError") {
+      return res.status(409).json({ success: false, message: "The driver state changed during this update. Refresh and finish active rides/offers before changing vehicles." });
+    }
     return res.status(500).json({ success: false, message: "Unable to update the company driver." });
   }
 });
@@ -1185,6 +1202,14 @@ router.put(`/:id`, async (req, res) => {
   }
 
   const updateFields = {};
+  let changingVehicle = false;
+  if (req.body.vehicleType !== undefined) {
+    const existing = await Driver.findById(req.params.id).select("vehicleType activeRideTrip pendingRideOffer");
+    changingVehicle = existing && req.body.vehicleType !== existing.vehicleType;
+    if (existing && req.body.vehicleType !== existing.vehicleType && (existing.activeRideTrip || existing.pendingRideOffer)) {
+      return res.status(409).json({ success: false, message: "Do not change a vehicle type while a passenger ride/offer is active." });
+    }
+  }
   if (req.body.name !== undefined) updateFields.name = req.body.name;
   if (req.body.isAvailable !== undefined) updateFields.isAvailable = Boolean(req.body.isAvailable);
   if (req.body.vehicleType !== undefined) updateFields.vehicleType = req.body.vehicleType;
@@ -1200,8 +1225,11 @@ router.put(`/:id`, async (req, res) => {
     }
   }
 
-  const updated = await Driver.findByIdAndUpdate(req.params.id, updateFields, { new: true });
+  const updated = changingVehicle
+    ? await Driver.findOneAndUpdate({ _id: req.params.id, activeRideTrip: null, pendingRideOffer: null }, updateFields, { new: true })
+    : await Driver.findByIdAndUpdate(req.params.id, updateFields, { new: true });
   if (!updated) {
+    if (changingVehicle) return res.status(409).json({ success: false, message: "The driver was assigned a passenger ride. Refresh before changing the vehicle." });
     return res.status(404).json({ success: false, message: "Driver not found." });
   }
 
@@ -1266,17 +1294,21 @@ router.delete(`/:id`, requireAdmin, async (req, res) => {
       return res.status(404).json({ success: false, message: "Driver not found!" });
     }
 
-    const { Driver, User } = getModelsForDb(dbNameFound);
-    if (driver.user) {
-      await User.findByIdAndUpdate(driver.user, {
-        $set: { isDriver: false, role: "user" },
-      });
-    }
-
-    await Driver.findByIdAndDelete(req.params.id);
+    const { Driver, User, Ride } = getModelsForDb(dbNameFound);
+    await Driver.db.transaction(async (session) => {
+      const current = await Driver.findById(req.params.id).session(session);
+      if (!current || current.activeRideTrip || current.pendingRideOffer ||
+          await Ride.countDocuments({ driver: current._id, status: "completed", paymentStatus: "pending" }).session(session)) {
+        throw Object.assign(new Error("Finish ride assignments and reconcile unpaid ride fares before deleting this driver."), { status: 409 });
+      }
+      if (current.user) {
+        await User.findByIdAndUpdate(current.user, { $set: { isDriver: false, role: "user" } }, { session });
+      }
+      await Driver.findByIdAndDelete(current._id, { session });
+    });
     return res.status(200).json({ success: true, message: "Driver was successfully deleted!" });
   } catch (err) {
-    return res.status(500).json({ success: false, error: err?.message || err });
+    return res.status(err.status || 500).json({ success: false, error: err?.message || err });
   }
 });
 

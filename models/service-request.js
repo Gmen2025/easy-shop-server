@@ -93,6 +93,11 @@ const serviceRequestSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    checkoutGroup: { type: mongoose.Schema.Types.ObjectId, ref: 'CheckoutGroup', default: null },
+    paymentStatus: { type: String, enum: ['pending', 'completed'], default: 'pending' },
+    paymentCurrency: String,
+    paymentAmount: Number,
+    exchangeRate: mongoose.Schema.Types.Mixed,
     assignedTechnician: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Driver',

@@ -273,13 +273,19 @@ router.put('/:id', async (req, res) => {
   const nextCountry = payload.country || existing.country;
   const nextStatus = resolveStatus(payload.status ?? existing.status, existing.status || 'new');
   const nextPriority = resolvePriority(payload.priority ?? existing.priority, existing.priority || 'Normal');
+  const changesPayment = ['quotedPrice', 'currency', 'country', 'budgetEstimate'].some((field) => payload[field] !== undefined) ||
+    (payload.status !== undefined && nextStatus === 'cancelled') ||
+    (payload.quoteAccepted !== undefined && payload.quoteAccepted !== true);
+  if (existing.checkoutGroup && changesPayment) {
+    return res.status(409).json({ message: 'This quote is locked to a USD payment. Cancel an unpaid checkout first. Submitted or paid service payments require support review before cancellation or refund.' });
+  }
 
   if (payload.country && !validCountries.includes(String(payload.country))) {
     return res.status(400).json({ success: false, message: 'country must be one of: Ethiopia, USA' });
   }
 
-  const updated = await ServiceRequest.findByIdAndUpdate(
-    req.params.id,
+  const updated = await ServiceRequest.findOneAndUpdate(
+    { _id: req.params.id, ...(changesPayment ? { checkoutGroup: null } : {}) },
     {
       ...(payload.country ? { country: String(payload.country).trim() } : {}),
       ...(payload.serviceLocation !== undefined ? { serviceLocation: String(payload.serviceLocation).trim() } : {}),
@@ -305,6 +311,7 @@ router.put('/:id', async (req, res) => {
     },
     { new: true }
   );
+  if (!updated) return res.status(409).json({ message: 'A payment started while editing this service quote. Reload the request.' });
   await updated.populate('customer', 'name email phone');
 
   if (payload.status !== undefined && nextStatus !== existing.status) {
@@ -370,7 +377,9 @@ router.delete('/:id', async (req, res) => {
     return res.status(404).json({ success: false, message: 'Service request not found' });
   }
 
-  await ServiceRequest.findByIdAndDelete(req.params.id);
+  if (!await ServiceRequest.findOneAndDelete({ _id: req.params.id, checkoutGroup: null })) {
+    return res.status(409).json({ message: 'This service has a USD payment record. Cancel an unpaid checkout first; submitted or paid payments must be retained for support review.' });
+  }
   await notifyCustomer({
     req,
     customerId: deleted.customer,

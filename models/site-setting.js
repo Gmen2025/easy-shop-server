@@ -28,12 +28,19 @@ const siteSettingSchema = new mongoose.Schema(
           type: Boolean,
           default: true,
         },
+        currency: { type: String, enum: ['ETB', 'USD'] },
       },
     ],
     deliveryConfig: {
       type: mongoose.Schema.Types.Mixed,
       default: undefined,
     },
+    inventoryConfig: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    vehicleDeliveryConfig: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    reservationVersion: { type: Number, default: 0 },
+    rideConfig: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    exchangeConfig: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    internationalShippingConfig: { type: mongoose.Schema.Types.Mixed, default: undefined },
     // Store/warehouse address used as the origin point for Google-based delivery
     // distance calculations (admin-configurable).
     deliveryOrigin: {

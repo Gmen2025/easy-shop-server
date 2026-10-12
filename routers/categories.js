@@ -1,5 +1,11 @@
 const express = require('express');
 const router = require("express").Router();
+router.use((req, res, next) => {
+    if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !req.auth?.isAdmin) {
+        return res.status(403).json({ success: false, message: "Only Admin can manage categories." });
+    }
+    next();
+});
 
 /**
  * @swagger
@@ -190,4 +196,3 @@ router.delete('/:id', (req, res) => {
 })
 
 module.exports = router;
-

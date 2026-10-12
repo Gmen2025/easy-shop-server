@@ -34,6 +34,355 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
 
 ### Scheduled delivery and store order dashboards
 
+#### USA products shipped to Ethiopia, payable in birr
+
+An independent, **off-by-default** product-only flow lives in the USA database.
+Customers select the USA catalog and **Pay birr & ship to Ethiopia**. Local USA
+USD checkout and Ethiopia's USD checkout are unchanged; rides and quoted
+services do not gain birr payments in the USA database. Native product prices,
+pickup delivery fees and US accounting stay USD. The authoritative charge is:
+
+`ETB payment = round((USD products + USD store-to-hub fees + USD international shipping) * birrPerUsd, 2)`
+
+`GET/PUT /api/v1/exchange-rate/`, `/apply` and `/refresh` use the independent
+`usa-etb-export-checkout` policy when the selected database is USA. Admin controls
+its own enablement, manual Apply, provider and automatic-refresh toggle.
+As for the Ethiopia policy, a rate is usable strictly **under 24 hours** after a
+successful apply. Applying or fetching the same numeric rate records a new
+timestamp/revision/history entry; changing settings does not renew it. Failures
+never extend expiry. Provider response fields remain **birr per 1 USD** for both
+directions; reuse the server provider registry described below or choose a
+different provider for each policy. Automation runs in the existing scheduler
+for USA as well as Ethiopia. New quotes/prepares require a current rate; prepared
+payments retain their rate snapshot even after disablement or expiry.
+
+Configure **Admin > US Shipping** in the USA region:
+
+- The complete **US consolidation-hub address**, verified with Google Geocoding.
+  Product pickups are assigned from US inventory near that hub. US drivers
+  travel only from stores to the hub, never on an impossible driving route to
+  Ethiopia. Ethiopian recipient addresses are also server-verified, and are
+  saved separately from domestic hub destinations.
+- USD shipping base, per-billable-kg rate and minimum, volumetric divisor
+  (cm3/kg), maximum billable kg per recipient and maximum parcel dimension.
+  For each recipient, actual weight and packaged volume include every purchased
+  unit, across all pickup stores. Billable weight is the larger of total actual
+  kg or total volumetric kg, rounded **up to 0.001 kg**. Shipping is
+  `max(minimumUsd, baseUsd + billableKg * perKgUsd)`, rounded to USD cents.
+  One international fee is charged per recipient, not per pickup. This tariff
+  is Admin pricing, not a live carrier quote; Admin must account for handling
+  and final delivery to the Ethiopian address.
+- Explicit **export approval** per product (`exportToEthiopia`); default false.
+  Admin must verify shipment/import legality and carrier coverage and measure
+  package weight/dimensions. Unapproved, missing-size, overweight or oversize
+  items block checkout. US inventory migration and enabled vehicle pricing
+  are prerequisites. Changing rate, tariff, hub, export approval or package
+  data invalidates an affected unprepared quote. Prepared orders use snapshots.
+
+Bank accounts must be explicitly tagged **ETB in the USA database**. Only bank
+transfer is allowed for this flow: no card, cash, Telebirr or other service
+payments. Native USA bank lists still offer only USD accounts.
+
+`POST stores/checkouts/quote` with `paymentCurrency:"etb"` creates an international
+product quote, supporting existing per-item quantity/address allocations and
+vehicle upgrades for US pickups. The group `international` snapshot includes
+hub, tariff revision, per-recipient shipping/weight/status and the customs notice.
+Child USD shipping cents and converted ETB cents are apportioned exactly so child
+payment/refund totals sum to the parent. `totalPrice` remains USD; `paymentAmount`
+is ETB, with `exchangeRate.direction:"usd-to-etb"`. Never relabel USD cost fields
+or store sales as birr. International shipping is not store product revenue.
+
+Preparation atomically reserves US stock. Before the 15-minute hold ends, the
+customer submits sender/reference via the usual checkout `/confirm` endpoint.
+This enters **`bank_review`**, not `placed`: stock stays reserved, including
+after the hold/rate expires, but store acceptance/driver dispatch remain blocked.
+Admin verifies the exact saved ETB total in the actual bank account with
+`POST stores/checkouts/:id/bank-confirm`; only then are stores notified and
+acceptance deadlines start. Review receipts promptly: submitted receipts are
+**not automatically rejected/released**, to avoid releasing already-paid stock.
+Owner cancellation is blocked during review. Admin may use
+`POST stores/checkouts/:id/bank-reject` with `{noFundsReceived:true}` only after
+verifying that no funds arrived; it retains the receipt and releases inventory.
+If funds arrived, confirm payment and use the documented manual bank refund
+workflow instead. Never ask a customer to pay again after a submitted receipt.
+
+Admin manages each recipient shipment using
+`POST stores/checkouts/:id/shipments/:shipmentId`, with `status`, `note`, and,
+when exporting, `carrier` and `trackingNumber`. Stages are strictly sequential:
+`awaiting_hub -> at_hub -> shipped -> arrived_ethiopia -> delivered`.
+Payment must be verified and all noncancelled pickup orders for that recipient
+must have reached the hub. Export requires carrier/tracking details; final
+delivery requires a proof/recipient-confirmation note. Updates record an audit
+history and propagate to child receipts and customer order tracking. Native
+`deliveryStatus:"Delivered"` means **US hub delivery only** on these orders,
+not final Ethiopia delivery. Admin performs actual carrier booking/export and
+last-mile coordination outside the app; no carrier labels or automatic tracking
+feed are generated.
+
+The checkout explicitly discloses that shipping includes final address delivery
+but **customs/import duties, charges and clearance are excluded** and are the
+recipient's responsibility. Paid child cancellation/refund is available only
+before driver assignment/hub handling under the existing cancellation rules.
+Refunds use each child's locked ETB amount, including its allocated shipping;
+remaining shipments are not repriced after partial cancellation. Later changes,
+returns or failed international delivery require support/manual refund review.
+
+Deploy both repositories with gates off; configure US inventory, hub, tariff,
+eligible products, ETB bank account and current rate. Test actual MongoDB
+transaction conflicts, bank verification/rejection, rerouting to the hub,
+international carrier operations and final address coverage on staging before
+enabling. Adding this code does not activate checkout, fetch live rates,
+run inventory migrations or book shipments.
+
+#### Ethiopia purchases payable in USD
+
+This optional feature is **off by default**, independently of rides. Customers
+select the Ethiopia catalog and explicitly choose ETB or USD in their cart.
+Goods and quoted non-ride services are fulfilled **in Ethiopia** for the
+recipient; this is not international shipping. Rides never use exchange rates.
+Catalog prices, delivery charges, store sales and driver/company accounting
+remain ETB. Conversion is `USD = ETB / birrPerUsd`, rounded to cents. Checkout
+groups retain native totals plus `paymentAmount` and an `exchangeRate` snapshot;
+child USD cents sum exactly to the group charge and are used for partial refunds.
+Do not reinterpret `totalPrice` as USD in reports.
+
+In Ethiopia, authenticated `GET /api/v1/exchange-rate/` returns current availability,
+rate, applied/expiry times, revision and explanation. Admin-only endpoints:
+
+- `PUT /exchange-rate/`: `{enabled, autoRefresh, provider}`. Toggles/provider
+  changes invalidate outstanding quotes but never renew the applied timestamp.
+- `POST /exchange-rate/apply`: `{birrPerUsd}`. Every successful Apply records
+  a new timestamp/revision and audit entry, including an unchanged rate.
+- `POST /exchange-rate/refresh`: fetch/apply the saved provider now, even when
+  scheduled automation is off. Automatic successes also record unchanged rates.
+
+A rate is valid strictly **less than 24 hours after its applied timestamp**.
+New USD quotes/reservations fail at the exact 24-hour boundary (server clock).
+Failures never extend expiry. The 30-second scheduler refreshes enabled,
+automatic policies when expired, independently of inventory/ride enablement,
+and throttles failed attempts to one per minute. A failed or slow refresh may
+temporarily leave USD checkout inactive; ETB checkout remains available.
+Manual updates/config changes win over an older in-flight fetch. The latest
+30 successful applies include rate/source/time/provider timestamp/change flag;
+latest failure/attempt information is visible to Admin. Keep server clocks
+synchronized. Settings and reservations require MongoDB replica-set transactions.
+
+Automatic providers are a **server-only registry**, not customer/Admin-entered
+URLs. Set `EXCHANGE_RATE_PROVIDERS_JSON`, for example:
+
+```json
+{"daily":{"url":"https://your-approved-provider.example/latest","ratePath":"rates.ETB","asOfPath":"asOf","apiKeyEnv":"FX_PROVIDER_KEY","apiKeyHeader":"X-API-Key"}}
+```
+
+The selected response field must be **ETB for 1 USD**, not its reciprocal; use
+an appropriate USD-base provider/endpoint. `asOfPath` must resolve to an ISO
+timestamp or epoch milliseconds; set `timestampUnit:"seconds"` for epoch
+seconds. The source timestamp must be present, not future-dated, and under
+24 hours old. Same numeric values with a current source timestamp count as
+successful refreshes; replaying stale provider data does not. Endpoints must
+be trusted, approved HTTPS addresses, with no URL credentials or redirects.
+Keys are read only from the named server environment variable. Only provider
+identifiers—not endpoints/credentials—are returned to mobile. A missing or
+invalid provider configuration fails explicitly; manual Apply is always available.
+
+USD products require the per-store inventory migration, enabled vehicle delivery
+configuration and product package sizes. Add `paymentCurrency:"usd"` to
+`POST stores/checkouts/quote`; quote/prepare revalidate enabled/fresh policy and
+revision, including unchanged-rate applies. Once prepared, rate expiry or
+switching USD off does **not** prevent recovery/refunds at the saved amount.
+USD cash is rejected. Bank accounts must be explicitly tagged `currency:"USD"`;
+old untagged Ethiopia accounts remain ETB. Native rides/legacy bank lists do not
+offer USD accounts in Ethiopia.
+
+Ethiopia USD cards require an explicitly configured USD-capable merchant:
+`STRIPE_SECRET_KEY_ETHIOPIA_USD` and matching
+`STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD` (both live, as in the existing production
+card policy). No generic or USA merchant fallback is permitted. The public key
+is saved with the prepared checkout; native confirmation initializes that key
+and then restores the app's usual key. Retain the same merchant credentials
+while its payments/refunds are outstanding. Validate native card confirmation,
+minimum Stripe amounts and merchant/currency availability in staging before
+activation. No merchant onboarding or live payment verification is automatic.
+
+For an Admin ETB-quoted Ethiopia service, owner-only
+`POST stores/service-checkouts/:serviceId` creates a USD quote or returns the
+already-started checkout. Existing checkout prepare/payment/confirm/cancel and
+Admin bank-confirm endpoints serve both products and services. Service amounts
+come only from the stored Admin quote, never a client total. Prepared service
+quotes cannot be repriced, moved to another currency/country, unaccepted or
+deleted; unpaid cancellation/expiry unlocks them. Submitted/paid service
+payments are retained and require **support review and a manual refund process**
+before cancellation; automatic service refunds are not provided. Admin verifies
+the USD receipt in combined payments. Product partial refund workflows remain
+automatic for cards / Admin-recorded for bank transfers.
+
+Deploy both repositories with the gates off. Configure rates, USD accounts /
+merchant and provider registry; verify real transaction concurrency, scheduler
+failure/recovery, bank receipt handling and native payments on staging; then
+enable through **Admin > FX Rate** in the Ethiopia region. No inventory migration, rate fetch, live
+activation or deployment is performed by adding this code.
+
+#### Shared catalog and store-specific inventory
+
+Store inventory is held in `StoreInventory` (unique store/product pairs), with
+price, physical `countInStock`, reserved units and `minStock`. Stores choose
+existing approved catalog products; category writes require Admin. A listing
+can be removed only with no reserved units, without deleting the shared product.
+Profile logos are optional HTTPS image URLs. Branches share the main store's
+owner and reference it through `parentStore`.
+
+Deployment requires MongoDB replica-set transactions (for example Atlas).
+Deploy both backend and mobile updates before enabling the feature. In each
+database, complete or cancel legacy active orders, then an Admin calls
+`POST /api/v1/stores/admin/inventory/migrate` with `defaultStoreId`, or uses the
+mobile AdminStores migration control. The migration atomically moves catalog
+stock to its linked approved store, or to the selected default if no valid link
+exists, creates the unique inventory index, and enables `store-inventory-config`.
+It refuses repeat migrations and invalid quantities/prices. Legacy checkout
+continues until migration; do not seed copies of global stock into every store.
+After migration, new catalog products have zero availability until a store
+adds inventory. Editing a catalog's old `countInStock` is not a store adjustment.
+Legacy store-owner product endpoints return HTTP 409 after migration so older
+clients cannot silently mutate global inventory. Deploy updated owner clients
+before enabling a region. Inventory-managed updates through the legacy store
+order-status endpoint use the same reservation lifecycle as normal order updates.
+
+New API surfaces:
+
+- Public `GET stores/directory` and `GET stores/directory/:id/products`.
+- Authenticated `POST stores/checkout-availability`, with quoted `orderItems`
+  (`product`, `quantity`, `price`), verified `customerLocation` and optional
+  `storefrontId`. It returns an eligible whole-cart pickup or HTTP 409.
+- Store-owner `GET stores/me/locations`, `PUT stores/me/locations/:id`,
+  `POST stores/me/locations/:id/branches`, and
+  `GET stores/me/locations/:id/inventory` or
+  `PUT/DELETE stores/me/locations/:id/inventory/:productId`.
+- Store-owner `GET stores/me/assignments` and
+  `POST stores/me/assignments/:id/accept` or `/reject`.
+
+Legacy main-page purchases require exact quoted prices and a single store with enough
+unreserved stock for every item. Non-default stores are ranked by customer
+distance; the configured default is tried last and must also meet stock/price
+requirements. Storefront purchases stay within the selected root/branch family.
+Branches with different prices do not contribute to that storefront's quoted
+availability. Main-catalog availability sums open, approved stores' unreserved
+stock; the checkout quote still verifies that a single price-matching store can
+fulfill the entire cart.
+
+Order creation reserves the complete cart transactionally and stores purchase
+prices and the assigned store's identity snapshot. Pending store assignments
+have five minutes to accept; rejected orders reroute immediately, and the
+existing 30-second scheduler reroutes expired assignments. Driver dispatch waits
+for acceptance. When no eligible replacement exists, the order explicitly stays
+unassigned and the scan retries; rejected/expired stores are not offered the same
+order again. Rerouting preserves customer prices and the original delivery fee.
+Cancellation/deletion releases held units; completed delivery consumes them once.
+Stores cannot lower physical stock below reservations or remove reserved listings.
+Removing a store with branches or reservations is blocked.
+
+Tests: `node --test tests/store-inventory.test.js tests/order-dashboard.test.js tests/fulfillment-routing.test.js`.
+The inventory tests exercise selection, transaction rollback contracts, stock
+predicates, branch isolation, deadlines and ownership using model doubles.
+Validate transactions with a replica-set staging database before production rollout.
+
+#### Multi-store, multi-address and vehicle delivery checkout
+
+This is opt-in per database. First migrate store inventory, then Admin configures
+`vehicle-delivery-config` through `PUT stores/delivery-config` and packaged sizes
+through `PUT stores/delivery-products/:productId`. The mobile Admin **Vehicles**
+page exposes both controls. Vehicles are `motorcycle`, `car`, `van`, `truck`;
+each has `enabled`, `baseFee`, `distanceRate`, `maxWeightKg`, `maxVolumeLiters`,
+`lengthCm`, `widthCm`, `heightCm`. Rates are regional currency per mile for USA
+and per kilometer otherwise. Product `packageSize` uses positive `weightKg`,
+`lengthCm`, `widthCm`, `heightCm` for one packaged sale unit. No sizes or fees
+are inferred for unconfigured products. Capacities must be conservative usable
+limits: recommendations validate total weight/volume, cargo envelope volume and
+rotated parcel dimensions, not general 3-D bin packing or special handling.
+
+The server requires `GOOGLE_MAPS_API_KEY` with **Geocoding** and **Distance Matrix**
+enabled and billing configured. It verifies destinations/country itself and
+uses driving routes without straight-line pricing fallbacks. Each destination
+must match the selected shopping region. Each store needs valid pickup coordinates.
+
+Authenticated APIs (all paths below are relative to `/api/v1/stores/`):
+
+- `GET delivery-config`; Admin-only `PUT delivery-config` and
+  `PUT delivery-products/:productId` for capacities/rates and packaged sizes.
+- `GET/POST delivery-addresses`, `PUT delivery-addresses/:id` for private saved
+  addresses; `GET delivery-current-address` prefills the latest order/profile.
+  Addresses contain `label`, `address1`, `address2`, `city`, `zip`, `country`,
+  `phone`. Order addresses are immutable snapshots, independent of saved edits.
+- `POST checkouts/quote`: `cart` lines contain unique `key`, product ID,
+  whole `quantity`, quoted `price`, optional `storefrontId`. `addresses` contain
+  unique local `id` and address fields. `allocations` contain `key`, `addressId`,
+  whole `quantity`; every cart unit must be allocated exactly once.
+  Limits are 50 cart lines, 10 destinations, 100 allocations and 20 deliveries.
+  This saves a ten-minute authoritative quote, without reserving stock.
+  Stock is allocated nearest-first within price/scope constraints, using one
+  shared budget across destinations. Constrained storefront lines are allocated
+  before main-catalog lines so their limited supply cannot be consumed first.
+  Products from the same pickup and destination share one delivery fee.
+  Mixed main/storefront groups preserve the storefront branch constraint.
+- `POST checkouts/:id/prepare`: `method` is `card`, `bank` or `cash`;
+  `selections` contain one `{ key, vehicle }` for each quoted delivery.
+  Only server-offered suitable vehicles are accepted. Bank requires an active
+  `bankAccountId` from `GET delivery-bank-accounts`. All child orders/items and
+  stock reservations commit atomically. Stale price, stock, pickup coordinates
+  or incompatible package/capacity changes roll back the entire checkout.
+  Preparation is idempotent for the same checkout and payment method.
+- `POST checkouts/:id/payment` creates/reuses a server-priced Stripe intent
+  with a checkout-specific idempotency key, never a client-supplied amount.
+  Stripe remains USA-only with the existing **live secret key** policy.
+  `POST checkouts/:id/confirm` verifies Stripe status, amount received,
+  currency, intent ID, checkout metadata and owner before store assignments
+  become actionable. For bank payments, confirmation takes `{ sender, reference }`;
+  funds stay pending until Admin verifies them. Cash activates immediately outside
+  USA, is collected per child delivery, and reconciles when those deliveries finish.
+- `GET checkouts` and `GET checkouts/:id` recover payments and list child
+  statuses. Admin can list all with `GET checkouts?all=true`. Customer access is
+  owner-scoped. Client secrets are returned only by the protected payment endpoint.
+- `POST checkouts/:id/cancel` cancels an unpaid reservation. If Stripe already
+  succeeded, it recovers the paid checkout instead. The 30-second scheduler
+  similarly reconciles expired fifteen-minute holds. A provider outage never
+  releases a potentially paid reservation. Holds without an exposed payment
+  intent can be released safely; a racing intent write makes cancellation retry.
+- `POST checkouts/:id/deliveries/:orderId/cancel` cancels only that delivery,
+  before driver assignment. Stock releases transactionally and siblings remain
+  active. Paid nonzero child totals are recorded for refund; no paid child order
+  can be deleted through legacy endpoints.
+- Admin `POST checkouts/:id/deliveries/:orderId/refund` reconciles/retries card
+  refunds. The scheduler retries pending receipts, not failed refunds blindly.
+  A failed refund requires `{ retryFailed: true }` and a new guarded attempt key.
+  Lost receipts are recovered by Stripe metadata before creating any new refund;
+  pending receipts are retrieved by ID until resolved.
+- Admin `POST checkouts/:id/bank-confirm` records verified combined bank funds.
+  Cancelled deliveries are marked for refund even if cancelled before verification.
+  Admin returns bank funds manually and records `{ reference }` through
+  `POST checkouts/:id/deliveries/:orderId/manual-refund`. Do not send funds again
+  when a bank reservation expired: support must reconcile the original transfer.
+
+Child orders retain the checkout ID, chosen vehicle, cargo, assigned-store
+snapshot and their own destination/tracking lifecycle. Store acceptance starts
+only after checkout activation and still has the five-minute response window.
+Rerouting refreshes driving distance but preserves the original quoted fee and
+product prices; `quotedDeliveryDistanceKm` retains the charged-route snapshot.
+Vehicle-sized deliveries use an exact matching approved driver and occupy that
+vehicle exclusively until completion; legacy batching remains unchanged for
+other orders. Run one active dispatch process: the existing assignment queue is
+process-local, so multiple independent dispatch workers require shared
+serialization before enabling vehicle-capacity guarantees. Set driver vehicle
+types to canonical names (supported existing
+aliases include motorbike, sedan, SUV, minivan and pickup); unknown types do not
+silently become motorcycles.
+
+Validate with `node --test tests/multi-delivery.test.js tests/store-inventory.test.js tests/fulfillment-routing.test.js tests/order-dashboard.test.js`.
+Tests use model/provider doubles, including atomic rollback, price/stock
+constraints, quantity conservation, vehicle matching, amount verification,
+recovery and partial refunds. **Replica-set transaction/concurrency validation,
+real Google routes, and native Stripe payment/refund checks are still required
+on staging before enabling production.** Deploy backend and mobile together;
+this update does not run migration or change live settings automatically.
+
 - Order creation and updates accept `scheduledFor` or `scheduledDeliveryDate`.
   Both represent the same ISO-8601 timestamp; conflicting values return HTTP 400.
   The database stores `scheduledFor`, and serialized orders expose both names.
@@ -62,6 +411,104 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
   products remain out of the action queue and assigned-order details retain all items.
 - Existing `scheduledFor` records need no migration. Orders whose schedule or
   store association was never saved cannot be reconstructed from missing data.
+
+### Passenger rides (regular and shared)
+
+Ride service is a separate, initially disabled regional feature. Deploy the
+matching mobile screens, configure **Admin > Rides**, and verify Google Geocoding
+and Distance Matrix driving/traffic permissions before enabling requests. Admin
+sets the base fare, rate per mile in USA / km in Ethiopia, minute rate, shared
+discount, maximum pickup wait, maximum additional shared travel and search
+radius. Configure each company car/van's usable passenger seats (excluding the
+driver, 1-16). Existing drivers remain delivery-only until they opt into regular
+and/or shared rides. Motorcycle/truck passenger rides are not supported.
+
+All routes under `/api/v1/rides` require authentication and the normal regional
+database header:
+
+- `GET/PUT config`: authenticated policy read / Admin-only write. No default
+  pricing is silently activated. Existing requests retain their tariff snapshot.
+  Disabling requests does not strand existing riders or prevent payment.
+- `POST quote`: `mode` is `regular` or `shared`; ordered `stops` contain `type`
+  (`pickup`/`dropoff`), whole `passengers` and the same complete address fields
+  used by delivery checkout. Server geocoding verifies country/pins. Regular
+  rides allow 2-12 arranged stops with balanced passenger counts and one payer.
+  A shared booking has one pickup/dropoff for its own party; separate unrelated
+  bookings are pooled by the server. Quotes last ten minutes.
+- `POST :id/request`: idempotently submits that owner's quote. Approved,
+  unsuspended, online company drivers with enabled mode, adequate seats, fresh
+  GPS (120 seconds), no delivery load and a suitable verified road route are
+  ranked nearest-first within the configured radius. `GET /` and `GET :id`
+  provide owner-scoped history/status; customers never receive other bookings'
+  names, phones or stops. Driver GPS is returned only during the owner's active
+  ride, not after drop-off; completed rides retain driver contact for payment.
+- Shared insertion preserves existing stop order and evaluates driving time,
+  passenger capacity, every awaiting rider's pickup deadline and absolute
+  drop-off promises. Additional insertions cannot repeatedly expand an existing
+  rider's detour allowance. There are at most 12 pending stops per vehicle.
+  Constraints are predictions from current road data, not a guarantee against
+  traffic delays or time spent boarding. No straight-line routing substitute
+  is used when Google routing fails.
+- `GET me/driver` returns the authenticated company's separate ride offer,
+  route and completed payments. `POST me/offers/:id/accept|reject` claims or
+  immediately reroutes it. Offers expire after three minutes (earlier if the
+  configured pickup window ends); expired offers are hidden and cannot be
+  claimed. Claiming re-evaluates the current route and commits with optimistic
+  trip-version checks. The independent 30-second scan retries waiting rides,
+  expired offers and card-payment receipts, even with store inventory disabled.
+- `PUT me/modes`: explicit delivery/regular/shared booleans, at least one
+  enabled. `POST me/shared-intake` with `{ open: false }` immediately removes and
+  requeues accepted-but-not-picked-up shared bookings and any shared offer.
+  Those accepted bookings receive a fresh replacement-pickup window. Only
+  onboard riders' dropoffs remain. Disabling shared mode has the same effect;
+  onboard rides always remain completable. Reopen intake explicitly after
+  enabling shared mode if it was closed.
+- `POST me/location` accepts authenticated numeric GPS coordinates, timestamped
+  on the server. `POST me/next-stop` takes `stopKey: "<rideId>:<stopKey>"` and
+  completes only the next stop after fresh GPS places the driver within 300m.
+  Boarding/alighting updates onboard seats transactionally; the last stop
+  completes that booking and releases the vehicle when no stops remain.
+- `POST :id/cancel` is owner-only and allowed before first pickup, releasing
+  route/offer locks with no fare due. An onboard/completed ride cannot be
+  cancelled through this endpoint.
+
+Payment is enabled **after completion**, independently for each booking. Regular
+fares use the arranged itinerary's quoted road distance plus actual elapsed
+minutes from first pickup through final dropoff; the caller pays once, including
+their passengers. Shared fares use the booking's solo road distance/time,
+refreshed at its own pickup, minus the agreed discount; other customers'
+detours, waits and payments are never charged to this payer. Consequently the
+quote is an estimate, not a guaranteed final fare.
+
+`POST :id/payment-method` chooses card (USA native Stripe), bank transfer
+(configured active account) or cash (outside USA). The selected method is stable
+for recovery. `POST :id/payment` returns the existing/server-priced Stripe
+attempt; intents lost before persistence are recovered by ride metadata before
+creating another, including after provider idempotency retention. Confirmation
+verifies intent, payer, region, amount received and currency. `POST
+:id/payment-confirm` verifies card or saves bank `{ sender, reference }`, leaving
+bank payment pending. `POST :id/received-payment` is Admin-only for bank funds
+and assigned-driver/Admin-only for cash. Admin uses `GET admin/payments` and
+`GET/PUT admin/drivers[/:id]` for payment verification and passenger seats.
+Card payments retain the backend's existing live-secret-key requirement.
+
+Delivery assignment now writes the driver dispatch version and order together
+in a MongoDB transaction. **Deploy on a replica set / Atlas; standalone MongoDB
+cannot run these dispatch transactions.** Ride/offered vehicles and
+delivery-disabled drivers are excluded from delivery selection and claims.
+Manual company-driver assignment/reopening cannot bypass dispatch. Changing
+vehicle type or seat capacity during a passenger trip/offer, or deleting a
+driver with an active offer/trip or unpaid completed ride, is blocked.
+
+Keep the driver app in the foreground on its dashboard or Ride screen for GPS
+and offer polling; there is no background-location service in this change.
+External turn-by-turn navigation must return to the app for stop confirmation.
+Shared pooling can issue multiple Google road-leg lookups; provision API quota
+and billing. Run a single dispatch process as above. Test with
+`node --test tests/rides.test.js tests/fulfillment-routing.test.js`.
+Before production enablement, verify competing ride/delivery claims on a real
+replica set, live traffic routing, GPS/native navigation and native Stripe/bank/
+cash recovery on staging. No live settings or migrations run automatically.
 
 ### Automatic company fallback routing
 

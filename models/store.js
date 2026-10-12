@@ -33,6 +33,8 @@ const storeSchema = new mongoose.Schema({
   country: { type: String, default: "" },
   description: { type: String, default: "" },
   logo: { type: String, default: "" },
+  parentStore: { type: mongoose.Schema.Types.ObjectId, ref: "Store", default: null },
+  inventoryVersion: { type: Number, default: 0 },
   bankAccount: { type: String, default: "" },
   openHour: { type: String, default: "" },
   closeHour: { type: String, default: "" },

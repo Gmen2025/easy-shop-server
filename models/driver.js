@@ -48,6 +48,18 @@ const driverSchema = new mongoose.Schema({
     default: "",
     trim: true,
   },
+  exclusiveDelivery: { type: mongoose.Schema.Types.ObjectId, ref: "Order", default: null },
+  serviceModes: {
+    delivery: { type: Boolean, default: true },
+    regular: { type: Boolean, default: false },
+    shared: { type: Boolean, default: false },
+  },
+  passengerSeats: { type: Number, min: 1, max: 16 },
+  sharedIntakeOpen: { type: Boolean, default: true },
+  activeRideTrip: { type: mongoose.Schema.Types.ObjectId, ref: "RideTrip", default: null },
+  pendingRideOffer: { type: mongoose.Schema.Types.ObjectId, ref: "Ride", default: null },
+  dispatchVersion: { type: Number, default: 0 },
+  rideLocationUpdatedAt: Date,
   vehicle: {
     type: { type: String, default: "", trim: true },
     make: { type: String, default: "", trim: true },

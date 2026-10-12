@@ -11,6 +11,11 @@ const { reviewSchema } = require('../models/review');
 const { payoutSchema } = require('../models/payout');
 const { serviceRequestSchema } = require('../models/service-request');
 const { driverWalletTransactionSchema } = require('../models/driver-wallet-transaction');
+const { storeInventorySchema } = require('../models/store-inventory');
+const { checkoutGroupSchema } = require('../models/checkout-group');
+const { deliveryAddressSchema } = require('../models/delivery-address');
+const { rideSchema } = require('../models/ride');
+const { rideTripSchema } = require('../models/ride-trip');
 
 const DEFAULT_DB_NAME = process.env.DEFAULT_DB_NAME || 'E_Shopping';
 const DEFAULT_ALLOWED_DBS = ['E_Shopping', 'E_Shopping_2', 'E_ShopUSA', 'E_ShoppingUSA'];
@@ -87,6 +92,11 @@ function getModelsForDb(dbName) {
     User: db.models.User || db.model('User', userSchema),
     SiteSetting: db.models.SiteSetting || db.model('SiteSetting', siteSettingSchema),
     Store: db.models.Store || db.model('Store', storeSchema),
+    StoreInventory: db.models.StoreInventory || db.model('StoreInventory', storeInventorySchema),
+    CheckoutGroup: db.models.CheckoutGroup || db.model('CheckoutGroup', checkoutGroupSchema),
+    DeliveryAddress: db.models.DeliveryAddress || db.model('DeliveryAddress', deliveryAddressSchema),
+    Ride: db.models.Ride || db.model('Ride', rideSchema),
+    RideTrip: db.models.RideTrip || db.model('RideTrip', rideTripSchema),
     Driver: db.models.Driver || db.model('Driver', driverSchema),
     Review: db.models.Review || db.model('Review', reviewSchema),
     Payout: db.models.Payout || db.model('Payout', payoutSchema),

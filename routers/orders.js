@@ -15,6 +15,8 @@ const { restoreCompanyDriversSuspendedForBalance } = require("../helpers/driver-
 const { getDriverLocation } = require("../helpers/driver-location");
 const { getCommissionRate, debitCommission } = require("../helpers/driver-wallet");
 const { buildDriverOrderSummary, isDropoffRevealed } = require("../helpers/driver-view");
+const { inventoryEnabled, normalizeLines, eligibleStores, reserve, assignStore, updateManagedOrder } = require("../helpers/store-inventory");
+const { vehicleMatches } = require("../helpers/vehicle-delivery");
 
 const ALLOWED_DELIVERY_STATUSES = ["Pending", "Driver Assigned", "Picked Up", "Delivered"];
 
@@ -125,6 +127,7 @@ const buildDeliveryDetailsEmailLines = (order) => {
 
 const shouldAutoDispatchOrder = (order) => {
   if (!order) return false;
+  if (order.inventoryManaged && order.fulfillmentStatus !== "accepted") return false;
 
   const hasDriver = Boolean(order.driver);
   if (hasDriver) return false;
@@ -458,6 +461,7 @@ router.get(`/:id/tracking`, async (req, res) => {
     orderId: String(order._id),
     status: order.status,
     deliveryStatus: order.deliveryStatus,
+    internationalShipping: order.internationalShipping,
     dispatchStatus: order.dispatchStatus,
     ...getDeliverySchedule(order),
     driver: driver
@@ -554,7 +558,7 @@ router.get("/admin/company-fulfillable", requireAdmin, async (req, res) => {
   }
 });
 
-async function hasNearbyPartnerDriver(Driver, Order, coords) {
+async function hasNearbyPartnerDriver(Driver, Order, coords, requiredVehicle) {
   const nearbyPartnerDrivers = await Driver.find({
     isCompanyOwned: { $ne: true },
     isSuspended: { $ne: true },
@@ -568,10 +572,11 @@ async function hasNearbyPartnerDriver(Driver, Order, coords) {
     },
   });
   for (const driver of nearbyPartnerDrivers) {
+    if (!vehicleMatches(driver, requiredVehicle)) continue;
     const activeOrders = await Order.countDocuments({
       driver: driver._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] },
     });
-    if (activeOrders < MAX_ACTIVE_ORDERS_PER_DRIVER) return true;
+    if (activeOrders < (requiredVehicle ? 1 : MAX_ACTIVE_ORDERS_PER_DRIVER)) return true;
   }
   return false;
 }
@@ -603,6 +608,7 @@ router.get("/company/my-deliveries", async (req, res) => {
       $or: [{ companyOfferDriver: driver._id }, { companyOfferDriver: null }],
       deliveryStatus: "Pending",
       status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
+      $and: [{ $or: [{ inventoryManaged: { $ne: true } }, { fulfillmentStatus: "accepted" }] }],
     })
       .populate("store", "name address location")
       .populate({
@@ -624,10 +630,10 @@ router.get("/company/my-deliveries", async (req, res) => {
       if (!orderCoords) continue;
       const excludedDriverIds = (order.companyDriverResponses || [])
         .filter((entry) => entry.status === "rejected").map((entry) => entry.driver);
-      if (!order.companyOfferDriver && await hasNearbyPartnerDriver(Driver, Order, orderCoords)) {
+      if (!order.companyOfferDriver && await hasNearbyPartnerDriver(Driver, Order, orderCoords, order.requiredVehicle)) {
         continue;
       }
-      const fallback = await findCompanyDriver(Driver, Order, orderCoords, { excludedDriverIds, maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER });
+      const fallback = await findCompanyDriver(Driver, Order, orderCoords, { excludedDriverIds, maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER, requiredVehicle: order.requiredVehicle });
       if (!order.companyOfferDriver && fallback && String(fallback._id) === String(driver._id)) {
         const result = await offerCompanyDelivery({
           Order, User: req.dbModels.User, order, candidate: fallback,
@@ -643,6 +649,8 @@ router.get("/company/my-deliveries", async (req, res) => {
           _id: order._id,
           store: orderStore,
           deliveryFee: order.deliveryFee,
+          requiredVehicle: order.requiredVehicle,
+          checkoutGroup: order.checkoutGroup,
           ...getDeliverySchedule(order),
           dateOrdered: order.dateOrdered,
           // Company drivers pick their own routes, so the full drop-off address/coordinates are
@@ -717,10 +725,11 @@ router.put("/:id/company-claim", async (req, res) => {
     if (!orderCoords) {
       return res.status(400).json({ success: false, message: "Pickup location is required for driver assignment." });
     }
-    const fallback = (order.companyOfferDriver || !(await hasNearbyPartnerDriver(Driver, Order, orderCoords)))
+    const fallback = (order.companyOfferDriver || !(await hasNearbyPartnerDriver(Driver, Order, orderCoords, order.requiredVehicle)))
       ? await findCompanyDriver(Driver, Order, orderCoords, {
         excludedDriverIds: (order.companyDriverResponses || []).filter((entry) => entry.status === "rejected").map((entry) => entry.driver),
         maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER,
+        requiredVehicle: order.requiredVehicle,
       })
       : null;
     if (!fallback || String(fallback._id) !== String(driver._id)) {
@@ -994,12 +1003,15 @@ router.post(`/`, async (req, res) => {
       });
     }
 
-    validatedDriver = await Driver.findById(requestedDriverId).select("_id");
+    validatedDriver = await Driver.findById(requestedDriverId).select("_id isCompanyOwned");
     if (!validatedDriver) {
       return res.status(400).json({
         success: false,
         message: "Driver not found.",
       });
+    }
+    if (validatedDriver.isCompanyOwned) {
+      return res.status(409).json({ success: false, message: "Company drivers must claim product deliveries through dispatch; direct assignment bypasses ride locks." });
     }
   }
 
@@ -1010,6 +1022,30 @@ router.post(`/`, async (req, res) => {
   const deliverySetting = await req.dbModels.SiteSetting.findOne({ key: "delivery-config" })
     .select("deliveryConfig deliveryOrigin")
     .lean();
+
+  const inventoryManaged = await inventoryEnabled(req.dbModels);
+  let inventoryLines = [];
+  let inventoryStores = [];
+  if (inventoryManaged) {
+    try {
+      inventoryLines = normalizeLines(req.body.orderItems);
+      if (req.body.storefrontId && !mongoose.isValidObjectId(req.body.storefrontId)) {
+        return res.status(400).json({ success: false, message: "Invalid storefront ID." });
+      }
+      inventoryStores = await eligibleStores(req.dbModels, inventoryLines, {
+        customerLocation: req.body.customerLocation, storefrontId: req.body.storefrontId,
+      });
+      if (!inventoryStores.length) {
+        return res.status(409).json({ success: false, message: "No single store can fulfill your entire cart at the quoted prices. Refresh checkout or remove unavailable items." });
+      }
+      if (requestedDriverId || (requestedDeliveryStatus && requestedDeliveryStatus !== "Pending")) {
+        return res.status(400).json({ success: false, message: "Store acceptance is required before driver assignment." });
+      }
+    } catch (error) {
+      console.error("Checkout inventory selection failed:", error.message);
+      return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to verify store inventory." });
+    }
+  }
 
   // Calculate total price
   let itemsSubtotal = 0;
@@ -1029,20 +1065,25 @@ router.post(`/`, async (req, res) => {
         .status(400)
         .send(`Product "${product.name}" is not available for purchase yet.`);
     }
-    if ((product.countInStock || 0) < (orderItem.quantity || 0)) {
+    if (!inventoryManaged && (product.countInStock || 0) < (orderItem.quantity || 0)) {
       return res
         .status(400)
         .send(`Product "${product.name}" does not have enough stock available.`);
     }
 
-    itemsSubtotal += product.price * orderItem.quantity;
+    const quoted = inventoryManaged ? inventoryLines.find((line) => line.product === String(product._id)) : null;
+    if (inventoryManaged && !req.body.storefrontId &&
+        Math.round(product.price * 100) !== Math.round(quoted.price * 100)) {
+      return res.status(409).json({ success: false, message: `The price of "${product.name}" changed. Refresh your cart.` });
+    }
+    itemsSubtotal += (quoted ? quoted.price : product.price) * orderItem.quantity;
 
     if (!inferredStoreId && product.store) {
       inferredStoreId = product.store;
     }
   }
 
-  const pickupStore = await resolvePickupStore(Store, {
+  const pickupStore = inventoryManaged ? inventoryStores[0] : await resolvePickupStore(Store, {
     customerLocation: req.body.customerLocation,
     preferredStoreId: validatedStore?._id || inferredStoreId,
   });
@@ -1078,7 +1119,7 @@ router.post(`/`, async (req, res) => {
   }
   const deliveryPlan = deliveryPlanResult.value;
 
-  const orderItemsIDSResolved = await Promise.all(req.body.orderItems.map(async (item) => {
+  const orderItemsIDSResolved = inventoryManaged ? [] : await Promise.all(req.body.orderItems.map(async (item) => {
     const orderItem = await new OrderItem({ quantity: item.quantity, product: item.product }).save();
     return orderItem._id;
   }));
@@ -1122,7 +1163,9 @@ router.post(`/`, async (req, res) => {
     country: req.body.country,
     phone: req.body.phone,
     customerEmail,
-    status: req.body.status,
+    status: inventoryManaged ? "1" : req.body.status,
+    inventoryManaged,
+    storefrontId: inventoryManaged ? req.body.storefrontId || null : null,
     paymentMethod,
     methodName,
     cardType,
@@ -1163,7 +1206,26 @@ router.post(`/`, async (req, res) => {
   });
 
   // Save the Order document
-  const ord = await order.save();
+  let ord;
+  if (inventoryManaged) {
+    try {
+      ord = await Order.db.transaction(async (session) => {
+        await reserve(req.dbModels, resolvedStoreId, inventoryLines, session);
+        const savedItems = await OrderItem.create(inventoryLines.map((line) => ({
+          product: line.product, quantity: line.quantity, unitPrice: line.price,
+        })), { session, ordered: true });
+        order.orderItems = savedItems.map((item) => item._id);
+        assignStore(order, pickupStore, inventoryLines);
+        await order.save({ session });
+        return order;
+      });
+    } catch (error) {
+      console.error("Checkout inventory reservation failed:", error.message);
+      return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to reserve inventory. No order was created." });
+    }
+  } else {
+    ord = await order.save();
+  }
 
   // Handle the case where the order could not be created
   if (!ord) {
@@ -1198,12 +1260,12 @@ router.post(`/`, async (req, res) => {
   // Push + email notifications run after the response (fire-and-forget).
   setImmediate(async () => {
     try {
-      if (pickupStore?.isCompanyOwned && pickupStore.owner) {
+      if ((inventoryManaged || pickupStore?.isCompanyOwned) && pickupStore?.owner) {
         await sendPushToUser({
           User,
           userId: pickupStore.owner,
           title: "New company store order",
-          body: `Order #${ord._id} is assigned to your store.`,
+          body: inventoryManaged ? `Order #${ord._id} needs a response within 5 minutes.` : `Order #${ord._id} is assigned to your store.`,
           data: { type: "store_order_assigned", orderId: String(ord._id) },
         });
       }
@@ -1361,6 +1423,18 @@ router.put("/:id", async (req, res) => {
   if (!existingOrder) {
     return res.status(400).send("the order cannot be updated!");
   }
+  if (existingOrder.checkoutGroup && !req.auth?.isAdmin) {
+    try {
+      const assignedDriver = existingOrder.driver && req.auth?.userId
+        ? await req.dbModels.Driver.findOne({ _id: existingOrder.driver, user: req.auth.userId }) : null;
+      if (!assignedDriver) {
+        return res.status(403).json({ success: false, message: "Only Admin or the assigned driver can update a grouped delivery. Customers must use checkout cancellation." });
+      }
+    } catch (error) {
+      console.error("Grouped delivery permission check failed:", error.message);
+      return res.status(500).json({ success: false, message: "Unable to verify delivery permissions. Please retry." });
+    }
+  }
 
   // Build update object with allowed fields
   const updateFields = {};
@@ -1423,7 +1497,7 @@ router.put("/:id", async (req, res) => {
         });
       }
 
-      const driverRecord = await req.dbModels.Driver.findById(req.body.driver).select("_id");
+      const driverRecord = await req.dbModels.Driver.findById(req.body.driver).select("_id isCompanyOwned");
       if (!driverRecord) {
         return res.status(400).json({
           success: false,
@@ -1432,6 +1506,9 @@ router.put("/:id", async (req, res) => {
       }
 
       updateFields.driver = driverRecord._id;
+      if (driverRecord.isCompanyOwned && String(existingOrder.driver || "") !== String(driverRecord._id)) {
+        return res.status(409).json({ success: false, message: "Company drivers must claim product deliveries through dispatch, not manual driver edits." });
+      }
     }
   }
 
@@ -1503,13 +1580,30 @@ router.put("/:id", async (req, res) => {
     updateFields.dispatchPriority = dispatchPriority;
   }
 
-  let order = await Order.findByIdAndUpdate(
+  let order;
+  if (existingOrder.driver && !["Driver Assigned", "Picked Up"].includes(existingOrder.deliveryStatus) &&
+      ["Driver Assigned", "Picked Up"].includes(updateFields.deliveryStatus)) {
+    const companyDriver = await req.dbModels.Driver.findOne({ _id: existingOrder.driver, isCompanyOwned: true }).select("_id");
+    if (companyDriver) {
+      return res.status(409).json({ success: false, message: "Do not reopen a company driver's completed/released delivery. New assignments must go through dispatch." });
+    }
+  }
+  if (existingOrder.inventoryManaged) {
+    try {
+      order = await updateManagedOrder(req.dbModels, req.params.id, updateFields);
+    } catch (error) {
+      console.error("Order inventory update failed:", error.message);
+      return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to update order inventory." });
+    }
+  } else {
+    order = await Order.findByIdAndUpdate(
     req.params.id,
     updateFields,
     {
       new: true,
     }
-  );
+    );
+  }
   if (!order) {
     return res.status(400).send("the category cannot be updated!");
   }
@@ -1741,7 +1835,10 @@ router.delete("/:id", async (req, res) => {
   const { Order, OrderItem, User } = req.dbModels;
 
   try {
-    const order = await Order.findByIdAndDelete(req.params.id).exec();
+    const existing = await Order.findById(req.params.id);
+    const order = existing?.inventoryManaged
+      ? await updateManagedOrder(req.dbModels, req.params.id, {}, { deleting: true })
+      : await Order.findByIdAndDelete(req.params.id).exec();
 
     if (!order) {
       return res

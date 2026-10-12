@@ -208,3 +208,11 @@ test("directly assigned company orders count all products, not just catalog-owne
   assert.equal(summary.units, 7);
   assert.equal(summary.orderItems.length, 4);
 });
+test("international shipping and converted birr charges never count as US store product revenue", () => {
+  const summary = buildStoreOrderSummary({ store: "company", inventoryManaged: true,
+    itemsSubtotal: 0, totalPrice: 25, deliveryFee: 5, internationalShippingFee: 20, paymentAmount: 3750,
+    internationalShipping: { status: "awaiting_hub", hub: { address1: "US hub" } }, orderItems: [] }, "company", new Set());
+  assert.equal(summary.sales, 0);
+  assert.equal(summary.internationalShippingFee, 20);
+  assert.equal(summary.internationalShipping.hub.address1, "US hub");
+});

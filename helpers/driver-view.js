@@ -44,6 +44,9 @@ function buildDriverOrderSummary(order, options = {}) {
     queueBatchId: order.queueBatchId || null,
     queueSequence: order.queueSequence || 0,
     deliveryFee: order.deliveryFee,
+    requiredVehicle: order.requiredVehicle,
+    checkoutGroup: order.checkoutGroup,
+    cargo: order.cargo,
     ...getDeliverySchedule(order),
     itemCount: (order.orderItems || []).reduce((sum, item) => sum + Number(item?.quantity || 0), 0),
     items: (order.orderItems || []).map((item) => ({

@@ -13,7 +13,7 @@ const orderRouter = require("../routers/orders");
 function query(value) {
   const chain = {
     lean: () => chain, select: () => chain, sort: () => chain, populate: () => chain,
-    limit: () => chain,
+    limit: () => chain, session: () => chain,
     then: (resolve, reject) => Promise.resolve(value).then(resolve, reject),
   };
   return chain;
@@ -155,6 +155,18 @@ test("the sole company driver with spare capacity is the default even when anoth
   assert.equal((await findCompanyDriver(Driver, Order, [0, 0]))._id, "sole");
 });
 
+test("vehicle-sized deliveries use an exact matching idle company driver, not a smaller or already-loaded vehicle", async () => {
+  const Driver = { updateMany: async () => {}, find: () => query([
+    { _id: "car", vehicleType: "car", location: { coordinates: [0, 0] } },
+    { _id: "loaded-van", vehicleType: "van", location: { coordinates: [0, 0] } },
+    { _id: "exclusive-van", vehicleType: "van", exclusiveDelivery: "active", location: { coordinates: [0, 0] } },
+    { _id: "idle-van", vehicleType: "van", location: { coordinates: [1, 0] } },
+  ]) };
+  const Order = { countDocuments: async (filter) => filter.driver === "loaded-van" ? 1 : 0 };
+  assert.equal((await findCompanyDriver(Driver, Order, [0, 0], { requiredVehicle: "van" }))._id, "idle-van");
+  assert.equal(await findCompanyDriver(Driver, Order, [0, 0], { requiredVehicle: "motorcycle" }), null);
+});
+
 function dispatchFixture({ partner = false, full = false, assigned = false, future = false, collision = false } = {}) {
   const driverId = new mongoose.Types.ObjectId();
   const candidate = {
@@ -172,9 +184,10 @@ function dispatchFixture({ partner = false, full = false, assigned = false, futu
   let companyQueries = 0;
   const models = {
     Order: {
+      db: { transaction: (action) => action({}) },
       findById: () => query(order),
       find: () => query([]),
-      countDocuments: async () => full ? 3 : order.driver ? 1 : 0,
+      countDocuments: () => query(full ? 3 : order.driver ? 1 : 0),
       findOne: () => query(null),
       findOneAndUpdate: (filter, update) => {
         assert.equal(filter.driver, null);
@@ -198,7 +211,14 @@ function dispatchFixture({ partner = false, full = false, assigned = false, futu
         assert.equal(filter.location.$near.$maxDistance, 5000);
         return query(partner ? [candidate] : []);
       },
-      findOneAndUpdate: async () => candidate,
+      findOneAndUpdate: async (filter, update, options) => {
+        assert.equal(filter.activeRideTrip, null);
+        assert.equal(filter.pendingRideOffer, null);
+        assert.equal(filter["serviceModes.delivery"].$ne, false);
+        assert.equal(update.$inc.dispatchVersion, 1, "Every assignment must write the driver, including non-vehicle-sized loads.");
+        assert.ok(options.session, "Ride exclusion and order assignment must share a transaction.");
+        return candidate;
+      },
     },
     Store: storeModel([order.store]),
     User: { findById: () => query(null) },
@@ -223,6 +243,38 @@ test("automatic dispatch offers out-of-radius delivery without assigning it befo
   const assignments = fixture.counts().assignments;
   await assignDriverToOrder(String(fixture.order._id), fixture.io, { models: fixture.models });
   assert.equal(fixture.counts().assignments, assignments, "retry must not repeatedly notify an unchanged offer");
+});
+
+test("automatic dispatch refuses a mismatched vehicle even when that company driver is otherwise available", async () => {
+  const fixture = dispatchFixture();
+  fixture.order.requiredVehicle = "van";
+  fixture.candidate.vehicleType = "car";
+  const result = await assignDriverToOrder(String(fixture.order._id), fixture.io, { models: fixture.models });
+  assert.equal(result.success, false);
+  assert.equal(fixture.order.driver, null);
+  assert.equal(fixture.order.dispatchStatus, "assignment_failed");
+});
+
+test("a matching grouped delivery locks the whole vehicle and blocks another delivery until completion", async () => {
+  const fixture = dispatchFixture();
+  fixture.order.requiredVehicle = "van";
+  fixture.order.companyOfferDriver = fixture.candidate._id;
+  fixture.candidate.vehicleType = "van";
+  fixture.models.Driver.findOneAndUpdate = async (filter, update) => {
+    assert.equal(filter.exclusiveDelivery, null);
+    assert.equal(filter.activeRideTrip, null);
+    assert.equal(filter.pendingRideOffer, null);
+    assert.equal(update.$inc.dispatchVersion, 1);
+    Object.assign(fixture.candidate, update);
+    return fixture.candidate;
+  };
+  const result = await assignDriverToOrder(String(fixture.order._id), fixture.io, {
+    models: fixture.models, companyDriverId: String(fixture.candidate._id),
+  });
+  assert.equal(result.success, true);
+  assert.equal(String(fixture.candidate.exclusiveDelivery), String(fixture.order._id));
+  assert.equal(fixture.candidate.isAvailable, false);
+  assert.equal(await findCompanyDriver(fixture.models.Driver, fixture.models.Order, [0, 0], { requiredVehicle: "van" }), null);
 });
 
 test("accepting a company offer assigns the driver without needing a live socket", async () => {
@@ -345,11 +397,11 @@ test("concurrent company claims still serialize capacity checks and cannot excee
   const fixtures = [first, second];
   for (const f of fixtures) {
     f.order.companyOfferDriver = f.candidate._id;
-    f.models.Order.countDocuments = async () => {
+    f.models.Order.countDocuments = () => query((async () => {
       const activeCount = 2 + fixtures.filter((entry) => entry.order.driver).length;
       await new Promise(setImmediate);
       return activeCount;
-    };
+    })());
     f.models.Driver.findByIdAndUpdate = async (id, update) => {
       Object.assign(f.candidate, update);
       return f.candidate;

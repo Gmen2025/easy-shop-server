@@ -187,7 +187,10 @@ router.get('/bank-account', async (req, res) => {
 
     // Check if bank accounts has any actual data
     const bankAccounts = setting?.bankAccounts || [];
-    const activeBankAccounts = bankAccounts.filter(bank => bank.isActive !== false);
+    const nativeCurrency = /usa/i.test(req.dbName) ? 'USD' : 'ETB';
+    const requestedCurrency = String(req.query.currency || nativeCurrency).toUpperCase();
+    const activeBankAccounts = bankAccounts.filter(bank => bank.isActive !== false &&
+      (requestedCurrency === 'ALL' || (bank.currency || nativeCurrency) === requestedCurrency));
     const hasData = activeBankAccounts.length > 0;
 
     return res.status(200).json({
@@ -265,6 +268,9 @@ router.put('/bank-account', async (req, res) => {
         message: 'Invalid action. Must be add, update, or delete.',
       });
     }
+    if (action !== 'delete' && bankAccount?.currency !== undefined && !['ETB', 'USD'].includes(bankAccount.currency)) {
+      return res.status(400).json({ success: false, message: 'Bank currency must be ETB or USD.' });
+    }
 
     let setting = await SiteSetting.findOne({ key: BANK_ACCOUNT_SETTING_KEY });
 
@@ -288,6 +294,7 @@ router.put('/bank-account', async (req, res) => {
         accountHolderName: bankAccount?.accountHolderName || '',
         bankCode: bankAccount?.bankCode || '',
         additionalInfo: bankAccount?.additionalInfo || '',
+        currency: bankAccount?.currency || (/usa/i.test(req.dbName) ? 'USD' : 'ETB'),
         isActive: true,
       };
       setting.bankAccounts.push(newBank);
@@ -309,12 +316,14 @@ router.put('/bank-account', async (req, res) => {
       }
       setting.bankAccounts[bankIndex] = {
         ...setting.bankAccounts[bankIndex],
+        _id: setting.bankAccounts[bankIndex]._id,
         bankName: bankAccount?.bankName || setting.bankAccounts[bankIndex].bankName,
         accountNumber: bankAccount?.accountNumber || setting.bankAccounts[bankIndex].accountNumber,
         accountHolderName: bankAccount?.accountHolderName || setting.bankAccounts[bankIndex].accountHolderName,
         bankCode: bankAccount?.bankCode || setting.bankAccounts[bankIndex].bankCode,
         additionalInfo: bankAccount?.additionalInfo || setting.bankAccounts[bankIndex].additionalInfo,
         isActive: bankAccount?.isActive !== undefined ? bankAccount.isActive : setting.bankAccounts[bankIndex].isActive,
+        currency: bankAccount?.currency || setting.bankAccounts[bankIndex].currency || (/usa/i.test(req.dbName) ? 'USD' : 'ETB'),
       };
     } else if (action === 'delete') {
       if (!bankAccount?._id) {

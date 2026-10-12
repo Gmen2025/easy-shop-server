@@ -1,6 +1,7 @@
 const STORE_RADIUS_METERS = 10000;
 const DRIVER_RADIUS_METERS = 5000;
 const { restoreCompanyDriversSuspendedForBalance } = require("./driver-wallet");
+const { vehicleMatches } = require("./vehicle-delivery");
 
 function getCompanyDriverEligibility(driver, activeOrders, maxActiveOrders = 3) {
   const available = driver.isAvailable === true || driver.availabilityStatus === true;
@@ -12,6 +13,10 @@ function getCompanyDriverEligibility(driver, activeOrders, maxActiveOrders = 3) 
     if (driver.suspensionReason?.trim()) {
       message += ` Reason: ${driver.suspensionReason.trim()}`;
     }
+  } else if (driver.exclusiveDelivery) {
+    message = "Complete your vehicle-sized delivery before accepting another load.";
+  } else if (driver.activeRideTrip || driver.pendingRideOffer || driver.serviceModes?.delivery === false) {
+    message = "Product delivery is unavailable while a ride is active/offered or delivery service is disabled.";
   } else if (activeOrders >= maxActiveOrders) {
     message = `Your delivery capacity is full (${activeOrders}/${maxActiveOrders}). Complete an active delivery before claiming another.`;
   } else if (!available) {
@@ -23,7 +28,8 @@ function getCompanyDriverEligibility(driver, activeOrders, maxActiveOrders = 3) 
     isSuspended: Boolean(driver.isSuspended),
     activeOrders,
     maxActiveOrders,
-    eligible: driver.approvalStatus === "approved" && !driver.isSuspended &&
+    eligible: driver.approvalStatus === "approved" && !driver.isSuspended && !driver.exclusiveDelivery &&
+      !driver.activeRideTrip && !driver.pendingRideOffer && driver.serviceModes?.delivery !== false &&
       available && activeOrders < maxActiveOrders,
     message,
   };
@@ -78,6 +84,7 @@ async function reconcileUnassignedPickupStores({ Store, Order }) {
   const stores = await Store.find({ approvalStatus: "approved", isOpen: { $ne: false } }).lean();
   if (!stores.length) return 0;
   const scope = {
+    inventoryManaged: { $ne: true },
     store: null,
     status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
     deliveryStatus: { $ne: "Delivered" },
@@ -107,7 +114,7 @@ function isCompanyFulfillableProduct(product, companyLocation, radiusMeters = ST
   return distanceMeters(getCoordinates(companyLocation), getCoordinates(store.location)) > radiusMeters;
 }
 
-async function findCompanyDriver(Driver, Order, coordinates, { excludedDriverIds = [], maxActiveOrders = 3 } = {}) {
+async function findCompanyDriver(Driver, Order, coordinates, { excludedDriverIds = [], maxActiveOrders = 3, requiredVehicle } = {}) {
   await restoreCompanyDriversSuspendedForBalance(Driver);
   const drivers = await Driver.find({
     isCompanyOwned: true,
@@ -118,10 +125,11 @@ async function findCompanyDriver(Driver, Order, coordinates, { excludedDriverIds
   }).lean();
   const eligible = [];
   for (const driver of drivers) {
+    if (!vehicleMatches(driver, requiredVehicle)) continue;
     const activeCount = await Order.countDocuments({
       driver: driver._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] },
     });
-    if (activeCount < maxActiveOrders) eligible.push(driver);
+    if (activeCount < (requiredVehicle ? 1 : maxActiveOrders)) eligible.push(driver);
   }
   if (eligible.length === 1) return eligible[0];
   if (!coordinates) return null;

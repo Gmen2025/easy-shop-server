@@ -17,6 +17,7 @@ function normalizeDbEnvSuffix(dbName) {
 }
 
 function getStripeKeyCandidates(dbName) {
+  if (dbName === 'ETHIOPIA_USD') return ['STRIPE_SECRET_KEY_ETHIOPIA_USD'];
   const dbSuffix = normalizeDbEnvSuffix(dbName);
   const candidates = [];
   const aliases = new Set();
@@ -251,3 +252,4 @@ router.post('/create-payment-intent', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.getStripe = getStripe;

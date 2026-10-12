@@ -137,6 +137,8 @@ const storesRouter = require('./routers/stores');
 const storeOwnerRouter = require('./routers/storeOwner');
 const driversRouter = require('./routers/drivers');
 const serviceRequestsRouter = require('./routers/service-requests');
+const ridesRouter = require('./routers/rides');
+const exchangeRouter = require('./routers/exchange-rate');
 
 //Middleware
 app.use(express.json());
@@ -184,6 +186,8 @@ app.use(`${api}/stores`, storesRouter);
 app.use(`${api}/stores`, storeOwnerRouter);
 app.use(`${api}/drivers`, driversRouter);
 app.use(`${api}/service-requests`, serviceRequestsRouter);
+app.use(`${api}/rides`, ridesRouter);
+app.use(`${api}/exchange-rate`, exchangeRouter);
 // Notifications: push-token sub-routes live under /users, send/health under /notifications
 app.use(`${api}/notifications`, notificationsRouter);
 app.use(`${api}/users`, notificationsRouter);

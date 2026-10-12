@@ -3,6 +3,7 @@ const { getModelsForDb, DEFAULT_DB_NAME } = require("../helpers/db-manager");
 const { sendPushToUser, sendPushToTokens } = require("../helpers/push-notify");
 const { buildDriverOrderSummary } = require("../helpers/driver-view");
 const { DRIVER_RADIUS_METERS, getCoordinates, resolvePickupStore, findCompanyDriver } = require("../helpers/fulfillment-routing");
+const { vehicleMatches, vehicleName } = require("../helpers/vehicle-delivery");
 
 const DRIVER_RESPONSE_EVENT = "delivery_request_response";
 const DRIVER_REQUEST_EVENT = "new_delivery_request";
@@ -129,7 +130,8 @@ async function countActiveOrders(Order, driverId) {
 
 // Prefer a driver already out on a delivery whose store or drop-off is close to the new
 // order, so pickups/drop-offs naturally cluster instead of criss-crossing the city.
-async function findBatchPartnerDriver(Order, Driver, { storeCoordinates, dropCoordinates, excludedDriverIds = [] }) {
+async function findBatchPartnerDriver(Order, Driver, { storeCoordinates, dropCoordinates, excludedDriverIds = [], requiredVehicle }) {
+  if (requiredVehicle) return null;
   const excludedIdSet = new Set(excludedDriverIds.map((id) => String(id)));
 
   const activeOrders = await Order.find({
@@ -176,13 +178,13 @@ async function findBatchPartnerDriver(Order, Driver, { storeCoordinates, dropCoo
         $maxDistance: MAX_ASSIGNMENT_DISTANCE_METERS,
       } },
     });
-    if (driver) return driver;
+    if (driver && vehicleMatches(driver)) return driver;
   }
 
   return null;
 }
 
-async function findNearestAvailableDriver(Driver, Order, storeCoordinates, excludedDriverIds = []) {
+async function findNearestAvailableDriver(Driver, Order, storeCoordinates, excludedDriverIds = [], requiredVehicle) {
   const excludedObjectIds = excludedDriverIds
     .map((id) => toObjectId(id))
     .filter(Boolean);
@@ -211,8 +213,9 @@ async function findNearestAvailableDriver(Driver, Order, storeCoordinates, exclu
   // since $near can't be combined with a live order-count aggregation.
   const candidates = await Driver.find(nearQuery);
   for (const candidate of candidates) {
+    if (!vehicleMatches(candidate, requiredVehicle)) continue;
     const activeCount = await countActiveOrders(Order, candidate._id);
-    if (activeCount < MAX_ACTIVE_ORDERS_PER_DRIVER) {
+    if (activeCount < (requiredVehicle ? 1 : MAX_ACTIVE_ORDERS_PER_DRIVER)) {
       return candidate;
     }
   }
@@ -236,8 +239,16 @@ async function syncDriverAvailability(Driver, Order, driverId) {
   if (!driverId) return;
   const driver = await Driver.findById(driverId);
   if (!driver || driver.isSuspended) return;
+  if (driver.activeRideTrip || driver.pendingRideOffer || driver.serviceModes?.delivery === false) return;
 
   const activeCount = await countActiveOrders(Order, driverId);
+  if (driver.exclusiveDelivery) {
+    if (activeCount > 0) {
+      if (driver.isAvailable) await markDriverAvailability(Driver, driverId, false);
+      return;
+    }
+    await Driver.findByIdAndUpdate(driverId, { exclusiveDelivery: null });
+  }
   if (activeCount < MAX_ACTIVE_ORDERS_PER_DRIVER && !driver.isAvailable) {
     await markDriverAvailability(Driver, driverId, true);
   } else if (activeCount >= MAX_ACTIVE_ORDERS_PER_DRIVER && driver.isAvailable) {
@@ -299,6 +310,9 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
     if (!order) {
       throw new Error("Order not found.");
     }
+    if (order.inventoryManaged && order.fulfillmentStatus !== "accepted") {
+      return { success: false, reason: "store_acceptance_required" };
+    }
     if (order.driver || ["Delivered", "Picked Up"].includes(order.deliveryStatus) ||
       ["3", "4", "Delivered", "Cancelled"].includes(order.status)) {
       return { success: false, reason: "order_not_dispatchable" };
@@ -346,6 +360,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
       storeCoordinates,
       dropCoordinates,
       excludedDriverIds: Array.from(attemptedDriverIds),
+      requiredVehicle: order.requiredVehicle,
     });
 
     if (!candidate && !options.companyDriverId) {
@@ -353,7 +368,8 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
         Driver,
         Order,
         storeCoordinates,
-        Array.from(attemptedDriverIds)
+        Array.from(attemptedDriverIds),
+        order.requiredVehicle
       );
     }
 
@@ -364,6 +380,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
           ...(order.companyDriverResponses || []).filter((entry) => entry.status === "rejected").map((entry) => entry.driver),
         ],
         maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER,
+        requiredVehicle: order.requiredVehicle,
       });
     }
 
@@ -393,69 +410,80 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
       return offerCompanyDelivery({ Order, User, order, candidate });
     }
 
-    const activeCountBeforeAssignment = await countActiveOrders(Order, candidate._id);
-    if (activeCountBeforeAssignment >= MAX_ACTIVE_ORDERS_PER_DRIVER) {
-      return { retry: true };
-    }
+    const persisted = await Order.db.transaction(async (session) => {
+      const activeCountBeforeAssignment = await Order.countDocuments({
+        driver: candidate._id, deliveryStatus: { $in: ACTIVE_DELIVERY_STATUSES },
+      }).session(session);
+      if (activeCountBeforeAssignment >= (order.requiredVehicle ? 1 : MAX_ACTIVE_ORDERS_PER_DRIVER)) return { retry: true };
+      // A driver-document write makes competing ride/delivery transactions conflict.
+      const lockDriver = await Driver.findOneAndUpdate(
+        {
+          _id: candidate._id,
+          $or: [{ isAvailable: true }, { availabilityStatus: true }],
+          isSuspended: { $ne: true },
+          approvalStatus: "approved",
+          exclusiveDelivery: null,
+          activeRideTrip: null,
+          pendingRideOffer: null,
+          "serviceModes.delivery": { $ne: false },
+        },
+        { $inc: { dispatchVersion: 1 }, ...(order.requiredVehicle ? { exclusiveDelivery: order._id, isAvailable: false, availabilityStatus: false } : {}) },
+        { new: true, session }
+      );
 
-    const lockDriver = await Driver.findOneAndUpdate(
-      {
-        _id: candidate._id,
-        $or: [{ isAvailable: true }, { availabilityStatus: true }],
-        isSuspended: { $ne: true },
-        approvalStatus: "approved",
-      },
-      { updatedAt: new Date() },
-      { new: true }
-    );
+      if (!lockDriver) return { retry: true };
+      if (order.requiredVehicle && vehicleName(lockDriver) !== order.requiredVehicle) {
+        throw Object.assign(new Error("Driver vehicle changed."), { assignmentRetry: true });
+      }
 
-    if (!lockDriver) {
-      return { retry: true };
-    }
-
-    // Reuse the driver's current batch id (if they already have active orders) so the
-    // new order lines up with their existing route instead of starting a new batch.
-    const existingBatchOrder = await Order.findOne({
-      driver: lockDriver._id,
-      deliveryStatus: { $in: ACTIVE_DELIVERY_STATUSES },
-    }).sort({ queueSequence: 1 });
-    const queueBatchId = existingBatchOrder?.queueBatchId || new mongoose.Types.ObjectId().toString();
-    const queueSequence = activeCountBeforeAssignment + 1;
-
-    const updatedOrder = await Order.findOneAndUpdate(
-      {
-        _id: order._id, driver: null, deliveryStatus: "Pending",
-        ...(options.companyDriverId ? {
-          companyOfferDriver: candidate._id,
-          companyDriverResponses: { $not: { $elemMatch: { driver: candidate._id, status: "rejected" } } },
-        } : {}),
-        status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
-        $or: [
-          { dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] } },
-          { dispatchStatus: "scheduled", deliveryWindowStart: { $lte: new Date() } },
-        ],
-      },
-      {
-        status: "Driver Assigned",
-        deliveryStatus: "Driver Assigned",
-        dispatchStatus: "driver_assigned",
+      const existingBatchOrder = await Order.findOne({
         driver: lockDriver._id,
-        companyOfferDriver: null,
-        queueBatchId,
-        queueSequence,
-      },
-      { new: true }
-    )
-      .populate("store")
-      .populate("driver")
-      .populate("customer", "name phone street apartment city zip country")
-      .populate("user", "name phone street apartment city zip country");
+        deliveryStatus: { $in: ACTIVE_DELIVERY_STATUSES },
+      }).sort({ queueSequence: 1 }).session(session);
+      const queueBatchId = existingBatchOrder?.queueBatchId || new mongoose.Types.ObjectId().toString();
+      const queueSequence = activeCountBeforeAssignment + 1;
 
-    if (!updatedOrder) return { success: false, reason: "order_already_assigned" };
+      const updatedOrder = await Order.findOneAndUpdate(
+        {
+          _id: order._id, driver: null, deliveryStatus: "Pending",
+          ...(options.companyDriverId ? {
+            companyOfferDriver: candidate._id,
+            companyDriverResponses: { $not: { $elemMatch: { driver: candidate._id, status: "rejected" } } },
+          } : {}),
+          status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
+          $or: [
+            { dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] } },
+            { dispatchStatus: "scheduled", deliveryWindowStart: { $lte: new Date() } },
+          ],
+        },
+        {
+          status: "Driver Assigned",
+          deliveryStatus: "Driver Assigned",
+          dispatchStatus: "driver_assigned",
+          driver: lockDriver._id,
+          companyOfferDriver: null,
+          queueBatchId,
+          queueSequence,
+        },
+        { new: true, session }
+      )
+        .populate("store")
+        .populate("driver")
+        .populate("customer", "name phone street apartment city zip country")
+        .populate("user", "name phone street apartment city zip country");
+
+      if (!updatedOrder) throw Object.assign(new Error("Order already assigned."), { assignmentChanged: true });
+      return { updatedOrder, lockDriver, queueSequence };
+    }).catch((error) => {
+      if (error.assignmentRetry) return { retry: true };
+      if (error.assignmentChanged) return { success: false, reason: "order_already_assigned" };
+      throw error;
+    });
+    if (!persisted.updatedOrder) return persisted;
+    const { updatedOrder, lockDriver, queueSequence } = persisted;
     const socketId = resolveDriverSocketId(ioInstance, lockDriver);
 
     if (!socketId && !lockDriver.isCompanyOwned) {
-      await syncDriverAvailability(Driver, Order, lockDriver._id);
       await Order.findByIdAndUpdate(order._id, {
         status: "Pending",
         deliveryStatus: "Pending",
@@ -464,6 +492,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
         queueBatchId: null,
         queueSequence: 0,
       });
+      await syncDriverAvailability(Driver, Order, lockDriver._id);
       return { retry: true };
     }
 

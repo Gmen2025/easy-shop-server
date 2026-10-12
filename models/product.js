@@ -28,6 +28,14 @@ const productSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  packageSize: {
+    weightKg: { type: Number, min: 0 },
+    lengthCm: { type: Number, min: 0 },
+    widthCm: { type: Number, min: 0 },
+    heightCm: { type: Number, min: 0 },
+  },
+  shippingReservationVersion: { type: Number, default: 0 },
+  exportToEthiopia: { type: Boolean, default: false },
   category: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Category',
