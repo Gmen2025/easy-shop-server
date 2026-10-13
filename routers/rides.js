@@ -5,6 +5,7 @@ const { conflict } = require("../helpers/store-inventory");
 const { getCoordinates } = require("../helpers/fulfillment-routing");
 const { vehicleName } = require("../helpers/vehicle-delivery");
 const service = require("../service/rideService");
+const places = require("../helpers/places");
 
 const endpoint = (action) => async (req, res) => {
   try {
@@ -182,6 +183,24 @@ router.post("/me/next-stop", endpoint(async (req, res) => {
 router.get("/admin/payments", endpoint(async (req, res) => {
   admin(req);
   res.json((await req.dbModels.Ride.find({ status: "completed" }).sort({ completedAt: -1 }).limit(100).lean()).map(publicRide));
+}));
+const PLACE_SEARCH_LIMIT = 120;
+const placeSearches = new Map();
+function limitPlaceSearch(req) {
+  const now = Date.now(), key = `${req.dbName}:${req.auth.userId}`;
+  for (const [entry, window] of placeSearches) if (window.resetAt <= now) placeSearches.delete(entry);
+  const window = placeSearches.get(key) || { count: 0, resetAt: now + 60000 };
+  if (++window.count > PLACE_SEARCH_LIMIT) throw Object.assign(new Error("Too many address searches. Wait a minute and retry."), { status: 429 });
+  placeSearches.set(key, window);
+}
+const placeRegion = (req) => (/usa/i.test(req.dbName) ? "US" : "ET");
+router.get("/places/autocomplete", endpoint(async (req, res) => {
+  limitPlaceSearch(req);
+  res.json(await places.autocompletePlaces(req.query.input, placeRegion(req), req.query.session));
+}));
+router.get("/places/details/:placeId", endpoint(async (req, res) => {
+  limitPlaceSearch(req);
+  res.json(await places.placeDetails(req.params.placeId, placeRegion(req), req.query.session));
 }));
 router.post("/quote", endpoint(async (req, res) => {
   res.status(201).json(publicRide(await service.quoteRide(req.dbModels, req.auth.userId, req.dbName, req.body)));

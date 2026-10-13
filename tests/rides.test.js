@@ -537,3 +537,22 @@ test("ride route path joins every leg in stop order, caches it, and stays owner-
   const unlocated = await f.booking({ stops: [stop("pickup", 0), { ...stop("dropoff", 2), address: { ...address(2), location: null } }] });
   await assert.rejects(service.rideRoutePath(f.models, unlocated, { compute }), /no verified map location/);
 });
+
+test("quotes use server-verified place coordinates for selected suggestions and allow Ethiopia without ZIP", async () => {
+  const f = fixture();
+  const looked = [];
+  const ethiopia = (x, extra = {}) => ({ ...address(x), country: "Ethiopia", zip: "", ...extra });
+  const quoted = await service.quoteRide(f.models, userId, "E_Shopping", { mode: "regular", stops: [
+    { type: "pickup", passengers: 1, address: ethiopia(0, { placeId: "ChIJpickup000001", location: point(99) }) },
+    { type: "dropoff", passengers: 1, address: ethiopia(2) },
+  ] }, {
+    lookup,
+    geocode: async () => point(2),
+    place: async (placeId, region) => { looked.push([placeId, region]); return { placeId, location: point(1) }; },
+  });
+  assert.deepEqual(looked, [["ChIJpickup000001", "ET"]]);
+  assert.deepEqual(quoted.stops[0].address.location, point(1), "client-sent coordinates are ignored");
+  assert.equal(quoted.stops[0].address.placeId, "ChIJpickup000001");
+  assert.equal(quoted.stops[1].address.zip, "");
+  assert.equal(quoted.currency, "etb");
+});

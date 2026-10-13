@@ -5,6 +5,7 @@ const { CONFIG_KEY, OFFER_MS, validateStops, fareFor, roadLeg, routeMetrics, cac
 const { cents, vehicleName } = require("../helpers/vehicle-delivery");
 const { sendPushToUser } = require("../helpers/push-notify");
 const { computeDrivingRoute } = require("../helpers/google-route");
+const { placeDetails } = require("../helpers/places");
 
 const MAX_ROUTE_POINTS = 1500;
 const thinPath = (points) => {
@@ -43,14 +44,20 @@ const modeEnabled = (driver, mode) => driver.isCompanyOwned && available(driver)
   driver.serviceModes?.[mode] === true && ["car", "van"].includes(vehicleName(driver)) &&
   Number.isSafeInteger(driver.passengerSeats) && driver.passengerSeats > 0;
 
-async function quoteRide(models, user, databaseName, body, { geocode = geocodeAddress, lookup = roadLeg } = {}) {
+async function quoteRide(models, user, databaseName, body, { geocode = geocodeAddress, lookup = roadLeg, place = placeDetails } = {}) {
   const config = (await models.SiteSetting.findOne({ key: CONFIG_KEY }).lean())?.rideConfig;
   if (!config?.enabled) throw conflict("Ride service is not enabled in this region.");
   const validated = validateStops(body.mode, body.stops);
   const currency = /usa/i.test(databaseName) ? "usd" : "etb";
+  const region = currency === "usd" ? "US" : "ET";
   const stops = await Promise.all(validated.stops.map(async (stop) => {
     const address = addressInput(stop.address);
-    if (countryCode(address.country) !== (currency === "usd" ? "US" : "ET")) throw conflict("Ride addresses must match the selected shopping region.");
+    if (countryCode(address.country) !== region) throw conflict("Ride addresses must match the selected shopping region.");
+    const placeId = stop.address?.placeId;
+    if (placeId) {
+      const verified = await place(placeId, region);
+      return { ...stop, address: { ...address, placeId: verified.placeId, location: verified.location } };
+    }
     return { ...stop, address: { ...address, location: await geocode(address) } };
   }));
   const baseline = await routeMetrics(stops[0].address.location, stops.slice(1), cachedLeg(lookup));

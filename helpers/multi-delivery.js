@@ -18,10 +18,12 @@ const countryCode = (country) => {
 
 function addressInput(body) {
   const result = {};
+  // Ethiopia has no postal-code system in everyday use, so ZIP is optional there.
+  const zipOptional = countryCode(body?.country || "") === "ET";
   for (const field of ["label", "address1", "address2", "city", "zip", "country", "phone"]) {
-    const value = body?.[field];
+    const value = body?.[field] ?? (field === "zip" && zipOptional ? "" : undefined);
     if (typeof value !== "string" || value.trim().length > 300 ||
-        (!["address2"].includes(field) && !value.trim())) throw conflict(`Delivery ${field} is required and must be at most 300 characters.`);
+        (field !== "address2" && !(field === "zip" && zipOptional) && !value.trim())) throw conflict(`Delivery ${field} is required and must be at most 300 characters.`);
     result[field] = value.trim();
   }
   return result;
@@ -78,7 +80,7 @@ async function geocodeAddress(address) {
   const location = result?.geometry?.location;
   if (["REQUEST_DENIED", "OVER_QUERY_LIMIT"].includes(body.status)) throw conflict("Address verification is unavailable. Admin must check Google Geocoding permissions, quota and billing.");
   if (!response.ok || body.status !== "OK" || result?.partial_match || !Number.isFinite(location?.lng) || !Number.isFinite(location?.lat)) {
-    throw conflict("The delivery address could not be verified. Enter a complete street address, city, postal code and country.");
+    throw conflict("The address could not be verified. Enter a complete street address, city, country (and ZIP code in the USA), or choose a suggested place.");
   }
   const actualCountry = result.address_components?.find((component) => component.types?.includes("country"))?.short_name;
   if (actualCountry !== countryCode(address.country)) throw conflict("The address lookup resolved to a different country. Correct the address before checkout.");
