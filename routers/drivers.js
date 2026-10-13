@@ -278,12 +278,12 @@ router.put("/admin/company-drivers/:id", requireAdmin, async (req, res) => {
     let saved;
     if (driver.$where) {
       saved = await Driver.db.transaction(async (session) => {
-        if (user) await user.save({ session });
-        return driver.save({ session });
+        if (user) await user.save({ session, validateModifiedOnly: true });
+        return driver.save({ session, validateModifiedOnly: true });
       });
     } else {
-      if (user) await user.save();
-      saved = await driver.save();
+      if (user) await user.save({ validateModifiedOnly: true });
+      saved = await driver.save({ validateModifiedOnly: true });
     }
 
     return res.status(200).json({ success: true, message: "Company driver updated.", driver: saved });
@@ -292,7 +292,13 @@ router.put("/admin/company-drivers/:id", requireAdmin, async (req, res) => {
     if (error.name === "DocumentNotFoundError") {
       return res.status(409).json({ success: false, message: "The driver state changed during this update. Refresh and finish active rides/offers before changing vehicles." });
     }
-    return res.status(500).json({ success: false, message: "Unable to update the company driver." });
+    if (error.code === 11000) {
+      return res.status(409).json({ success: false, message: "That email is already used by another account." });
+    }
+    if (error.name === "ValidationError") {
+      return res.status(400).json({ success: false, message: Object.values(error.errors || {}).map((e) => e.message).join(" ") || "Invalid driver details." });
+    }
+    return res.status(500).json({ success: false, message: `Unable to update the company driver. ${error.message || ""}`.trim() });
   }
 });
 
