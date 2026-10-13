@@ -78,7 +78,15 @@ function getAllowedDatabaseNames() {
 
 function getDbConnection(dbName) {
   const resolvedDbName = normalizeDatabaseName(dbName);
-  return mongoose.connection.useDb(resolvedDbName, { useCache: true });
+  const conn = mongoose.connection.useDb(resolvedDbName, { useCache: true });
+  if (conn !== mongoose.connection && !conn.__sessionsDelegated) {
+    // A cached useDb() child can keep a stale readyState after a reconnect, so
+    // startSession()/transaction() would buffer until timeout. Sessions belong to the
+    // shared client, so start them through the base connection's live state instead.
+    conn.startSession = (options) => mongoose.connection.startSession(options);
+    conn.__sessionsDelegated = true;
+  }
+  return conn;
 }
 
 function getModelsForDb(dbName) {
