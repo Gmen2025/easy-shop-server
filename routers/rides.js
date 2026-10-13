@@ -38,6 +38,7 @@ function publicRide(ride) {
   delete object.attemptedDrivers;
   delete object.offerDriver;
   delete object.offerTrip;
+  delete object.routePath;
   return object;
 }
 async function dispatch(req, rideId) {
@@ -201,6 +202,10 @@ router.get("/:id", endpoint(async (req, res) => {
   res.json({ ...publicRide(current), assignedDriver: driver ? { name: driver.name, phone: driver.phone,
     vehicleType: vehicleName(driver), plateNumber: driver.vehicle?.plateNumber,
     ...(live ? { location: driver.location, locationUpdatedAt: driver.rideLocationUpdatedAt || null } : {}) } : null });
+}));
+router.get("/:id/route", endpoint(async (req, res) => {
+  const ride = await ownedRide(req);
+  res.json(await service.rideRoutePath(req.dbModels, ride));
 }));
 router.post("/:id/request", endpoint(async (req, res) => {
   const ride = await ownedRide(req);

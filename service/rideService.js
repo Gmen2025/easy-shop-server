@@ -4,6 +4,37 @@ const { addressInput, geocodeAddress, countryCode, stripeClient } = require("../
 const { CONFIG_KEY, OFFER_MS, validateStops, fareFor, roadLeg, routeMetrics, cachedLeg, planInsertion, routeFitsBookings } = require("../helpers/ride-routing");
 const { cents, vehicleName } = require("../helpers/vehicle-delivery");
 const { sendPushToUser } = require("../helpers/push-notify");
+const { computeDrivingRoute } = require("../helpers/google-route");
+
+const MAX_ROUTE_POINTS = 1500;
+const thinPath = (points) => {
+  if (points.length <= MAX_ROUTE_POINTS) return points;
+  const step = Math.ceil(points.length / MAX_ROUTE_POINTS);
+  return points.filter((_, index) => index % step === 0 || index === points.length - 1);
+};
+
+// Road path through every stop in booking order, cached on the ride so each quote pays Google once.
+async function rideRoutePath(models, ride, { compute = computeDrivingRoute } = {}) {
+  if (Array.isArray(ride.routePath?.coordinates) && ride.routePath.coordinates.length > 1) return ride.routePath;
+  const points = (ride.stops || []).map((stop) => getCoordinates(stop.address?.location));
+  if (points.length < 2 || points.some((point) => !point)) {
+    throw conflict("A ride stop has no verified map location. Calculate a new fare.");
+  }
+  const coordinates = [];
+  let distanceKm = 0, minutes = 0;
+  for (let index = 1; index < points.length; index++) {
+    const [start, end] = [points[index - 1], points[index]];
+    if (start[0] === end[0] && start[1] === end[1]) continue;
+    const leg = await compute(start, end);
+    coordinates.push(...(coordinates.length ? leg.coordinates.slice(1) : leg.coordinates));
+    distanceKm += leg.distance;
+    minutes += leg.duration;
+  }
+  if (coordinates.length < 2) throw conflict("All ride stops are at the same location.");
+  const routePath = { coordinates: thinPath(coordinates), distanceKm, minutes, computedAt: new Date() };
+  await models.Ride.updateOne({ _id: ride._id }, { routePath });
+  return routePath;
+}
 
 const id = (value) => String(value?._id || value || "");
 const available = (driver) => driver.approvalStatus === "approved" && !driver.isSuspended &&
@@ -442,5 +473,5 @@ async function scanRides(models, databaseName, now = new Date()) {
   }
 }
 
-module.exports = { id, modeEnabled, quoteRide, requestRide, driverPlan, dispatchRide, releaseOffer, acceptRide,
+module.exports = { id, modeEnabled, quoteRide, rideRoutePath, requestRide, driverPlan, dispatchRide, releaseOffer, acceptRide,
   completeStop, closeSharedIntake, cancelRide, prepareRidePayment, ridePaymentIntent, confirmRidePayment, verifyRidePayment, scanRides };

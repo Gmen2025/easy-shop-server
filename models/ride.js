@@ -8,6 +8,7 @@ const rideSchema = new mongoose.Schema({
   currency: { type: String, enum: ["usd", "etb"], required: true },
   tariff: { type: mongoose.Schema.Types.Mixed, required: true },
   baseline: { type: mongoose.Schema.Types.Mixed, required: true },
+  routePath: mongoose.Schema.Types.Mixed,
   estimate: { type: Number, required: true },
   finalFare: Number,
   requestedAt: Date,

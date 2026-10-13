@@ -513,3 +513,27 @@ test("road-time parsing uses verified driving traffic duration, not haversine di
     else process.env.GOOGLE_MAPS_API_KEY = originalKey;
   }
 });
+
+test("ride route path joins every leg in stop order, caches it, and stays owner-scoped", async () => {
+  const f = fixture();
+  const ride = await f.booking({ mode: "regular", stops: [stop("pickup", 0), stop("pickup", 0), stop("dropoff", 2), stop("dropoff", 5)] });
+  const calls = [];
+  const compute = async (start, end) => {
+    calls.push([start, end]);
+    return { coordinates: [{ latitude: start[1], longitude: start[0] }, { latitude: end[1], longitude: end[0] }],
+      distance: 1, duration: 2 };
+  };
+  const path = await service.rideRoutePath(f.models, ride, { compute });
+  assert.equal(calls.length, 2, "identical consecutive stops are skipped");
+  assert.deepEqual(path.coordinates.map((entry) => entry.longitude), [0, 0.002, 0.005]);
+  assert.equal(path.distanceKm, 2);
+  assert.equal(path.minutes, 4);
+  const cached = await service.rideRoutePath(f.models, await f.models.Ride.findById(ride._id), { compute });
+  assert.equal(calls.length, 2, "second request uses the cached path");
+  assert.deepEqual(cached.coordinates, path.coordinates);
+  const listed = await invoke(f, "/:id", "get", { userId }, { id: ride._id });
+  assert.equal(listed.body.routePath, undefined);
+  assert.equal((await invoke(f, "/:id/route", "get", { userId: id(999) }, { id: ride._id })).code, 404);
+  const unlocated = await f.booking({ stops: [stop("pickup", 0), { ...stop("dropoff", 2), address: { ...address(2), location: null } }] });
+  await assert.rejects(service.rideRoutePath(f.models, unlocated, { compute }), /no verified map location/);
+});
