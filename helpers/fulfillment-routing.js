@@ -61,9 +61,9 @@ function rankByDistance(candidates, coordinates) {
     String(left._id).localeCompare(String(right._id)));
 }
 
-async function resolvePickupStore(Store, { customerLocation, preferredStoreId } = {}) {
+async function resolvePickupStore(Store, { customerLocation, preferredStoreId, excludedStoreIds = [] } = {}) {
   const stores = await Store.find({ approvalStatus: "approved", isOpen: { $ne: false } }).lean();
-  return selectPickupStore(stores, { customerLocation, preferredStoreId });
+  return selectPickupStore(stores.filter((store) => !excludedStoreIds.some((id) => String(id) === String(store._id))), { customerLocation, preferredStoreId });
 }
 
 function selectPickupStore(stores, { customerLocation, preferredStoreId } = {}) {
@@ -86,17 +86,20 @@ async function reconcileUnassignedPickupStores({ Store, Order }) {
   const scope = {
     inventoryManaged: { $ne: true },
     store: null,
+    fallbackStore: null,
+    adminReviewRequired: { $exists: false },
     status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
     deliveryStatus: { $ne: "Delivered" },
   };
   const orders = await Order.find(scope)
-    .select("_id customerLocation orderItems")
+    .select("_id customerLocation orderItems fallbackStoreAttempts")
     .populate({ path: "orderItems", populate: { path: "product", select: "store" } })
     .lean();
   let assigned = 0;
   for (const order of orders) {
     const preferredStoreId = (order.orderItems || []).find((item) => item?.product?.store)?.product.store;
-    const pickup = selectPickupStore(stores, { customerLocation: order.customerLocation, preferredStoreId });
+    const pickup = selectPickupStore(stores.filter((store) =>
+      !(order.fallbackStoreAttempts || []).some((id) => String(id) === String(store._id))), { customerLocation: order.customerLocation, preferredStoreId });
     if (!pickup) continue;
     const updated = await Order.findOneAndUpdate(
       { ...scope, _id: order._id },
@@ -114,17 +117,20 @@ function isCompanyFulfillableProduct(product, companyLocation, radiusMeters = ST
   return distanceMeters(getCoordinates(companyLocation), getCoordinates(store.location)) > radiusMeters;
 }
 
-async function findCompanyDriver(Driver, Order, coordinates, { excludedDriverIds = [], maxActiveOrders = 3, requiredVehicle } = {}) {
+async function findCompanyDriver(Driver, Order, coordinates, { excludedDriverIds = [], maxActiveOrders = 3, requiredVehicle, allowUnavailable = false } = {}) {
   await restoreCompanyDriversSuspendedForBalance(Driver);
   const drivers = await Driver.find({
     isCompanyOwned: true,
     approvalStatus: "approved",
-    isSuspended: { $ne: true },
-    $or: [{ isAvailable: true }, { availabilityStatus: true }],
+    ...(!allowUnavailable ? {
+      isSuspended: { $ne: true },
+      $or: [{ isAvailable: true }, { availabilityStatus: true }],
+    } : {}),
     _id: { $nin: excludedDriverIds },
   }).lean();
   const eligible = [];
   for (const driver of drivers) {
+    if (allowUnavailable && (driver.isSuspended || !(driver.isAvailable === true || driver.availabilityStatus === true))) continue;
     if (!vehicleMatches(driver, requiredVehicle)) continue;
     const activeCount = await Order.countDocuments({
       driver: driver._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] },
@@ -132,8 +138,8 @@ async function findCompanyDriver(Driver, Order, coordinates, { excludedDriverIds
     if (activeCount < (requiredVehicle ? 1 : maxActiveOrders)) eligible.push(driver);
   }
   if (eligible.length === 1) return eligible[0];
-  if (!coordinates) return null;
-  return rankByDistance(eligible, coordinates).find((driver) => getCoordinates(driver.location)) || null;
+  const nearest = coordinates && rankByDistance(eligible, coordinates).find((driver) => getCoordinates(driver.location));
+  return nearest || (allowUnavailable ? rankByDistance(drivers, coordinates)[0] : null) || null;
 }
 
 module.exports = {
@@ -142,4 +148,5 @@ module.exports = {
   resolvePickupStore, findCompanyDriver,
   isCompanyFulfillableProduct,
   reconcileUnassignedPickupStores,
+  rankByDistance,
 };

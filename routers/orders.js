@@ -508,6 +508,8 @@ router.get("/admin/company-fulfillable", requireAdmin, async (req, res) => {
     const { Order, Driver, Store } = req.dbModels;
     const orders = await Order.find({
       driver: null,
+      adminReviewRequired: { $exists: false },
+      fallbackStore: null,
       deliveryStatus: "Pending",
       status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
       dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] },
@@ -603,6 +605,8 @@ router.get("/company/my-deliveries", async (req, res) => {
 
     const orders = await Order.find({
       driver: null,
+      adminReviewRequired: { $exists: false },
+      fallbackStore: null,
       dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] },
       "companyDriverResponses.driver": { $ne: driver._id },
       $or: [{ companyOfferDriver: driver._id }, { companyOfferDriver: null }],
@@ -623,17 +627,19 @@ router.get("/company/my-deliveries", async (req, res) => {
       let orderStore = order.store;
       if (!orderStore) {
         const preferredStoreId = (order.orderItems || []).find((item) => item?.product?.store)?.product.store;
-        orderStore = await resolvePickupStore(Store, { customerLocation: order.customerLocation, preferredStoreId });
+        orderStore = await resolvePickupStore(Store, { customerLocation: order.customerLocation, preferredStoreId, excludedStoreIds: order.fallbackStoreAttempts });
       }
+      if (!orderStore) continue;
 
       const orderCoords = getCoordinates(orderStore?.location) || getCoordinates(order.customerLocation);
-      if (!orderCoords) continue;
       const excludedDriverIds = (order.companyDriverResponses || [])
         .filter((entry) => entry.status === "rejected").map((entry) => entry.driver);
-      if (!order.companyOfferDriver && await hasNearbyPartnerDriver(Driver, Order, orderCoords, order.requiredVehicle)) {
+      if (!order.companyOfferDriver && orderCoords && await hasNearbyPartnerDriver(Driver, Order, orderCoords, order.requiredVehicle)) {
         continue;
       }
-      const fallback = await findCompanyDriver(Driver, Order, orderCoords, { excludedDriverIds, maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER, requiredVehicle: order.requiredVehicle });
+      const fallback = order.companyOfferDriver
+        ? { _id: order.companyOfferDriver }
+        : await findCompanyDriver(Driver, Order, orderCoords, { excludedDriverIds, maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER, requiredVehicle: order.requiredVehicle, allowUnavailable: true });
       if (!order.companyOfferDriver && fallback && String(fallback._id) === String(driver._id)) {
         const result = await offerCompanyDelivery({
           Order, User: req.dbModels.User, order, candidate: fallback,
@@ -716,31 +722,33 @@ router.put("/:id/company-claim", async (req, res) => {
       return res.status(409).json({ success: false, message: "This delivery has already been claimed." });
     }
     if (order.deliveryStatus !== "Pending" ||
+      order.adminReviewRequired || order.fallbackStore ||
+      (order.inventoryManaged && order.fulfillmentStatus !== "accepted") ||
       !["pending_assignment", "assignment_failed"].includes(order.dispatchStatus) ||
       ["3", "4", "Delivered", "Cancelled"].includes(order.status)) {
       return res.status(409).json({ success: false, message: "This order is not ready for dispatch." });
     }
-    const pickupStore = order.store || await resolvePickupStore(Store, { customerLocation: order.customerLocation });
+    const pickupStore = order.store || await resolvePickupStore(Store, { customerLocation: order.customerLocation, excludedStoreIds: order.fallbackStoreAttempts });
     const orderCoords = getCoordinates(pickupStore?.location) || getCoordinates(order.customerLocation);
     if (!orderCoords) {
       return res.status(400).json({ success: false, message: "Pickup location is required for driver assignment." });
     }
-    const fallback = (order.companyOfferDriver || !(await hasNearbyPartnerDriver(Driver, Order, orderCoords, order.requiredVehicle)))
-      ? await findCompanyDriver(Driver, Order, orderCoords, {
-        excludedDriverIds: (order.companyDriverResponses || []).filter((entry) => entry.status === "rejected").map((entry) => entry.driver),
-        maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER,
-        requiredVehicle: order.requiredVehicle,
-      })
-      : null;
-    if (!fallback || String(fallback._id) !== String(driver._id)) {
+    if (String(order.companyOfferDriver) !== String(driver._id)) {
       return res.status(409).json({ success: false, message: "This delivery belongs to another eligible driver." });
+    }
+    const activeCount = await Order.countDocuments({
+      driver: driver._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] },
+    });
+    const eligibility = getCompanyDriverEligibility(driver, activeCount, order.requiredVehicle ? 1 : MAX_ACTIVE_ORDERS_PER_DRIVER);
+    if (!eligibility.eligible || !vehicleMatches(driver, order.requiredVehicle)) {
+      return res.status(409).json({ success: false, message: !eligibility.eligible ? eligibility.message : "This delivery requires a different vehicle." });
     }
 
     if (!order.companyOfferDriver) {
       return res.status(409).json({ success: false, message: "This delivery has not been offered yet. Refresh and try again." });
     }
     const result = await assignDriverToOrder(String(order._id), req.app.get("io"), {
-      dbName: req.dbName, companyDriverId: String(driver._id),
+      dbName: req.dbName, models: req.dbModels, companyDriverId: String(driver._id),
     });
     if (!result.success || String(result.driverId) !== String(driver._id)) {
       return res.status(409).json({ success: false, message: "This delivery is no longer available to you." });
@@ -763,9 +771,9 @@ router.put("/:id/company-claim", async (req, res) => {
  *     security:
  *       - bearerAuth: []
  */
-router.put("/:id/company-reject", async (req, res) => {
+const respondToCompanyOffer = async (req, res) => {
   try {
-    const { Order, Driver } = req.dbModels;
+    const { Order, Driver, Store } = req.dbModels;
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ success: false, message: "Invalid order id." });
     }
@@ -784,26 +792,49 @@ router.put("/:id/company-reject", async (req, res) => {
     if (alreadyResponded) {
       return res.status(409).json({ success: false, message: "You have already responded to this delivery." });
     }
+    if (req.path.endsWith("/company-reroute")) {
+      const excludedDriverIds = [
+        driver._id, ...(order.companyDriverResponses || []).map((entry) => entry.driver),
+      ];
+      const next = await findCompanyDriver(Driver, Order, getCoordinates(order.customerLocation), {
+        excludedDriverIds, maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER,
+        requiredVehicle: order.requiredVehicle, allowUnavailable: true,
+      });
+      const pickup = order.store ? await Store.findById(order.store).lean() : null;
+      const coordinates = getCoordinates(pickup?.location) || getCoordinates(order.customerLocation);
+      if (!next && (!coordinates || !(await hasNearbyPartnerDriver(Driver, Order, coordinates, order.requiredVehicle)))) {
+        return res.status(409).json({ success: false, message: "No other driver can receive this request. Keep it queued to claim later, or reject it for Admin review." });
+      }
+    }
 
     const rejected = await Order.findOneAndUpdate({
       _id: order._id, driver: null, companyOfferDriver: driver._id,
+      adminReviewRequired: { $exists: false },
+      status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
       deliveryStatus: "Pending",
       dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] },
       "companyDriverResponses.driver": { $ne: driver._id },
     }, {
-      $set: { companyOfferDriver: null },
+      $set: {
+        companyOfferDriver: null,
+        ...(req.path.endsWith("/company-reject") ? { adminReviewRequired: "driver", dispatchStatus: "assignment_failed" } : {}),
+      },
       $push: { companyDriverResponses: { driver: driver._id, status: "rejected" } },
     }, { new: true });
     if (!rejected) {
       return res.status(409).json({ success: false, message: "This delivery is no longer offered to you." });
     }
 
-    return res.status(200).json({ success: true, message: "Delivery rejected." });
+    return res.status(200).json({ success: true, message: req.path.endsWith("/company-reject")
+      ? "Delivery rejected for Admin review. The order has not been cancelled."
+      : "Delivery returned for rerouting." });
   } catch (error) {
     console.error("Company driver reject error:", error);
     return res.status(500).json({ success: false, message: "Unable to reject this delivery." });
   }
-});
+};
+router.put("/:id/company-reject", respondToCompanyOffer);
+router.put("/:id/company-reroute", respondToCompanyOffer);
 
 /**
  * @swagger
@@ -860,6 +891,7 @@ router.delete("/:id/company-responses/:responseId", requireAdmin, async (req, re
     }
 
     response.deleteOne();
+    if (order.adminReviewRequired === "driver") order.adminReviewRequired = undefined;
     await order.save();
 
     return res.status(200).json({ success: true, message: "Rejection removed; the order is re-opened." });

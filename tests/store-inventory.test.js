@@ -5,6 +5,7 @@ const {
 } = require("../helpers/store-inventory");
 const { summarizeStoreOrder } = require("../helpers/store-order-view");
 const router = require("../routers/store-inventory");
+const { reconcileFallbackStores, respondToFallbackStore } = require("../helpers/fallback-assignments");
 
 const id = (number) => number.toString(16).padStart(24, "0");
 const product = id(10);
@@ -228,4 +229,153 @@ test("migration moves stock to linked stores or the chosen default without copyi
   assert.equal(writes[1].filter.store, id(3));
   assert.equal(writes[1].update.$setOnInsert.countInStock, 9);
   assert.equal(settings[0].$set.inventoryConfig.enabled, true);
+});
+
+function fallbackFixture() {
+  const f = fixture();
+  Object.assign(f.order, {
+    store: null, fallbackStore: null, fallbackStoreAttempts: [],
+    fulfillmentStatus: "unassigned", fulfillmentDeadline: null,
+    driver: null, deliveryStatus: "Pending", status: "1", dispatchStatus: "assignment_failed",
+  });
+  f.stores[2].isCompanyOwned = true;
+  f.stores[2].isOpen = false;
+  f.stores[2].owner = id(8);
+  const findStores = f.models.Store.find;
+  f.models.Store.find = (filter) => filter.isOpen
+    ? findStores(filter) : query(f.stores.filter((store) => store.approvalStatus === "approved"));
+  const matches = (filter) => f.order.store === null && !f.order.adminReviewRequired &&
+    !filter.status.$nin.includes(f.order.status) && f.order.driver === null &&
+    f.order.deliveryStatus === "Pending" &&
+    (filter.fallbackStore == null ? f.order.fallbackStore == null : String(f.order.fallbackStore) === String(filter.fallbackStore));
+  f.models.Order.find = (filter) => {
+    assert.equal(filter.adminReviewRequired.$exists, false);
+    return query(matches(filter) ? [f.order] : []);
+  };
+  f.models.Order.findOne = (filter) => query(matches(filter) ? f.order : null);
+  f.models.Order.findOneAndUpdate = async (filter, update) => {
+    assert.equal(filter.store, null);
+    assert.equal(filter.adminReviewRequired.$exists, false);
+    if (!matches(filter)) return null;
+    Object.assign(f.order, update.$set);
+    return f.order;
+  };
+  return f;
+}
+
+test("closed default store gets a durable fallback list without reserving stock or starting a deadline", async () => {
+  const f = fallbackFixture();
+  await reconcileFallbackStores(f.models);
+  assert.equal(f.order.fallbackStore, id(3));
+  assert.equal(f.order.store, null);
+  assert.equal(f.order.fulfillmentDeadline, null);
+  assert.equal(f.stocks[2].reserved, 0);
+  await reconcileFallbackStores(f.models);
+  assert.equal(f.order.fallbackStore, id(3));
+  await assert.rejects(reroute(f.models, f.order._id), /no longer awaiting/);
+  await assert.rejects(respondToFallbackStore(f.models, f.order._id, id(3), "accept"), /Open an approved/);
+  assert.equal(f.order.fallbackStore, id(3));
+});
+
+test("claiming a fallback requires matching whole-order stock and atomically accepts it once", async () => {
+  const f = fallbackFixture();
+  await reconcileFallbackStores(f.models);
+  f.stores[2].isOpen = true;
+  f.stocks[2].price = 12;
+  await assert.rejects(respondToFallbackStore(f.models, f.order._id, id(3), "accept"), /Stock or price/);
+  assert.equal(f.order.fallbackStore, id(3));
+  assert.equal(f.stocks[2].reserved, 0);
+  f.stocks[2].price = 10;
+  await respondToFallbackStore(f.models, f.order._id, id(3), "accept");
+  assert.equal(f.order.store, id(3));
+  assert.equal(f.order.fallbackStore, null);
+  assert.equal(f.order.fulfillmentStatus, "accepted");
+  assert.equal(f.order.fulfillmentDeadline, null);
+  assert.equal(f.stocks[2].reserved, 2);
+  await assert.rejects(respondToFallbackStore(f.models, f.order._id, id(3), "accept"), /no longer available/);
+  assert.equal(f.stocks[2].reserved, 2);
+});
+
+test("final fallback rejection stops recovery and retains the order and payment for Admin", async () => {
+  const f = fallbackFixture();
+  f.order.paymentStatus = "completed";
+  await reconcileFallbackStores(f.models);
+  await respondToFallbackStore(f.models, f.order._id, id(3), "reject");
+  await reconcileFallbackStores(f.models);
+  assert.equal(f.order.adminReviewRequired, "store");
+  assert.equal(f.order.fallbackStore, null);
+  assert.equal(f.order.status, "1");
+  assert.equal(f.order.paymentStatus, "completed");
+  assert.equal(f.order.deleted, undefined);
+  await assert.rejects(reroute(f.models, f.order._id), /no longer awaiting/);
+  await updateManagedOrder(f.models, f.order._id, { status: "4" });
+  assert.equal(f.order.fulfillmentStatus, "cancelled");
+  assert.equal(f.stocks[2].reserved, 0);
+});
+
+test("reroute tries another eligible store, but keeps the queue intact when none remains", async () => {
+  const f = fallbackFixture();
+  await reconcileFallbackStores(f.models);
+  await respondToFallbackStore(f.models, f.order._id, id(3), "reroute");
+  await reroute(f.models, f.order._id);
+  assert.equal(f.order.store, id(1));
+  assert.equal(f.order.fulfillmentStatus, "pending");
+  assert.deepEqual(f.order.fallbackStoreAttempts, [id(3)]);
+  const sole = fallbackFixture();
+  sole.stores[0].isOpen = false;
+  sole.stores[1].isOpen = false;
+  await reconcileFallbackStores(sole.models);
+  await assert.rejects(respondToFallbackStore(sole.models, sole.order._id, id(3), "reroute"), /No other store/);
+  assert.equal(sole.order.fallbackStore, id(3));
+  assert.deepEqual(sole.order.fallbackStoreAttempts, []);
+});
+
+test("fallbacks preserve storefront family scope and exclude cancelled orders and other owners", async () => {
+  const f = fallbackFixture();
+  f.order.storefrontId = id(1);
+  await reconcileFallbackStores(f.models);
+  assert.equal(f.order.fallbackStore, null, "An unrelated default cannot fulfill a selected storefront");
+  f.stores[2].parentStore = id(1);
+  await reconcileFallbackStores(f.models);
+  assert.equal(f.order.fallbackStore, id(3));
+  await assert.rejects(respondToFallbackStore(f.models, f.order._id, id(2), "accept"), /no longer available/);
+  f.order.status = "4";
+  await assert.rejects(respondToFallbackStore(f.models, f.order._id, id(3), "accept"), /no longer available/);
+});
+
+test("legacy fallback claim does not create a second inventory reservation", async () => {
+  const f = fallbackFixture();
+  f.order.inventoryManaged = false;
+  await reconcileFallbackStores(f.models);
+  f.stores[2].isOpen = true;
+  await respondToFallbackStore(f.models, f.order._id, id(3), "accept");
+  assert.equal(f.order.store, id(3));
+  assert.equal(f.order.assignedStoreSnapshot.name, "Default");
+  assert.equal(f.order.fulfillmentStatus, "accepted");
+  assert.equal(f.stocks[2].reserved, 0);
+});
+
+test("store assignment API returns fallback requests only to their store owner", async () => {
+  const f = fallbackFixture();
+  await reconcileFallbackStores(f.models);
+  const findStores = f.models.Store.find;
+  f.models.Store.find = (filter) => filter.owner
+    ? query(f.stores.filter((store) => store.owner === filter.owner)) : findStores(filter);
+  f.models.Order.find = (filter) => {
+    if (filter.fallbackStore === null) return query([]);
+    assert.equal(filter.adminReviewRequired.$exists, false);
+    assert.equal(filter.$or[1].store, null);
+    assert.equal(filter.$or[1].driver, null);
+    const ids = filter.$or[1].fallbackStore.$in;
+    return query(ids.includes(f.order.fallbackStore) ? [f.order] : []);
+  };
+  const handler = router.stack.find((entry) => entry.route?.path === "/me/assignments").route.stack.at(-1).handle;
+  const response = () => ({ status(code) { this.code = code; return this; }, json(body) { this.body = body; } });
+  const owner = response();
+  await handler({ auth: { userId: id(8) }, dbModels: f.models }, owner);
+  assert.equal(owner.body.length, 1);
+  assert.equal(owner.body[0]._id, f.order._id);
+  const other = response();
+  await handler({ auth: { userId: id(9) }, dbModels: f.models }, other);
+  assert.deepEqual(other.body, []);
 });

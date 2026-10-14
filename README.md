@@ -564,13 +564,17 @@ Validate with `node --test tests/company-driver-availability.test.js`.
 - Dispatch checks approved, available, non-suspended partner drivers within 5 km
   of pickup (including eligible batch drivers), then assigns the nearest eligible
   company driver at any distance as a claim/reject offer. Active-order capacity
-  still applies; rejecting excludes that driver and passes the offer to the next
-  eligible company driver on the next scan.
+  still applies to claiming. If none is currently eligible, an approved default
+  company driver receives the offer even when offline, full or suspended.
+  Saved offers are not reassigned just because eligibility/proximity changes.
+  `PUT orders/:id/company-reroute` excludes that driver and retries routing;
+  `PUT orders/:id/company-reject` is now a final rejection for Admin review.
+  With no alternative driver, rerouting returns 409 and leaves the offer queued.
 - Company-store fallback uses the nearest eligible store when coordinates allow
   ranking. Otherwise it retains an eligible preferred company store, or chooses
   an available company store by stable ID order. Missing coordinates are never
-  treated as zero distance. Company drivers still require a rankable location
-  when multiple eligible drivers are available.
+  treated as zero distance. Fallback queue ownership uses stable IDs when
+  driver proximity cannot be ranked; claiming still needs pickup coordinates.
 - Company driver offers appear in `orders/company/my-deliveries`. Claiming is
   required before assignment; accepted deliveries persist even without a live
   socket and appear in `drivers/me/queue`. Store orders appear in
@@ -578,10 +582,26 @@ Validate with `node --test tests/company-driver-availability.test.js`.
 - Refreshing the company-driver delivery list also recovers pending/failed
   deliveries that have no company offer yet, using the same dispatch service
   within the selected database. Recovery preserves nearby-partner priority,
-  approval, availability, suspension, capacity and rejection rules; it creates
-  an offer, never auto-claims the order. The sole eligible company driver does
-  not need GPS to rank against other drivers, but the order still needs valid
-  pickup/customer coordinates. Future scheduled orders remain excluded until due.
+  approval and rejection rules; it creates an offer, never auto-claims the order.
+  Availability, suspension, service/ride conflicts, capacity and exact vehicle
+  requirements are enforced on claim, including the transactional driver lock.
+  Future scheduled deliveries remain excluded until due.
+- `stores/me/assignments` and the 30-second scheduler recover unassigned legacy
+  and inventory-managed orders into a durable `fallbackStore` queue. The
+  inventory-config default takes priority; otherwise use an approved company
+  store by proximity/stable ID, including closed stores. Storefront orders never
+  cross store families. No stock is held and no response deadline runs in this
+  queue. `POST stores/me/assignments/:id/accept` validates ownership, approval,
+  opening status and whole-order inventory/prices, then atomically reserves and
+  accepts. `/reroute` retries another store; no alternative returns 409 without
+  losing the request. `/reject` marks `adminReviewRequired:"store"`.
+- Final store/driver rejection sets `adminReviewRequired` and stops scheduler
+  recovery, offers and claims. The order/payment remains intact for Admin to
+  cancel/delete using existing safeguards. Grouped cancellations/refunds must
+  use checkout endpoints. Removing a final driver rejection through the existing
+  admin response-deletion endpoint clears driver review and permits routing.
+  No live orders are migrated or production deployment performed automatically.
+  Validate with `node --test tests/store-inventory.test.js tests/fulfillment-routing.test.js tests/company-offer-response.test.js`.
 - Dashboard offer recovery uses the shared conditional offer write directly,
   without waiting behind the database-wide assignment queue or a partner's
   response timer. Push notification delivery runs after persistence without

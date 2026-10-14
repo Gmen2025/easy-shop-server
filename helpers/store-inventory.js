@@ -109,7 +109,9 @@ async function reroute(models, orderId, { storeId, decision, now = new Date() } 
   const result = await models.Order.db.transaction(async (session) => {
     assigned = false;
     const order = await models.Order.findById(orderId).session(session);
-    if (!order?.inventoryManaged || !["pending", "unassigned"].includes(order.fulfillmentStatus)) {
+    if (!order?.inventoryManaged || order.adminReviewRequired || order.fallbackStore ||
+        ["3", "4", "Delivered", "Cancelled"].includes(order.status) ||
+        !["pending", "unassigned"].includes(order.fulfillmentStatus)) {
       throw conflict("This assignment is no longer awaiting a store response.");
     }
     if (storeId && String(order.store) !== String(storeId)) throw conflict("This assignment belongs to another store.");
@@ -130,7 +132,7 @@ async function reroute(models, orderId, { storeId, decision, now = new Date() } 
       }));
       const stores = await eligibleStores(models, lines, {
         customerLocation: order.customerLocation, storefrontId: order.storefrontId,
-        excluded: order.fulfillmentAttempts, session,
+        excluded: [...order.fulfillmentAttempts, ...(order.fallbackStoreAttempts || [])], session,
       });
       if (stores.length) {
         if (order.checkoutGroup) {

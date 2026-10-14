@@ -178,6 +178,9 @@ const orderSchema = new mongoose.Schema({
         enum: ['payment_pending', 'pending', 'accepted', 'unassigned', 'completed', 'cancelled'],
     },
     fulfillmentDeadline: { type: Date, default: null },
+    fallbackStore: { type: mongoose.Schema.Types.ObjectId, ref: 'Store', default: null },
+    fallbackStoreAttempts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Store' }],
+    adminReviewRequired: { type: String, enum: ['store', 'driver'] },
     fulfillmentAttempts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Store' }],
     reservedItems: [{
         product: { type: mongoose.Schema.Types.ObjectId, ref: 'Product' },

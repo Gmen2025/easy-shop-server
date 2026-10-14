@@ -5,6 +5,7 @@ const { reroute, inventoryEnabled } = require("../helpers/store-inventory");
 const { expireCheckouts } = require("../helpers/multi-delivery");
 const { scanRides } = require("./rideService");
 const fx = require("../helpers/exchange-rate");
+const { reconcileFallbackStores } = require("../helpers/fallback-assignments");
 
 async function dispatchPendingOrders(io, { databaseNames = getAllowedDatabaseNames(), modelsForDb = getModelsForDb, assign = assignDriverToOrder, now = new Date() } = {}) {
   for (const dbName of databaseNames) {
@@ -18,6 +19,9 @@ async function dispatchPendingOrders(io, { databaseNames = getAllowedDatabaseNam
       await expireCheckouts(models, dbName, now);
       const expired = managed ? await models.Order.find({
         inventoryManaged: true,
+        adminReviewRequired: { $exists: false },
+        fallbackStore: null,
+        status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
         $or: [
           { fulfillmentStatus: "pending", fulfillmentDeadline: { $lte: now } },
           { fulfillmentStatus: "unassigned" },
@@ -28,8 +32,11 @@ async function dispatchPendingOrders(io, { databaseNames = getAllowedDatabaseNam
         catch (error) { console.error(`[Inventory:${dbName}] Order ${order._id} reroute failed:`, error.message); }
       }
       await reconcileUnassignedPickupStores(models);
+      await reconcileFallbackStores(models);
       const orders = await models.Order.find({
         driver: null,
+        fallbackStore: null,
+        adminReviewRequired: { $exists: false },
         deliveryStatus: "Pending",
         status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
         $and: [{ $or: [

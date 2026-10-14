@@ -260,12 +260,17 @@ async function offerCompanyDelivery({ Order, User, order, candidate }) {
   if (String(order.companyOfferDriver) !== String(candidate._id)) {
     const offered = await Order.findOneAndUpdate({
       _id: order._id, driver: null, deliveryStatus: "Pending",
+      adminReviewRequired: { $exists: false },
+      fallbackStore: null,
+      $or: [{ inventoryManaged: { $ne: true } }, { fulfillmentStatus: "accepted" }],
       companyDriverResponses: { $not: { $elemMatch: { driver: candidate._id, status: "rejected" } } },
-      $and: [{ $or: [{ companyOfferDriver: null }, { companyOfferDriver: order.companyOfferDriver || null }] }],
       status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
-      $or: [
-        { dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] } },
-        { dispatchStatus: "scheduled", deliveryWindowStart: { $lte: new Date() } },
+      $and: [
+        { $or: [{ companyOfferDriver: null }, { companyOfferDriver: order.companyOfferDriver || null }] },
+        { $or: [
+          { dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] } },
+          { dispatchStatus: "scheduled", deliveryWindowStart: { $lte: new Date() } },
+        ] },
       ],
     }, { companyOfferDriver: candidate._id, dispatchStatus: "pending_assignment" }, { new: true });
     if (!offered) return { success: false, reason: "order_already_assigned" };
@@ -310,6 +315,9 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
     if (!order) {
       throw new Error("Order not found.");
     }
+    if (order.adminReviewRequired || order.fallbackStore) {
+      return { success: false, reason: "manual_assignment_review_required" };
+    }
     if (order.inventoryManaged && order.fulfillmentStatus !== "accepted") {
       return { success: false, reason: "store_acceptance_required" };
     }
@@ -320,9 +328,14 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
     let store = order.store || null;
     if (!store) {
       const preferredStoreId = (order.orderItems || []).find((item) => item?.product?.store)?.product.store;
-      store = await resolvePickupStore(Store, { customerLocation: order.customerLocation, preferredStoreId });
+      store = await resolvePickupStore(Store, { customerLocation: order.customerLocation, preferredStoreId, excludedStoreIds: order.fallbackStoreAttempts });
       if (store) {
-        const assignedStore = await Order.findOneAndUpdate({ _id: order._id, store: null }, { store: store._id });
+        const assignedStore = await Order.findOneAndUpdate({
+          _id: order._id, store: null, fallbackStore: null,
+          adminReviewRequired: { $exists: false },
+          driver: null, deliveryStatus: "Pending",
+          status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
+        }, { store: store._id });
         if (!assignedStore) return { retry: true };
         if (store.isCompanyOwned && store.owner) {
           sendPushToUser({
@@ -346,9 +359,12 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
     if (order.dispatchStatus === "scheduled" && new Date(order.deliveryWindowStart) > new Date()) {
       return { success: false, reason: "delivery_not_due" };
     }
+    if (order.companyOfferDriver && !options.companyDriverId) {
+      return { success: true, offered: true, orderId: String(order._id), driverId: String(order.companyOfferDriver) };
+    }
 
     const storeCoordinates = getCoordinates(store?.location) || getCoordinates(order.customerLocation);
-    if (!Array.isArray(storeCoordinates) || storeCoordinates.length !== 2) {
+    if (options.companyDriverId && !storeCoordinates) {
       console.warn(`[Dispatch] Order ${order._id} is waiting for valid pickup coordinates.`);
       await Order.findByIdAndUpdate(order._id, { dispatchStatus: "assignment_failed" });
       return { success: false, reason: "missing_pickup_coordinates" };
@@ -356,14 +372,16 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
 
     const dropCoordinates = getOrderCustomerLocation(order)?.coordinates || null;
 
-    let candidate = options.companyDriverId ? null : await findBatchPartnerDriver(Order, Driver, {
+    let candidate = options.companyDriverId
+      ? await Driver.findOne({ _id: options.companyDriverId, isCompanyOwned: true })
+      : !storeCoordinates ? null : await findBatchPartnerDriver(Order, Driver, {
       storeCoordinates,
       dropCoordinates,
       excludedDriverIds: Array.from(attemptedDriverIds),
       requiredVehicle: order.requiredVehicle,
     });
 
-    if (!candidate && !options.companyDriverId) {
+    if (!candidate && !options.companyDriverId && storeCoordinates) {
       candidate = await findNearestAvailableDriver(
         Driver,
         Order,
@@ -373,7 +391,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
       );
     }
 
-    if (!candidate) {
+    if (!candidate && !options.companyDriverId) {
       candidate = await findCompanyDriver(Driver, Order, storeCoordinates, {
         excludedDriverIds: [
           ...attemptedDriverIds,
@@ -381,6 +399,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
         ],
         maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER,
         requiredVehicle: order.requiredVehicle,
+        allowUnavailable: true,
       });
     }
 
@@ -388,6 +407,15 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
       String(candidate._id) !== String(options.companyDriverId) ||
       String(order.companyOfferDriver) !== String(options.companyDriverId))) {
       return { success: false, reason: "company_offer_unavailable" };
+    }
+    if (options.companyDriverId) {
+      const activeCount = await countActiveOrders(Order, candidate._id);
+      if (candidate.approvalStatus !== "approved" || candidate.isSuspended ||
+          !(candidate.isAvailable === true || candidate.availabilityStatus === true) ||
+          !vehicleMatches(candidate, order.requiredVehicle) ||
+          activeCount >= (order.requiredVehicle ? 1 : MAX_ACTIVE_ORDERS_PER_DRIVER)) {
+        return { success: false, reason: "driver_unavailable" };
+      }
     }
 
     if (!candidate) {
@@ -446,6 +474,9 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
       const updatedOrder = await Order.findOneAndUpdate(
         {
           _id: order._id, driver: null, deliveryStatus: "Pending",
+          adminReviewRequired: { $exists: false },
+          fallbackStore: null,
+          $and: [{ $or: [{ inventoryManaged: { $ne: true } }, { fulfillmentStatus: "accepted" }] }],
           ...(options.companyDriverId ? {
             companyOfferDriver: candidate._id,
             companyDriverResponses: { $not: { $elemMatch: { driver: candidate._id, status: "rejected" } } },

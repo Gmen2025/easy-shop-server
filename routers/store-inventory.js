@@ -5,6 +5,8 @@ const {
   CONFIG_KEY, inventoryEnabled, publicStore, conflict, normalizeLines,
   eligibleStores, reroute,
 } = require("../helpers/store-inventory");
+const { reconcileFallbackStores, respondToFallbackStore } = require("../helpers/fallback-assignments");
+const { reconcileUnassignedPickupStores } = require("../helpers/fulfillment-routing");
 
 function endpoint(action) {
   return async (req, res) => {
@@ -180,21 +182,33 @@ router.delete("/me/locations/:id/inventory/:productId", endpoint(async (req, res
 
 router.get("/me/assignments", endpoint(async (req, res) => {
   if (!req.auth?.userId) throw Object.assign(new Error("Unauthorized"), { status: 401 });
+  await reconcileFallbackStores(req.dbModels);
   const stores = await req.dbModels.Store.find({ owner: req.auth?.userId }).lean();
   const orders = await req.dbModels.Order.find({
-    inventoryManaged: true, store: { $in: stores.map((store) => store._id) },
-    fulfillmentStatus: { $in: ["pending", "accepted"] },
-  }).populate({ path: "orderItems", populate: { path: "product", select: "name image" } }).sort({ dateOrdered: 1 }).lean();
+    adminReviewRequired: { $exists: false },
+    status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
+    $or: [
+      { inventoryManaged: true, store: { $in: stores.map((store) => store._id) }, fulfillmentStatus: { $in: ["pending", "accepted"] } },
+      { fallbackStore: { $in: stores.map((store) => store._id) }, store: null, driver: null, deliveryStatus: "Pending" },
+    ],
+  }).populate("fallbackStore", "name address logo").populate({ path: "orderItems", populate: { path: "product", select: "name image price" } }).sort({ dateOrdered: 1 }).lean();
   res.json(orders);
 }));
 
 router.post("/me/assignments/:id/:decision", endpoint(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) throw conflict("Invalid assignment ID.");
-  if (!["accept", "reject"].includes(req.params.decision)) throw conflict("Invalid assignment response.");
+  if (!["accept", "reject", "reroute"].includes(req.params.decision)) throw conflict("Invalid assignment response.");
   const order = await req.dbModels.Order.findById(req.params.id).lean();
   if (!order) throw Object.assign(new Error("Assignment not found."), { status: 404 });
-  await ownedStore(req, String(order.store));
-  const result = await reroute(req.dbModels, order._id, { storeId: order.store, decision: req.params.decision });
+  await ownedStore(req, String(order.fallbackStore || order.store));
+  const result = order.fallbackStore
+    ? await respondToFallbackStore(req.dbModels, order._id, order.fallbackStore, req.params.decision)
+    : await reroute(req.dbModels, order._id, { storeId: order.store, decision: req.params.decision === "reroute" ? "reject" : req.params.decision });
+  if (order.fallbackStore && req.params.decision === "reroute") {
+    if (result.inventoryManaged) await reroute(req.dbModels, order._id);
+    else await reconcileUnassignedPickupStores(req.dbModels);
+  }
+  await reconcileFallbackStores(req.dbModels);
   res.json({ success: true, fulfillmentStatus: result.fulfillmentStatus });
 }));
 
