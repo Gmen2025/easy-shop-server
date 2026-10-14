@@ -24,7 +24,9 @@ const orderSchema = new mongoose.Schema({
     },
     zip: {
         type: String,
-        required: true
+        required: function () {
+            return !/^(ethiopia|ethio|et)$/i.test(String(this.country || '').trim());
+        }
     },
     country: {
         type: String,

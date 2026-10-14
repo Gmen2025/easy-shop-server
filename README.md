@@ -325,6 +325,9 @@ Authenticated APIs (all paths below are relative to `/api/v1/stores/`):
   addresses; `GET delivery-current-address` prefills the latest order/profile.
   Addresses contain `label`, `address1`, `address2`, `city`, `zip`, `country`,
   `phone`. Order addresses are immutable snapshots, independent of saved edits.
+  Postal code is optional for Ethiopia (`Ethiopia`, `Ethio`, `ET`, case-insensitive)
+  in both address validation and persisted child orders; other countries still
+  require it. This applies when reserving deliveries as well as requesting quotes.
 - `POST checkouts/quote`: `cart` lines contain unique `key`, product ID,
   whole `quantity`, quoted `price`, optional `storefrontId`. `addresses` contain
   unique local `id` and address fields. `allocations` contain `key`, `addressId`,

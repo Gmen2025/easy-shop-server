@@ -604,6 +604,38 @@ test("removing measurements after automatic recommendation requires a new quote 
   assert.deepEqual(stocks.map((stock) => stock.reserved), [0, 0]);
 });
 
+test("ZIP-free Ethiopian reservations validate real child orders with optional package measurements", async () => {
+  const { Order: PersistedOrder } = require("../models/order");
+  const { models, group, body, stocks, orders } = fixture();
+  const save = models.Order.prototype.save;
+  models.Order.prototype.save = async function (...args) {
+    await new PersistedOrder(this).validate();
+    return save.apply(this, args);
+  };
+  models.Product.find = () => query([{ ...product, packageSize: undefined }]);
+  for (const delivery of group.deliveries) {
+    delivery.address = { ...delivery.address, country: "Ethiopia", zip: "" };
+    delivery.requiresVehicleSelection = true;
+  }
+  await prepare(models, group._id, userId, "E_Shopping", { ...body, method: "cash" });
+  assert.equal(group.status, "awaiting_payment");
+  assert.equal(orders.length, 2);
+  assert.ok(orders.every((order) => order.zip === "" && order.country === "Ethiopia" && order.cargo.weightKg === null));
+  assert.deepEqual(stocks.map((stock) => stock.reserved), [2, 2]);
+});
+
+test("real order schema makes ZIP optional only for Ethiopian country aliases", async () => {
+  const { Order } = require("../models/order");
+  const fields = { shippingAddress1: "Street", city: "City", phone: "123" };
+  for (const country of ["Ethiopia", " Ethio ", "et", "ET"]) {
+    for (const zip of ["", undefined]) await new Order({ ...fields, country, zip }).validate();
+  }
+  for (const country of ["USA", "US", "Kenya", ""]) {
+    await assert.rejects(new Order({ ...fields, country, zip: "" }).validate(), /zip.*required/);
+  }
+  await new Order({ ...fields, country: "USA", zip: "12345" }).validate();
+});
+
 test("distance pricing uses real route distance, USA miles, regional kilometers, and currency rounding", () => {
   assert.equal(vehicleFee(1.609344, "car", config(), "E_ShopUSA"), 4);
   assert.equal(vehicleFee(1.609344, "car", config(), "E_Shopping"), 5.22);
