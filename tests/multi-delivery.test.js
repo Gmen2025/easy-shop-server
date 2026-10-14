@@ -4,7 +4,7 @@ const {
   addressInput, normalizeAllocations, allocateStock, quoteTotals, selectVehicles,
   createQuote, createServiceQuote, prepare, activate, ensureIntent, reconcile, cancelDelivery, refundDelivery,
 } = require("../helpers/multi-delivery");
-const { validateVehicleConfig, cargoFor, suitableVehicles, vehicleFee, vehicleMatches } = require("../helpers/vehicle-delivery");
+const { validateVehicleConfig, validatePackageSize, cargoFor, suitableVehicles, vehicleFee, vehicleMatches } = require("../helpers/vehicle-delivery");
 const { updateManagedOrder } = require("../helpers/store-inventory");
 const stripeRouter = require("../routers/stripe");
 const originalStripeResolver = stripeRouter.getStripe;
@@ -509,14 +509,99 @@ test("USD quote converts the authoritative Ethiopia total, rejects foreign desti
     distance: async () => { exchangeConfig.revision++; return 2; } }), /changed while calculating/);
 });
 
-test("vehicle recommendation measures quantity, weight, volume and rotated parcel dimensions; missing data blocks quoting", () => {
+test("vehicle recommendation measures quantity, weight, volume and rotated parcel dimensions; domestic missing data is explicit", () => {
   const load = cargoFor([{ ...line, quantity: 6 }], [product]);
   assert.equal(load.weightKg, 6);
   assert.equal(load.volumeLiters, 6);
   assert.deepEqual(suitableVehicles(load, config()), ["car", "van", "truck"]);
   assert.deepEqual(suitableVehicles(cargoFor([{ ...line, quantity: 1 }], [{ ...product, packageSize: { ...packageSize, lengthCm: 70 } }]), config()), ["truck"]);
-  assert.throws(() => cargoFor([line], [{ ...product, packageSize: undefined }]), /missing/);
-  assert.throws(() => cargoFor([line], [{ ...product, packageSize: { ...packageSize, weightKg: 0 } }]), /missing/);
+  const unknown = cargoFor([line], [{ ...product, packageSize: undefined }]);
+  assert.deepEqual(unknown, { weightKg: null, volumeLiters: null, packages: [],
+    measurementsAvailable: false, knownWeightKg: 0, knownVolumeLiters: 0 });
+  assert.deepEqual(suitableVehicles(unknown, config()), ["motorcycle", "car", "van", "truck"]);
+  const partial = cargoFor([line], [{ ...product, packageSize: { ...packageSize, weightKg: 0 } }]);
+  assert.equal(partial.weightKg, null);
+  assert.equal(partial.volumeLiters, 4);
+  assert.throws(() => cargoFor([line], [{ ...product, packageSize: undefined }], { requireMeasurements: true }), /international shipping/);
+});
+
+test("known weights and dimensions still exclude unsuitable vehicles in mixed unmeasured cargo", () => {
+  const unknown = { _id: id(11), name: "Unknown" };
+  const cargo = cargoFor([{ ...line, quantity: 6 }, { product: unknown._id, quantity: 1 }], [product, unknown]);
+  assert.equal(cargo.weightKg, null);
+  assert.equal(cargo.volumeLiters, null);
+  assert.equal(cargo.knownWeightKg, 6);
+  assert.equal(cargo.knownVolumeLiters, 6);
+  assert.deepEqual(suitableVehicles(cargo, config()), ["car", "van", "truck"]);
+  const long = cargoFor([line], [{ ...product, packageSize: { lengthCm: 70, widthCm: 10, heightCm: 10 } }]);
+  assert.deepEqual(suitableVehicles(long, config()), ["truck"]);
+  const heavy = cargoFor([line], [{ ...product, packageSize: { weightKg: 100 } }]);
+  assert.deepEqual(suitableVehicles(heavy, config()), []);
+});
+
+test("optional packaged measurements accept empty and partial input but reject invalid supplied values", () => {
+  assert.deepEqual(validatePackageSize({}), {});
+  assert.deepEqual(validatePackageSize({ weightKg: "", lengthCm: " ", widthCm: null }), {});
+  assert.deepEqual(validatePackageSize({ weightKg: "2.5", lengthCm: "" }), { weightKg: 2.5 });
+  assert.deepEqual(validatePackageSize(packageSize), packageSize);
+  for (const value of [0, -1, Infinity, "invalid", true, [], 1000001]) {
+    assert.throws(() => validatePackageSize({ weightKg: value }), /positive packaged/);
+  }
+});
+
+test("Admin package-size endpoint persists optional, partial and cleared measurements", async () => {
+  const router = require("../routers/multi-delivery");
+  const handler = router.stack.find((entry) => entry.route?.path === "/delivery-products/:id" && entry.route.methods.put)
+    .route.stack.at(-1).handle;
+  for (const [body, expected] of [[{}, {}], [{ weightKg: "2", lengthCm: "" }, { weightKg: 2 }],
+    [{ weightKg: "", lengthCm: "", widthCm: "", heightCm: "" }, {}], [packageSize, packageSize]]) {
+    const res = { status(code) { this.code = code; return this; }, json(value) { this.body = value; } };
+    await handler({ auth: { userId, isAdmin: true }, params: { id: productId }, body,
+      dbModels: { Product: { findByIdAndUpdate: async (value, update, options) => {
+        assert.equal(value, productId);
+        assert.deepEqual(update.packageSize, expected);
+        assert.equal(options.runValidators, true);
+        return { ...product, packageSize: update.packageSize };
+      } } } }, res);
+    assert.deepEqual(res.body.packageSize, expected);
+  }
+});
+
+test("domestic quote without package sizes requires explicit vehicle selection and reserves successfully", async () => {
+  const { models, stocks, group, body, orders } = fixture();
+  const findSetting = models.SiteSetting.findOne;
+  const pricing = config();
+  pricing.vehicles.motorcycle.baseFee = 100;
+  models.SiteSetting.findOne = (filter) => filter.key === "vehicle-delivery-config"
+    ? query({ vehicleDeliveryConfig: pricing }) : findSetting(filter);
+  models.Product.find = () => query([{ ...product, packageSize: undefined }]);
+  const stores = [1, 2].map((number) => ({ _id: id(number), name: "Pickup", location: address.location, approvalStatus: "approved" }));
+  models.Store.find = () => query(stores);
+  models.StoreInventory.find = () => query(stocks);
+  models.CheckoutGroup.create = async (fields) => { Object.assign(group, fields); return group; };
+  const quote = await createQuote(models, userId, "E_ShopUSA", { cart: [line], addresses: [address],
+    allocations: [{ key: line.key, addressId: address.id, quantity: 4 }] },
+  { geocode: async () => address.location, distance: async () => 2 });
+  assert.ok(quote.deliveries.every((delivery) => delivery.requiresVehicleSelection && delivery.vehicle === "" &&
+    delivery.cargo.weightKg === null && delivery.lines[0].packageSize === null));
+  assert.ok(quote.deliveries.every((delivery) => delivery.deliveryFee === Math.min(...delivery.vehicleOptions.map((option) => option.fee))));
+  await assert.rejects(prepare(models, group._id, userId, "E_ShopUSA",
+    { ...body, selections: quote.deliveries.map((delivery) => ({ key: delivery.key, vehicle: "" })) }), /Select one vehicle/);
+  assert.deepEqual(stocks.map((stock) => stock.reserved), [0, 0]);
+  await prepare(models, group._id, userId, "E_ShopUSA",
+    { ...body, selections: group.deliveries.map((delivery) => ({ key: delivery.key, vehicle: "van" })) });
+  assert.equal(group.status, "awaiting_payment");
+  assert.equal(orders.length, 2);
+  assert.ok(group.deliveries.every((delivery) => delivery.vehicle === "van" && delivery.cargo.weightKg === null));
+  assert.deepEqual(stocks.map((stock) => stock.reserved), [3, 1]);
+});
+
+test("removing measurements after automatic recommendation requires a new quote before reserving", async () => {
+  const { models, group, body, stocks } = fixture();
+  models.Product.find = () => query([{ ...product, packageSize: undefined }]);
+  await assert.rejects(prepare(models, group._id, userId, "E_ShopUSA", body), /choose a vehicle manually/);
+  assert.equal(group.status, "quote");
+  assert.deepEqual(stocks.map((stock) => stock.reserved), [0, 0]);
 });
 
 test("distance pricing uses real route distance, USA miles, regional kilometers, and currency rounding", () => {

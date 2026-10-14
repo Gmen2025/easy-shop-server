@@ -288,7 +288,7 @@ Validate transactions with a replica-set staging database before production roll
 #### Multi-store, multi-address and vehicle delivery checkout
 
 This is opt-in per database. First migrate store inventory, then Admin configures
-`vehicle-delivery-config` through `PUT stores/delivery-config` and packaged sizes
+`vehicle-delivery-config` through `PUT stores/delivery-config` and optional packaged sizes
 through `PUT stores/delivery-products/:productId`. The mobile Admin **Vehicles**
 page exposes both controls. Vehicles are `motorcycle`, `car`, `van`, `truck`;
 each has `enabled`, `baseFee`, `distanceRate`, `maxWeightKg`, `maxVolumeLiters`,
@@ -298,6 +298,19 @@ and per kilometer otherwise. Product `packageSize` uses positive `weightKg`,
 are inferred for unconfigured products. Capacities must be conservative usable
 limits: recommendations validate total weight/volume, cargo envelope volume and
 rotated parcel dimensions, not general 3-D bin packing or special handling.
+Domestic checkout does not require package measurements. Admin can save any
+subset of positive measurements; blank or omitted fields clear those values.
+Quote lines include their `packageSize` snapshot for customer display. Missing
+weight or dimensions produce `null` cargo totals, not zero; known measurements
+still constrain offered vehicles. Incomplete cargo includes
+`measurementsAvailable: false`, `knownWeightKg`, and `knownVolumeLiters`.
+These deliveries set `requiresVehicleSelection: true` and an empty `vehicle`:
+the customer must manually select an offered vehicle before reservation.
+The quoted delivery fee is the lowest offered fee until a selection is made;
+capacity is not guaranteed for unmeasured items. Complete sizes retain automatic
+recommendations. International US-to-Ethiopia shipping still requires complete
+measurements for weight-based tariffs. Newly missing measurements at reservation
+require a fresh quote and manual vehicle selection.
 
 The server requires `GOOGLE_MAPS_API_KEY` with **Geocoding** and **Distance Matrix**
 enabled and billing configured. It verifies destinations/country itself and

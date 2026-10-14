@@ -112,8 +112,11 @@ function allocateStock(allocations, candidatesByAllocation, stocks, products, ad
       const previous = group.lines.find((line) => line.product === allocation.product);
       if (previous && previous.price !== allocation.price) throw conflict("Conflicting prices for the same product at a pickup. Refresh your cart.");
       if (previous) previous.quantity += quantity;
-      else group.lines.push({ product: allocation.product, quantity, price: allocation.price,
-        name: products.find((product) => id(product) === allocation.product).name });
+      else {
+        const product = products.find((product) => id(product) === allocation.product);
+        group.lines.push({ product: allocation.product, quantity, price: allocation.price,
+          name: product.name, packageSize: product.packageSize ? { ...product.packageSize } : null });
+      }
       if (!remaining) break;
     }
     if (remaining) throw conflict(`Not enough stock at the quoted price for ${products.find((product) => id(product) === allocation.product).name}. Refresh your cart.`);
@@ -161,8 +164,10 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
     try { delivery.distanceKm = await distance(`${pickup[1]},${pickup[0]}`, `${dropoff[1]},${dropoff[0]}`, { throwOnError: true }); }
     catch (error) { throw conflict(error.message); }
     delivery.vehicleOptions = types.map((type) => ({ type, fee: vehicleFee(delivery.distanceKm, type, config, databaseName) }));
-    delivery.vehicle = types[0];
-    delivery.deliveryFee = delivery.vehicleOptions[0].fee;
+    delivery.requiresVehicleSelection = delivery.cargo.measurementsAvailable === false;
+    delivery.vehicle = delivery.requiresVehicleSelection ? "" : types[0];
+    delivery.deliveryFee = delivery.requiresVehicleSelection
+      ? Math.min(...delivery.vehicleOptions.map((option) => option.fee)) : delivery.vehicleOptions[0].fee;
     delivery.itemsSubtotal = delivery.lines.reduce((sum, line) => sum + cents(line.price) * line.quantity, 0) / 100;
     delivery.totalPrice = (cents(delivery.itemsSubtotal) + cents(delivery.deliveryFee)) / 100;
   }));
@@ -210,6 +215,7 @@ function selectVehicles(group, selections) {
       new Set(selections.map((entry) => entry.key)).size !== selections.length) throw conflict("Select one vehicle for every delivery.");
   for (const delivery of group.deliveries) {
     const selected = selections.find((entry) => entry.key === delivery.key);
+    if (!selected?.vehicle) throw conflict("Select one vehicle for every delivery.");
     const option = delivery.vehicleOptions.find((entry) => entry.type === selected?.vehicle);
     if (!option) throw conflict("Choose one of the suitable vehicles offered for this delivery.");
     delivery.vehicle = option.type;
@@ -289,6 +295,9 @@ async function prepare(models, groupId, user, databaseName, body) {
       }
       const config = (await models.SiteSetting.findOne({ key: VEHICLE_CONFIG_KEY }).session(session).lean())?.vehicleDeliveryConfig;
       delivery.cargo = cargoFor(delivery.lines, approved);
+      if (delivery.cargo.measurementsAvailable === false && !delivery.requiresVehicleSelection) {
+        throw conflict("Packaged measurements are no longer available. Request a new quote and choose a vehicle manually.");
+      }
       if (group.international) {
         const quoted = group.international.shipments.find((shipment) => shipment.id === delivery.address.id);
         if (!quoted) throw conflict("International recipient snapshot is missing.");

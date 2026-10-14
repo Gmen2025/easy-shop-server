@@ -30,7 +30,7 @@ async function config(models, session) {
   return value;
 }
 function tariff(lines, products, policy) {
-  const cargo = cargoFor(lines, products);
+  const cargo = cargoFor(lines, products, { requireMeasurements: true });
   let volumetricKg = 0;
   for (const line of lines) {
     const product = products.find((entry) => String(entry._id) === String(line.product));

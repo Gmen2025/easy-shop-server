@@ -1,7 +1,7 @@
 const router = require("express").Router();
 const mongoose = require("mongoose");
 const { conflict } = require("../helpers/store-inventory");
-const { VEHICLE_CONFIG_KEY, validateVehicleConfig, cents } = require("../helpers/vehicle-delivery");
+const { VEHICLE_CONFIG_KEY, validateVehicleConfig, validatePackageSize, cents } = require("../helpers/vehicle-delivery");
 const { addressInput, createQuote, createServiceQuote, prepare, activate, ensureIntent, reconcile, cancelDelivery, refundDelivery } = require("../helpers/multi-delivery");
 const fx = require("../helpers/exchange-rate");
 const international = require("../helpers/international-shipping");
@@ -74,12 +74,7 @@ router.put("/international-products/:id", endpoint(async (req, res) => {
 router.put("/delivery-products/:id", endpoint(async (req, res) => {
   admin(req);
   validId(req.params.id);
-  const packageSize = {};
-  for (const key of ["weightKg", "lengthCm", "widthCm", "heightCm"]) {
-    const value = Number(req.body[key]);
-    if (req.body[key] === "" || req.body[key] == null || !Number.isFinite(value) || value <= 0 || value > 1000000) throw conflict(`Enter a positive packaged ${key}.`);
-    packageSize[key] = value;
-  }
+  const packageSize = validatePackageSize(req.body);
   const product = await req.dbModels.Product.findByIdAndUpdate(req.params.id, { packageSize }, { new: true, runValidators: true });
   if (!product) throw conflict("Product not found.");
   res.json(product);
