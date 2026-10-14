@@ -165,6 +165,43 @@ function exportFixture() {
   return { ...data, shippingConfig, exchangeConfig };
 }
 
+test("USA development cash checkout reserves Car deliveries and leaves payment pending until collection", async () => {
+  const { models, group, body, orders, stocks } = fixture();
+  for (const flag of [undefined, false, "true", 1]) {
+    await assert.rejects(prepare(models, group._id, userId, "E_ShopUSA", {
+      ...body, method: "cash", developmentCashOnDelivery: flag,
+    }), /development\/debug build/);
+    assert.equal(group.status, "quote");
+    assert.equal(orders.length, 0);
+    assert.ok(stocks.every((stock) => stock.reserved === 0));
+  }
+  await prepare(models, group._id, userId, "E_ShopUSA", {
+    ...body, method: "cash", developmentCashOnDelivery: true,
+  });
+  assert.equal(group.status, "awaiting_payment");
+  assert.equal(group.paymentMethod, "cash");
+  assert.ok(orders.every((order) => order.requiredVehicle === "car" &&
+    order.paymentMethod === "1" && order.fulfillmentStatus === "payment_pending"));
+  assert.deepEqual(stocks.map((stock) => stock.reserved), [2, 2]);
+  await activate(models, group._id);
+  assert.equal(group.status, "placed");
+  assert.equal(group.paymentStatus, "pending");
+  assert.ok(orders.every((order) => order.fulfillmentStatus === "pending" && order.paymentStatus === "pending"));
+});
+
+test("development cash cannot bypass cross-currency or international bank-only payment rules", async () => {
+  const international = exportFixture();
+  await assert.rejects(prepare(international.models, international.group._id, userId, "E_ShopUSA", {
+    ...international.body, method: "cash", developmentCashOnDelivery: true,
+  }), /ETB bank transfer only/);
+  assert.equal(international.orders.length, 0);
+  const converted = usdFixture();
+  await assert.rejects(prepare(converted.models, converted.group._id, userId, "E_Shopping", {
+    ...converted.body, method: "cash", developmentCashOnDelivery: true,
+  }), /not cash/);
+  assert.equal(converted.orders.length, 0);
+});
+
 test("US products exported to Ethiopia charge USD goods/hub/shipping costs in birr and wait for Admin bank receipt", async () => {
   const { models, group, body, orders, stocks, exchangeConfig, shippingConfig } = exportFixture();
   assert.equal(group.totalPrice, 74);
@@ -735,7 +772,7 @@ test("bank receipt is submitted after reserving and only Admin can later mark pa
   assert.equal(group.paymentStatus, "pending");
   assert.equal(orders[0].transferReference, "TRANSFER");
   const cash = fixture();
-  await assert.rejects(prepare(cash.models, cash.group._id, userId, "E_ShopUSA", { ...cash.body, method: "cash" }), /not available/);
+  await assert.rejects(prepare(cash.models, cash.group._id, userId, "E_ShopUSA", { ...cash.body, method: "cash" }), /development\/debug build/);
   await prepare(cash.models, cash.group._id, userId, "E_Shopping", { ...cash.body, method: "cash" });
   await activate(cash.models, cash.group._id);
   assert.equal(cash.group.status, "placed");

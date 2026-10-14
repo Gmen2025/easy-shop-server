@@ -346,14 +346,25 @@ Authenticated APIs (all paths below are relative to `/api/v1/stores/`):
   stock reservations commit atomically. Stale price, stock, pickup coordinates
   or incompatible package/capacity changes roll back the entire checkout.
   Preparation is idempotent for the same checkout and payment method.
+  Domestic USA cash reservation is accepted only with the explicit boolean
+  `developmentCashOnDelivery: true` sent by a React Native `__DEV__` app,
+  including when connected to the production Render API. Omitted, false or
+  string flags are rejected. This is a client build/testing flag, not proof of
+  development or a backend authorization boundary; do not rely on it to prevent
+  custom clients from requesting cash. Debug checkouts create real reserved
+  orders, not simulated payments. International ETB bank-only checkout and
+  Ethiopia USD/service cash restrictions remain enforced even with the flag.
+  Release apps hide cash and block submission; no server environment or live
+  configuration change is performed automatically.
 - `POST checkouts/:id/payment` creates/reuses a server-priced Stripe intent
   with a checkout-specific idempotency key, never a client-supplied amount.
   Stripe remains USA-only with the existing **live secret key** policy.
   `POST checkouts/:id/confirm` verifies Stripe status, amount received,
   currency, intent ID, checkout metadata and owner before store assignments
   become actionable. For bank payments, confirmation takes `{ sender, reference }`;
-  funds stay pending until Admin verifies them. Cash activates immediately outside
-  USA, is collected per child delivery, and reconciles when those deliveries finish.
+  funds stay pending until Admin verifies them. Cash confirmation activates
+  Ethiopia and domestic USA development checkouts, is collected per child
+  delivery, and reconciles when those deliveries finish.
 - `GET checkouts` and `GET checkouts/:id` recover payments and list child
   statuses. Admin can list all with `GET checkouts?all=true`. Customer access is
   owner-scoped. Client secrets are returned only by the protected payment endpoint.

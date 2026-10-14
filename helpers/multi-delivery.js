@@ -231,8 +231,10 @@ function selectVehicles(group, selections) {
 async function prepare(models, groupId, user, databaseName, body) {
   if (!body || typeof body !== "object") throw conflict("Payment details are required.");
   if (!["cash", "bank", "card"].includes(body.method)) throw conflict("Choose a supported payment method.");
-  // Keep the existing USA cash-on-delivery production restriction.
-  if (body.method === "cash" && /usa/i.test(databaseName)) throw conflict("Cash on delivery is not available in the USA store.");
+  // This client build flag is not an authorization boundary.
+  if (body.method === "cash" && /usa/i.test(databaseName) && body.developmentCashOnDelivery !== true) {
+    throw conflict("USA cash checkout requires a development/debug build.");
+  }
   return models.Order.db.transaction(async (session) => {
     const group = await models.CheckoutGroup.findOne({ _id: groupId, user }).session(session);
     if (!group) throw conflict("Checkout not found.");
