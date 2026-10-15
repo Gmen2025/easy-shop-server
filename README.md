@@ -332,6 +332,11 @@ Authenticated APIs (all paths below are relative to `/api/v1/stores/`):
   whole `quantity`, quoted `price`, optional `storefrontId`. `addresses` contain
   unique local `id` and address fields. `allocations` contain `key`, `addressId`,
   whole `quantity`; every cart unit must be allocated exactly once.
+  Optional `deliveryMode` accepts `SAME_DAY`, `NEXT_DAY` or `SCHEDULED` and
+  defaults to `SAME_DAY` for older clients. `scheduledFor` is required and must
+  be a future date/time for `SCHEDULED`; it is rejected for other modes. The
+  quote stores the selected delivery plan. Vehicle fees remain based on the
+  selected vehicle and route; the delivery mode sets dispatch timing/priority.
   Limits are 50 cart lines, 10 destinations, 100 allocations and 20 deliveries.
   This saves a ten-minute authoritative quote, without reserving stock.
   Stock is allocated nearest-first within price/scope constraints, using one
@@ -341,6 +346,9 @@ Authenticated APIs (all paths below are relative to `/api/v1/stores/`):
   Mixed main/storefront groups preserve the storefront branch constraint.
 - `POST checkouts/:id/prepare`: `method` is `card`, `bank` or `cash`;
   `selections` contain one `{ key, vehicle }` for each quoted delivery.
+  `deliveryMode` and `scheduledFor` may be echoed from the quote; if supplied,
+  they must match its saved delivery plan. Each reserved child order receives
+  the quoted mode, schedule window, dispatch status and priority.
   Only server-offered suitable vehicles are accepted. Bank requires an active
   `bankAccountId` from `GET delivery-bank-accounts`. All child orders/items and
   stock reservations commit atomically. Stale price, stock, pickup coordinates

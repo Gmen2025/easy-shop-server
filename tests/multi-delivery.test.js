@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  addressInput, normalizeAllocations, allocateStock, quoteTotals, selectVehicles,
+  addressInput, normalizeAllocations, allocateStock, quoteTotals, selectVehicles, checkoutDeliveryPlan,
   createQuote, createServiceQuote, prepare, activate, ensureIntent, reconcile, cancelDelivery, refundDelivery,
 } = require("../helpers/multi-delivery");
 const { validateVehicleConfig, validatePackageSize, cargoFor, suitableVehicles, vehicleFee, vehicleMatches } = require("../helpers/vehicle-delivery");
@@ -45,6 +45,7 @@ function fixture({ exchangeConfig, bankCurrency, shippingConfig } = {}) {
   }
   const group = {
     _id: id(100), user: userId, status: "quote", paymentStatus: "pending", currency: "usd",
+    deliveryMode: "SAME_DAY", scheduledFor: null,
     expiresAt: new Date(Date.now() + 600000), cart: [line], orders: [],
     deliveries: stores.map((store, index) => ({
       key: `group-${index}`, store, address, lines: [{ ...line, quantity: 2 }],
@@ -526,6 +527,51 @@ test("quote geocodes destinations on the server, splits nearest inventory, price
   assert.equal(quoted.totalPrice, 45.73);
   assert.deepEqual(stocks.map((stock) => stock.reserved), [0, 0]);
 });
+
+test("delivery speed is validated, quoted, and persisted on each reserved order", async () => {
+  const scheduledFor = new Date(Date.now() + 48 * 60 * 60 * 1000);
+  assert.deepEqual(checkoutDeliveryPlan({ deliveryMode: "NEXT_DAY", scheduledFor: null }, "E_Shopping"),
+    { deliveryMode: "NEXT_DAY", scheduledFor: null });
+  assert.throws(() => checkoutDeliveryPlan({ deliveryMode: "SCHEDULED" }, "E_Shopping"),
+    /scheduledFor is required/);
+  assert.throws(() => checkoutDeliveryPlan({ deliveryMode: "SAME_DAY", scheduledFor }, "E_Shopping"),
+    /only allowed for SCHEDULED/);
+  assert.throws(() => checkoutDeliveryPlan({ deliveryMode: "INVALID" }, "E_Shopping"),
+    /Invalid deliveryMode/);
+
+  const { models, stocks, group, body, orders } = fixture();
+  const stores = [1, 2].map((number) => ({ _id: id(number), name: "Pickup",
+    location: address.location, approvalStatus: "approved" }));
+  models.Store.find = () => query(stores);
+  models.StoreInventory.find = () => query(stocks);
+  models.CheckoutGroup.create = async (fields) => { Object.assign(group, fields); return group; };
+  const quote = await createQuote(models, userId, "E_ShopUSA", {
+    cart: [line], addresses: [address],
+    allocations: [{ key: line.key, addressId: address.id, quantity: line.quantity }],
+    deliveryMode: "SCHEDULED", scheduledFor: scheduledFor.toISOString(),
+  }, { geocode: async () => address.location, distance: async () => 1 });
+  assert.equal(quote.deliveryMode, "SCHEDULED");
+  assert.equal(quote.scheduledFor.toISOString(), scheduledFor.toISOString());
+  const selections = quote.deliveries.map((delivery) => ({ key: delivery.key, vehicle: delivery.vehicle }));
+
+  await assert.rejects(prepare(models, group._id, userId, "E_ShopUSA", {
+    ...body, selections, deliveryMode: "NEXT_DAY", scheduledFor: null,
+  }), /Delivery speed changed after quoting/);
+  await prepare(models, group._id, userId, "E_ShopUSA", {
+    ...body, selections, deliveryMode: "SCHEDULED", scheduledFor: scheduledFor.toISOString(),
+  });
+  assert.ok(orders.length > 0);
+  for (const order of orders) {
+    assert.equal(order.deliveryMode, "SCHEDULED");
+    assert.equal(order.scheduledFor.toISOString(), scheduledFor.toISOString());
+    assert.equal(order.deliveryWindowStart.toISOString(), scheduledFor.toISOString());
+    assert.equal(order.dispatchStatus, "scheduled");
+    assert.equal(order.deliveryFee, quote.deliveries
+      .find((delivery) => delivery.vehicle === order.requiredVehicle)
+      .vehicleOptions.find((option) => option.type === order.requiredVehicle).fee);
+  }
+});
+
 test("USD quote converts the authoritative Ethiopia total, rejects foreign destinations and rate changes during routing", async () => {
   const { models, stocks, exchangeConfig } = usdFixture();
   const stores = [1, 2].map((number) => ({ _id: id(number), name: "ET pickup", location: address.location, approvalStatus: "approved" }));

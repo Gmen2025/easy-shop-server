@@ -9,6 +9,8 @@ const checkoutGroupSchema = new mongoose.Schema({
   itemsSubtotal: { type: Number, required: true },
   deliveryFee: { type: Number, required: true },
   totalPrice: { type: Number, required: true },
+  deliveryMode: { type: String, enum: ["SAME_DAY", "NEXT_DAY", "SCHEDULED"] },
+  scheduledFor: { type: Date, default: null },
   currency: { type: String, required: true },
   exchangeRate: mongoose.Schema.Types.Mixed,
   paymentAmount: Number,

@@ -3,6 +3,7 @@ const { conflict, inventoryEnabled, normalizeLines, eligibleStores, reserve, rel
 const { getCoordinates } = require("./fulfillment-routing");
 const { getDrivingDistanceKm } = require("./google-distance");
 const { VEHICLE_CONFIG_KEY, cargoFor, suitableVehicles, vehicleFee, cents } = require("./vehicle-delivery");
+const { resolveDeliveryPlan } = require("./delivery");
 const { sendPushToUser } = require("./push-notify");
 const fx = require("./exchange-rate");
 
@@ -27,6 +28,19 @@ function addressInput(body) {
     result[field] = value.trim();
   }
   return result;
+}
+
+function checkoutDeliveryPlan(body, databaseName, now = new Date()) {
+  const deliveryMode = body.deliveryMode === undefined ? "SAME_DAY" : body.deliveryMode;
+  const scheduledFor = body.scheduledFor ?? null;
+  if (deliveryMode !== "SCHEDULED" && scheduledFor !== null) {
+    throw conflict("scheduledFor is only allowed for SCHEDULED delivery.");
+  }
+  const result = resolveDeliveryPlan({ deliveryMode, scheduledFor }, {
+    now, databaseName, currentOrder: { deliveryFee: 0 },
+  });
+  if (!result.ok) throw conflict(result.error);
+  return { deliveryMode: result.value.deliveryMode, scheduledFor: result.value.scheduledFor };
 }
 
 function normalizeAllocations(cart, allocations, addresses) {
@@ -129,6 +143,7 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
   if (/usa/i.test(databaseName) && String(body.paymentCurrency).toLowerCase() === "etb") {
     return require("./international-shipping").createQuote(models, user, databaseName, body, { geocode, distance });
   }
+  const deliveryPlan = checkoutDeliveryPlan(body, databaseName);
   const nativeCurrency = /usa/i.test(databaseName) ? "usd" : "etb";
   const currency = String(body.paymentCurrency || nativeCurrency).toLowerCase();
   if (![nativeCurrency, ...(fx.isEthiopia(databaseName) ? ["usd"] : [])].includes(currency)) throw conflict("Choose ETB or an enabled USD payment for the selected region.");
@@ -177,7 +192,7 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
   }
   const fields = { user, deliveries, cart: body.cart.map((entry) => ({
     ...normalizeLines([entry])[0], key: entry.key, storefrontId: entry.storefrontId || null,
-  })), ...totals,
+  })), ...deliveryPlan, ...totals,
     currency, ...(exchangeRate ? { exchangeRate, paymentAmount: fx.allocateDollars(deliveries, exchangeRate) } : {}),
     expiresAt: new Date(Date.now() + QUOTE_MS) };
   return transient ? new models.CheckoutGroup(fields) : models.CheckoutGroup.create(fields);
@@ -243,6 +258,16 @@ async function prepare(models, groupId, user, databaseName, body) {
       if (group.status === "cancelled") throw conflict("This checkout was cancelled. Request a new quote.");
       return group;
     }
+    if (body.deliveryMode !== undefined && body.deliveryMode !== group.deliveryMode) {
+      throw conflict("Delivery speed changed after quoting. Request a new quote.");
+    }
+    if (body.scheduledFor !== undefined) {
+      const requestedDate = body.scheduledFor === null ? null : new Date(body.scheduledFor);
+      if (body.scheduledFor !== null && Number.isNaN(requestedDate.getTime()) ||
+          requestedDate?.getTime() !== group.scheduledFor?.getTime()) {
+        throw conflict("Scheduled delivery date changed after quoting. Request a new quote.");
+      }
+    }
     if (group.international) {
       if (group.kind !== "products" || group.currency !== "etb" || body.method !== "bank" || !/usa/i.test(databaseName)) {
         throw conflict("US-to-Ethiopia checkout is product-only and supports ETB bank transfer only.");
@@ -277,6 +302,7 @@ async function prepare(models, groupId, user, databaseName, body) {
     group.status = "awaiting_payment";
     group.expiresAt = new Date(Date.now() + HOLD_MS);
     group.orders = [];
+    const planNow = new Date();
     for (const delivery of group.deliveries) {
       const currentStore = await models.Store.findById(delivery.store._id).session(session).lean();
       if (!currentStore || JSON.stringify(getCoordinates(currentStore.location)) !== JSON.stringify(getCoordinates(delivery.store.location))) throw conflict("A pickup location changed. Refresh the quote.");
@@ -318,12 +344,23 @@ async function prepare(models, groupId, user, databaseName, body) {
         items.push(item._id);
       }
       const address = delivery.address;
+      const deliveryPlan = resolveDeliveryPlan({
+        deliveryMode: group.deliveryMode || "SAME_DAY",
+        scheduledFor: group.scheduledFor || null,
+      }, { now: planNow, databaseName, currentOrder: { deliveryFee: delivery.deliveryFee } });
+      if (!deliveryPlan.ok) throw conflict(deliveryPlan.error);
       const order = new models.Order({ orderItems: items, user, customer: user,
         shippingAddress1: address.address1, shippingAddress2: address.address2, city: address.city,
         zip: address.zip, country: address.country, phone: address.phone, customerLocation: address.location,
         inventoryManaged: true, checkoutGroup: group._id, storefrontId: delivery.storefrontId,
         requiredVehicle: delivery.vehicle, cargo: delivery.cargo,
         deliveryFee: delivery.deliveryFee, deliveryDistanceKm: delivery.distanceKm, quotedDeliveryDistanceKm: delivery.distanceKm,
+        deliveryMode: deliveryPlan.value.deliveryMode,
+        scheduledFor: deliveryPlan.value.scheduledFor,
+        deliveryWindowStart: deliveryPlan.value.deliveryWindowStart,
+        deliveryWindowEnd: deliveryPlan.value.deliveryWindowEnd,
+        dispatchStatus: deliveryPlan.value.dispatchStatus,
+        dispatchPriority: deliveryPlan.value.dispatchPriority,
         itemsSubtotal: delivery.itemsSubtotal, totalPrice: delivery.totalPrice,
         ...(group.exchangeRate ? { paymentCurrency: group.currency, paymentAmount: delivery.paymentAmount, exchangeRate: group.exchangeRate } : {}),
         ...(group.international ? { internationalShippingFee: delivery.internationalShippingFee,
@@ -593,5 +630,5 @@ async function refundDelivery(models, group, orderId, databaseName, { retryFaile
 }
 
 module.exports = { QUOTE_MS, HOLD_MS, addressInput, normalizeAllocations, allocateStock, quoteTotals, selectVehicles,
-  createQuote, createServiceQuote, prepare, activate, ensureIntent, reconcile, expireCheckouts, cancelDelivery, refundDelivery, syncCashPayment,
+  checkoutDeliveryPlan, createQuote, createServiceQuote, prepare, activate, ensureIntent, reconcile, expireCheckouts, cancelDelivery, refundDelivery, syncCashPayment,
   geocodeAddress, countryCode, stripeClient };
