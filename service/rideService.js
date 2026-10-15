@@ -343,12 +343,77 @@ async function closeSharedIntake(models, driverId) {
   });
 }
 
+async function terminateRide(models, driverId, rideId, reason, now = new Date()) {
+  if (typeof reason !== "string" || !reason.trim() || reason.trim().length > 500) {
+    throw conflict("Enter a termination reason of 1-500 characters.");
+  }
+  return models.Ride.db.transaction(async (session) => {
+    const driver = await models.Driver.findById(driverId).session(session);
+    const ride = await models.Ride.findById(rideId).session(session);
+    if (!driver || !ride || id(ride.driver) !== id(driver)) throw conflict("Only the assigned driver can terminate this booking.");
+    if (ride.status === "terminated") return ride;
+    if (!["assigned", "onboard"].includes(ride.status) || id(driver.activeRideTrip) !== id(ride.trip)) {
+      throw conflict("Only a booking on your active route can be terminated.");
+    }
+    const location = getCoordinates(driver.location);
+    const updatedAt = new Date(driver.rideLocationUpdatedAt).getTime();
+    if (!location || !Number.isFinite(updatedAt) || now.getTime() - updatedAt > 120000) {
+      throw conflict("Report your current GPS location before terminating the ride.");
+    }
+    const trip = await models.RideTrip.findById(ride.trip).session(session);
+    if (!trip || trip.status !== "active") throw conflict("The active ride route is inconsistent. Contact Admin.");
+    const stops = trip.stops.filter((stop) => id(stop.ride) === id(ride));
+    const onboard = stops.filter((stop) => stop.completedAt).reduce((sum, stop) =>
+      sum + (stop.type === "pickup" ? stop.passengers : -stop.passengers), 0);
+    if (onboard < 0 || onboard > trip.onboardSeats) throw conflict("Passenger count is inconsistent. Contact Admin.");
+    trip.onboardSeats -= onboard;
+    // Remove unfinished stops without recording a destination drop-off.
+    trip.stops = trip.stops.filter((stop) => id(stop.ride) !== id(ride) || stop.completedAt);
+    trip.markModified("stops");
+    const previousStatus = ride.status;
+    ride.status = "terminated";
+    ride.termination = { reason: reason.trim(), at: now, driver: id(driver),
+      location: { type: "Point", coordinates: location }, locationUpdatedAt: driver.rideLocationUpdatedAt,
+      previousStatus, reviewStatus: "pending" };
+    ride.paymentStatus = "review_required";
+    ride.dispatchMessage = "Ride terminated without destination completion. Payment is on hold for Admin review.";
+    await ride.save({ session });
+    await finishTripIfEmpty(trip, driver, session);
+    return ride;
+  });
+}
+
+async function reviewTermination(models, rideId, adminId, body) {
+  if (typeof body?.note !== "string" || !body.note.trim() || body.note.trim().length > 500 ||
+      typeof body.fare !== "number" || !Number.isFinite(body.fare) || body.fare < 0 ||
+      !Number.isSafeInteger(cents(body.fare)) || Math.abs(body.fare * 100 - cents(body.fare)) > 0.000001) {
+    throw conflict("Enter a review note (1-500 characters) and a non-negative fare with at most two decimals.");
+  }
+  return models.Ride.db.transaction(async (session) => {
+    const ride = await models.Ride.findById(rideId).session(session);
+    if (!ride || ride.status !== "terminated" || ride.paymentStatus !== "review_required") {
+      throw conflict("This terminated ride is not awaiting review.");
+    }
+    ride.finalFare = body.fare;
+    ride.paymentStatus = body.fare === 0 ? "waived" : "pending";
+    ride.termination = { ...ride.termination, reviewStatus: "resolved", reviewedBy: adminId,
+      reviewedAt: new Date(), reviewNote: body.note.trim() };
+    ride.dispatchMessage = body.fare === 0 ? "Terminated ride reviewed. No fare is due." :
+      "Terminated ride reviewed by Admin. Pay the adjusted fare using the checkout payment methods.";
+    await ride.save({ session });
+    return ride;
+  });
+}
+
+const payableRide = (ride) => ride.status === "completed" ||
+  (ride.status === "terminated" && ride.termination?.reviewStatus === "resolved" && ride.paymentStatus !== "waived");
+
 async function cancelRide(models, rideId, user) {
   return models.Ride.db.transaction(async (session) => {
     const ride = await models.Ride.findOne({ _id: rideId, user }).session(session);
     if (!ride) throw conflict("Ride not found.");
     if (ride.status === "cancelled") return ride;
-    if (["onboard", "completed"].includes(ride.status)) throw conflict("An onboard/completed ride cannot be cancelled. Contact support.");
+    if (["onboard", "completed", "terminated"].includes(ride.status)) throw conflict("An onboard/completed/terminated ride cannot be cancelled. Contact support.");
     const driverId = ride.driver || ride.offerDriver;
     if (driverId) {
       const driver = await models.Driver.findById(driverId).session(session);
@@ -370,7 +435,7 @@ async function prepareRidePayment(models, rideId, user, body, databaseName) {
   if (!["card", "bank", "cash"].includes(body.method)) throw conflict("Select a supported payment method.");
   return models.Ride.db.transaction(async (session) => {
     const ride = await models.Ride.findOne({ _id: rideId, user }).session(session);
-    if (!ride || ride.status !== "completed" || !ride.finalFare) throw conflict("Payment becomes available after your ride is completed.");
+    if (!ride || !payableRide(ride) || !ride.finalFare) throw conflict("Payment becomes available after your ride is completed or after an Admin-reviewed termination.");
     if (ride.paymentMethod) {
       if (ride.paymentMethod !== body.method) throw conflict("Resume the existing payment method. Contact support to change it.");
       return ride;
@@ -394,7 +459,7 @@ async function prepareRidePayment(models, rideId, user, body, databaseName) {
 }
 
 async function ridePaymentIntent(models, ride, databaseName) {
-  if (ride.status !== "completed" || ride.paymentMethod !== "card") throw conflict("Complete the ride and choose card payment first.");
+  if (!payableRide(ride) || ride.paymentMethod !== "card") throw conflict("Complete the ride or obtain Admin termination review and choose card payment first.");
   if (ride.paymentStatus === "completed") return { ride };
   const stripe = stripeClient(databaseName);
   let intent;
@@ -402,7 +467,7 @@ async function ridePaymentIntent(models, ride, databaseName) {
   else {
     let after;
     do {
-      const page = await stripe.paymentIntents.list({ limit: 100, created: { gte: Math.floor(new Date(ride.completedAt).getTime() / 1000) - 60 },
+      const page = await stripe.paymentIntents.list({ limit: 100, created: { gte: Math.floor(new Date(ride.completedAt || ride.termination?.at).getTime() / 1000) - 60 },
         ...(after ? { starting_after: after } : {}) });
       if (!Array.isArray(page.data) || typeof page.has_more !== "boolean" || (page.has_more && !page.data.length)) {
         throw conflict("The provider could not enumerate existing ride payments. Retry status recovery before paying again.");
@@ -421,7 +486,7 @@ async function ridePaymentIntent(models, ride, databaseName) {
       intent.metadata?.databaseName !== databaseName || intent.status === "canceled") {
     throw conflict("The existing card attempt does not match this fare or was cancelled. Contact support; do not pay again.");
   }
-  ride = await models.Ride.findOneAndUpdate({ _id: ride._id, status: "completed", paymentMethod: "card" }, { paymentIntentId: intent.id }, { new: true });
+  ride = await models.Ride.findOneAndUpdate({ _id: ride._id, status: ride.status, paymentMethod: "card" }, { paymentIntentId: intent.id }, { new: true });
   if (!ride) throw conflict("Ride payment changed. Reload its status before paying.");
   if (intent.status === "succeeded") {
     verifyRidePayment(ride, intent, databaseName);
@@ -441,7 +506,7 @@ function verifyRidePayment(ride, intent, databaseName) {
 }
 
 async function confirmRidePayment(models, ride, databaseName, body) {
-  if (ride.status !== "completed") throw conflict("Only completed rides can be paid.");
+  if (!payableRide(ride)) throw conflict("Only completed or Admin-reviewed terminated rides can be paid.");
   if (ride.paymentStatus === "completed") return ride;
   if (ride.paymentMethod === "card") {
     if (!ride.paymentIntentId) ({ ride } = await ridePaymentIntent(models, ride, databaseName));
@@ -471,7 +536,7 @@ async function scanRides(models, databaseName, now = new Date()) {
     try { await dispatchRide(models, ride._id, { now }); }
     catch (error) { console.error(`[Ride:${databaseName}] Dispatch ${ride._id} failed:`, error.message); }
   }
-  const pending = await models.Ride.find({ status: "completed", paymentMethod: "card", paymentStatus: "pending", paymentIntentId: { $exists: true } }).limit(25);
+  const pending = await models.Ride.find({ status: { $in: ["completed", "terminated"] }, paymentMethod: "card", paymentStatus: "pending", paymentIntentId: { $exists: true } }).limit(25);
   for (const ride of pending) {
     try {
       const intent = await stripeClient(databaseName).paymentIntents.retrieve(ride.paymentIntentId);
@@ -481,4 +546,4 @@ async function scanRides(models, databaseName, now = new Date()) {
 }
 
 module.exports = { id, modeEnabled, quoteRide, rideRoutePath, requestRide, driverPlan, dispatchRide, releaseOffer, acceptRide,
-  completeStop, closeSharedIntake, cancelRide, prepareRidePayment, ridePaymentIntent, confirmRidePayment, verifyRidePayment, scanRides };
+  completeStop, terminateRide, reviewTermination, payableRide, closeSharedIntake, cancelRide, prepareRidePayment, ridePaymentIntent, confirmRidePayment, verifyRidePayment, scanRides };

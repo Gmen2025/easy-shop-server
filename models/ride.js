@@ -2,7 +2,8 @@ const mongoose = require("mongoose");
 const rideSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   mode: { type: String, enum: ["regular", "shared"], required: true },
-  status: { type: String, enum: ["quote", "waiting", "offered", "assigned", "onboard", "completed", "cancelled"], default: "quote" },
+  status: { type: String, enum: ["quote", "waiting", "offered", "assigned", "onboard", "completed", "cancelled", "terminated"], default: "quote" },
+  termination: mongoose.Schema.Types.Mixed,
   stops: { type: [mongoose.Schema.Types.Mixed], required: true },
   seats: { type: Number, required: true },
   currency: { type: String, enum: ["usd", "etb"], required: true },
@@ -26,7 +27,7 @@ const rideSchema = new mongoose.Schema({
   attemptedDrivers: [{ type: mongoose.Schema.Types.ObjectId, ref: "Driver" }],
   dispatchMessage: String,
   paymentMethod: { type: String, enum: ["card", "bank", "cash"] },
-  paymentStatus: { type: String, enum: ["pending", "completed"], default: "pending" },
+  paymentStatus: { type: String, enum: ["pending", "completed", "review_required", "waived"], default: "pending" },
   paymentIntentId: String,
   bankAccount: mongoose.Schema.Types.Mixed,
   bankSender: String,

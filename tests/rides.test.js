@@ -319,6 +319,64 @@ test("regular multi-stop ride has one payer and uses actual elapsed minutes; can
   assert.equal(f.tables.Ride.length, 1);
 });
 
+test("termination records remote GPS without completing drop-off, frees seats and holds payment for review", async () => {
+  const f = fixture(), ride = await assigned(f);
+  await service.completeStop(f.models, driverId, `${ride._id}:0`, { lookup });
+  f.tables.Driver[0].location = point(100);
+  await assert.rejects(service.terminateRide(f.models, id(99), ride._id, "Test ended"), /assigned driver/);
+  await assert.rejects(service.terminateRide(f.models, driverId, ride._id, " "), /reason/);
+  const ended = await service.terminateRide(f.models, driverId, ride._id, "Passenger requested an early stop");
+  assert.equal(ended.status, "terminated");
+  assert.equal(ended.completedAt, undefined);
+  assert.equal(ended.finalFare, undefined);
+  assert.equal(ended.paymentStatus, "review_required");
+  assert.deepEqual(ended.termination.location.coordinates, point(100).coordinates);
+  assert.equal(f.tables.Driver[0].activeRideTrip, null);
+  assert.equal(f.tables.RideTrip[0].onboardSeats, 0);
+  assert.equal(f.tables.RideTrip[0].stops.some((entry) => entry.type === "dropoff"), false);
+  await service.terminateRide(f.models, driverId, ride._id, "Retry");
+  await assert.rejects(service.prepareRidePayment(f.models, ride._id, userId, { method: "bank" }, "E_ShopUSA"), /Admin-reviewed/);
+  await assert.rejects(service.cancelRide(f.models, ride._id, userId), /cannot be cancelled/);
+  await service.reviewTermination(f.models, ride._id, id(90), { fare: 0, note: "Test booking; waive fare" });
+  assert.equal(f.tables.Ride[0].paymentStatus, "waived");
+  assert.equal(f.tables.Ride[0].status, "terminated");
+  await assert.rejects(service.reviewTermination(f.models, ride._id, id(90), { fare: 5, note: "Retry" }), /not awaiting review/);
+});
+
+test("termination preserves other shared bookings and rejects stale GPS", async () => {
+  const f = fixture(), first = await assigned(f);
+  await service.completeStop(f.models, driverId, `${first._id}:0`, { lookup });
+  const second = await assigned(f, { user: id(40) });
+  f.tables.Driver[0].rideLocationUpdatedAt = new Date(0);
+  await assert.rejects(service.terminateRide(f.models, driverId, first._id, "Early stop"), /current GPS/);
+  assert.equal(f.tables.RideTrip[0].onboardSeats, 1);
+  f.tables.Driver[0].rideLocationUpdatedAt = new Date();
+  await service.terminateRide(f.models, driverId, first._id, "Early stop");
+  assert.equal(f.tables.RideTrip[0].status, "active");
+  assert.equal(f.tables.RideTrip[0].onboardSeats, 0);
+  assert.ok(f.tables.Driver[0].activeRideTrip);
+  assert.ok(f.tables.RideTrip[0].stops.some((entry) => entry.ride === second._id && !entry.completedAt));
+  await service.reviewTermination(f.models, first._id, id(90), { fare: 3.50, note: "Reviewed partial service" });
+  const reviewed = await f.models.Ride.findById(first._id);
+  assert.equal(reviewed.finalFare, 3.5);
+  assert.equal(reviewed.paymentStatus, "pending");
+  await service.prepareRidePayment(f.models, first._id, userId, { method: "bank", bankAccountId: id(12) }, "E_ShopUSA");
+  assert.equal(f.tables.Ride.find((entry) => entry._id === first._id).paymentMethod, "bank");
+});
+
+test("regular multi-stop termination releases only the passengers currently onboard", async () => {
+  const f = fixture();
+  const ride = await assigned(f, { mode: "regular", seats: 2,
+    stops: [stop("pickup", 0, 2), stop("dropoff", 1, 1, "1"), stop("dropoff", 2, 1, "2")] });
+  await service.completeStop(f.models, driverId, `${ride._id}:0`, { lookup });
+  await service.completeStop(f.models, driverId, `${ride._id}:1`, { lookup });
+  assert.equal(f.tables.RideTrip[0].onboardSeats, 1);
+  await service.terminateRide(f.models, driverId, ride._id, "Remaining passenger ended journey early");
+  assert.equal(f.tables.RideTrip[0].onboardSeats, 0);
+  assert.equal(f.tables.RideTrip[0].stops.filter((entry) => entry.completedAt).length, 2);
+  assert.equal(f.tables.Ride[0].completedAt, undefined);
+});
+
 test("pre-pickup cancellation removes route stops, releases offer/vehicle and remains idempotent", async () => {
   const f = fixture(), ride = await assigned(f);
   await service.cancelRide(f.models, ride._id, userId);
@@ -406,6 +464,29 @@ test("new card payments use the server fare and one stable attempt; malformed pr
   } finally { stripeRouter.getStripe = original; }
 });
 
+test("reviewed termination card recovery charges only the reviewed fare without a completion timestamp", async () => {
+  const f = fixture();
+  const ride = await f.booking({ status: "terminated", finalFare: 3.5, paymentMethod: "card",
+    paymentStatus: "pending", termination: { at: new Date(), reviewStatus: "resolved" } });
+  const original = stripeRouter.getStripe;
+  const intent = { id: "pi_terminated", status: "succeeded", amount: 350, amount_received: 350,
+    currency: "usd", metadata: { ride: ride._id, user: userId, databaseName: "E_ShopUSA" } };
+  stripeRouter.getStripe = () => ({ stripe: { paymentIntents: {
+    list: async (options) => {
+      assert.ok(Number.isFinite(options.created.gte));
+      return { data: [intent], has_more: false };
+    },
+    create: async () => assert.fail("Existing terminated ride payment must be recovered"),
+  } } });
+  try {
+    const payment = await service.ridePaymentIntent(f.models, ride, "E_ShopUSA");
+    assert.equal(payment.ride.status, "terminated");
+    assert.equal(payment.ride.completedAt, undefined);
+    assert.equal(payment.ride.paymentStatus, "completed");
+    assert.equal(payment.ride.finalFare, 3.5);
+  } finally { stripeRouter.getStripe = original; }
+});
+
 async function invoke(f, path, method, auth, params = {}, body = {}) {
   const layer = router.stack.find((entry) => entry.route?.path === path && entry.route.methods[method]);
   assert.ok(layer);
@@ -424,6 +505,42 @@ test("ride APIs protect passenger privacy, Admin settings and driver-only action
   assert.equal(owned.body.paymentIntentId, undefined);
   assert.equal(owned.body.offerDriver, undefined);
   assert.equal((await invoke(f, "/config", "get", null)).code, 401);
+});
+
+test("termination endpoints enforce driver ownership and Admin-only fare review", async () => {
+  const f = fixture(), ride = await assigned(f);
+  assert.equal((await invoke(f, "/me/rides/:id/terminate", "post", { userId },
+    { id: ride._id }, { reason: "Test ended" })).code, 403);
+  const result = await invoke(f, "/me/rides/:id/terminate", "post", { userId: id(3) },
+    { id: ride._id }, { reason: "Test ended" });
+  assert.equal(result.code, 200);
+  assert.equal(result.body.status, "terminated");
+  assert.equal(result.body.paymentStatus, "review_required");
+  assert.equal(result.body.completedAt, undefined);
+  assert.equal((await invoke(f, "/admin/terminations/:id/review", "post", { userId: id(3) },
+    { id: ride._id }, { fare: 0, note: "Waive test" })).code, 403);
+  for (const fare of [-1, 0.001, "5", null]) {
+    assert.equal((await invoke(f, "/admin/terminations/:id/review", "post", { userId, isAdmin: true },
+      { id: ride._id }, { fare, note: "Invalid amount" })).code, 409);
+  }
+  const reviewed = await invoke(f, "/admin/terminations/:id/review", "post", { userId, isAdmin: true },
+    { id: ride._id }, { fare: 0, note: "Waive test" });
+  assert.equal(reviewed.code, 200);
+  assert.equal(reviewed.body.paymentStatus, "waived");
+  assert.equal(reviewed.body.termination.reviewedBy, userId);
+  assert.equal((await invoke(f, "/:id/received-payment", "post", { userId, isAdmin: true },
+    { id: ride._id })).code, 409);
+});
+
+test("termination rolls back the booking, seat count and driver lock on a transaction failure", async () => {
+  const f = fixture(), ride = await assigned(f);
+  await service.completeStop(f.models, driverId, `${ride._id}:0`, { lookup });
+  f.fail("RideTrip");
+  await assert.rejects(service.terminateRide(f.models, driverId, ride._id, "Early stop"));
+  assert.equal(f.tables.Ride[0].status, "onboard");
+  assert.equal(f.tables.RideTrip[0].onboardSeats, 1);
+  assert.ok(f.tables.Driver[0].activeRideTrip);
+  assert.ok(f.tables.RideTrip[0].stops.some((entry) => entry.type === "dropoff" && !entry.completedAt));
 });
 
 test("rejection reroutes to the next nearest enabled driver and pickup-window exhaustion ends without a fare", async () => {

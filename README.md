@@ -654,6 +654,27 @@ node --test tests/delivery-schedule.test.js tests/order-dashboard.test.js tests/
 
 ## 🛠️ Tech Stack
 
+### Early ride termination
+
+`POST /api/v1/rides/me/rides/:id/terminate` accepts `{reason}` (1-500
+characters) from the assigned company driver for an assigned/onboard booking.
+The driver must report GPS within the last two minutes; proximity to the planned
+destination is not required. Termination records the reason, driver, timestamp
+and GPS snapshot, removes that booking's unfinished stops and releases its occupied
+seats atomically. Other shared bookings remain active. No destination drop-off
+or completed booking is fabricated. The driver must confirm passengers have safely
+exited before using this action.
+
+Terminated bookings appear in driver history, customer history and
+`GET /api/v1/rides/admin/payments` with `paymentStatus: "review_required"`.
+Payment is blocked until Admin submits
+`POST /api/v1/rides/admin/terminations/:id/review` with `{fare, note}`.
+The fare must be a non-negative number with at most two decimals; a non-empty
+note is required. Zero sets payment to `waived`; a positive fare enables the
+existing regional payment methods. The booking remains `terminated` and the
+review records the Admin and timestamp. Reviews cannot be overwritten through
+this endpoint. Deploy the server update before the matching mobile UI.
+
 ### Checkout driving-distance configuration
 
 USA delivery fees use miles for `E_ShopUSA` (including `E_ShoppingUSA` alias).

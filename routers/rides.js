@@ -90,8 +90,8 @@ router.get("/me/driver", endpoint(async (req, res) => {
   }).lean();
   const riders = trip ? await req.dbModels.Ride.find({ trip: trip._id, status: { $in: ["assigned", "onboard"] } })
     .select("stops seats status user mode estimate").lean() : [];
-  const payments = await req.dbModels.Ride.find({ driver: current._id, status: "completed" })
-    .select("stops currency finalFare paymentStatus paymentMethod bankReference completedAt").sort({ completedAt: -1 }).limit(20).lean();
+  const payments = await req.dbModels.Ride.find({ driver: current._id, status: { $in: ["completed", "terminated"] } })
+    .select("stops currency finalFare estimate status termination paymentStatus paymentMethod bankReference completedAt").sort({ updatedAt: -1 }).limit(20).lean();
   res.json({ driver: { _id: current._id, name: current.name, vehicleType: vehicleName(current),
     passengerSeats: current.passengerSeats, serviceModes: current.serviceModes,
     sharedIntakeOpen: current.sharedIntakeOpen, approvalStatus: current.approvalStatus,
@@ -180,9 +180,19 @@ router.post("/me/next-stop", endpoint(async (req, res) => {
   if (typeof req.body.stopKey !== "string") throw conflict("The next ride stop identifier is required.");
   res.json(publicRide(await service.completeStop(req.dbModels, driver._id, req.body.stopKey)));
 }));
+router.post("/me/rides/:id/terminate", endpoint(async (req, res) => {
+  checkId(req.params.id);
+  const driver = await selfDriver(req);
+  res.json(publicRide(await service.terminateRide(req.dbModels, driver._id, req.params.id, req.body.reason)));
+}));
+router.post("/admin/terminations/:id/review", endpoint(async (req, res) => {
+  admin(req);
+  checkId(req.params.id);
+  res.json(publicRide(await service.reviewTermination(req.dbModels, req.params.id, req.auth.userId, req.body)));
+}));
 router.get("/admin/payments", endpoint(async (req, res) => {
   admin(req);
-  res.json((await req.dbModels.Ride.find({ status: "completed" }).sort({ completedAt: -1 }).limit(100).lean()).map(publicRide));
+  res.json((await req.dbModels.Ride.find({ status: { $in: ["completed", "terminated"] } }).sort({ updatedAt: -1 }).limit(100).lean()).map(publicRide));
 }));
 const PLACE_SEARCH_LIMIT = 120;
 const placeSearches = new Map();
@@ -252,7 +262,7 @@ router.post("/:id/payment-confirm", endpoint(async (req, res) => {
 router.post("/:id/received-payment", endpoint(async (req, res) => {
   checkId(req.params.id);
   const ride = await req.dbModels.Ride.findById(req.params.id);
-  if (!ride || ride.status !== "completed") throw conflict("Complete the ride before recording payment.");
+  if (!ride || !service.payableRide(ride)) throw conflict("Complete the ride or review its termination before recording payment.");
   if (ride.paymentMethod === "bank") {
     admin(req);
     if (!ride.bankReference) throw conflict("The rider must submit their transfer reference first.");
@@ -262,7 +272,7 @@ router.post("/:id/received-payment", endpoint(async (req, res) => {
       if (service.id(ride.driver) !== service.id(driver)) throw Object.assign(new Error("Only the assigned driver can confirm cash received."), { status: 403 });
     }
   } else throw conflict("Card payments must be verified through Stripe.");
-  const updated = await req.dbModels.Ride.findOneAndUpdate({ _id: ride._id, status: "completed",
+  const updated = await req.dbModels.Ride.findOneAndUpdate({ _id: ride._id, status: ride.status,
     paymentStatus: "pending", paymentMethod: ride.paymentMethod,
     ...(ride.paymentMethod === "bank" ? { bankReference: ride.bankReference } : {}),
   }, { paymentStatus: "completed", paymentPaidAt: new Date() }, { new: true });

@@ -1304,7 +1304,8 @@ router.delete(`/:id`, requireAdmin, async (req, res) => {
     await Driver.db.transaction(async (session) => {
       const current = await Driver.findById(req.params.id).session(session);
       if (!current || current.activeRideTrip || current.pendingRideOffer ||
-          await Ride.countDocuments({ driver: current._id, status: "completed", paymentStatus: "pending" }).session(session)) {
+          await Ride.countDocuments({ driver: current._id, status: { $in: ["completed", "terminated"] },
+            paymentStatus: { $in: ["pending", "review_required"] } }).session(session)) {
         throw Object.assign(new Error("Finish ride assignments and reconcile unpaid ride fares before deleting this driver."), { status: 409 });
       }
       if (current.user) {
