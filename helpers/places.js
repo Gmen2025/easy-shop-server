@@ -3,6 +3,12 @@ const { conflict } = require("./store-inventory");
 const COUNTRY_NAMES = { US: "USA", ET: "Ethiopia" };
 const PLACE_ID = /^[A-Za-z0-9_-]{10,300}$/;
 const SESSION = /^[A-Za-z0-9-]{8,64}$/;
+const STREET_WORDS = {
+  st: "street", rd: "road", ave: "avenue", blvd: "boulevard", dr: "drive",
+  ln: "lane", pkwy: "parkway", hwy: "highway", ct: "court", pl: "place", ter: "terrace",
+};
+const comparableAddress = (value) => value.toLowerCase().replace(/[.,]/g, " ")
+  .trim().split(/\s+/).map((word) => STREET_WORDS[word] || word).join(" ");
 
 const placesKey = () => process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
 const unavailable = () => conflict("Address search is unavailable. Admin must enable Places API (New) for the server Google key.");
@@ -64,7 +70,9 @@ async function placeDetails(placeId, regionCode, session, { fetcher = fetch } = 
   }
   const street = [part("street_number"), part("route")].filter(Boolean).join(" ");
   const name = place.displayName?.text || "";
-  const address1 = (street && name && !street.includes(name) && !name.includes(street) ? `${name}, ${street}` : street || name ||
+  const sameAddress = comparableAddress(street).includes(comparableAddress(name)) ||
+    comparableAddress(name).includes(comparableAddress(street));
+  const address1 = (street && name && !sameAddress ? `${name}, ${street}` : street || name ||
     String(place.formattedAddress || "").split(",")[0]).slice(0, 300);
   return {
     placeId: place.id || placeId,

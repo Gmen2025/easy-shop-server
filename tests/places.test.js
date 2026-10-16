@@ -50,6 +50,27 @@ test("place details fill an Ethiopian address without ZIP and reject other count
   await assert.rejects(placeDetails("../secrets", "ET", "", { fetcher: details("ET") }), /Invalid place/);
 });
 
+test("place details do not repeat a street address used as the display name", async (t) => {
+  process.env.GOOGLE_MAPS_API_KEY = "server-key";
+  t.after(() => { delete process.env.GOOGLE_MAPS_API_KEY; });
+  for (const name of ["123 MAIN ST", "123 Main St.", "123 Main Street", " 123  Main St "]) {
+    const result = await placeDetails(PLACE, "US", "", { fetcher: reply({
+      id: PLACE, displayName: { text: name },
+      formattedAddress: "123 Main St, Springfield, USA",
+      location: { latitude: 40, longitude: -75 },
+      addressComponents: [
+        { longText: "123", types: ["street_number"] },
+        { longText: "Main St", types: ["route"] },
+        { longText: "Springfield", types: ["locality"] },
+        { shortText: "US", types: ["country"] },
+      ],
+    }) });
+    assert.equal(result.address1, "123 Main St", name);
+    assert.equal(result.formattedAddress, "123 Main St, Springfield, USA");
+    assert.deepEqual(result.location, { type: "Point", coordinates: [-75, 40] });
+  }
+});
+
 test("ZIP is optional only for Ethiopian addresses", () => {
   const base = { label: "Home", address1: "Bole", address2: "", city: "Addis Ababa", phone: "0911000000" };
   assert.equal(addressInput({ ...base, country: "Ethiopia" }).zip, "");
