@@ -165,6 +165,10 @@ test("completion consumes stock exactly once; cancellation and deletion release 
   await updateManagedOrder(models, order._id, { status: "3" });
   assert.equal(stocks[0].countInStock, 3);
   assert.equal(stocks[0].reserved, 0);
+  await updateManagedOrder(models, order._id, {}, { deleting: true });
+  assert.equal(order.deleted, true);
+  assert.equal(stocks[0].countInStock, 3);
+  assert.equal(stocks[0].reserved, 0);
   for (const deleting of [false, true]) {
     const f = fixture();
     f.stocks[0].reserved = 2;

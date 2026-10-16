@@ -171,7 +171,25 @@ async function updateManagedOrder(models, orderId, fields, { deleting = false } 
   return models.Order.db.transaction(async (session) => {
     const order = await models.Order.findById(orderId).session(session);
     if (!order) return null;
-    if (order.checkoutGroup && (deleting || ["4", "Cancelled"].includes(String(fields.status)))) {
+    if (order.checkoutGroup && deleting) {
+      const completedDelivery = order.fulfillmentStatus !== "cancelled" && (
+        order.fulfillmentStatus === "completed" ||
+        String(order.status) === "3" || order.deliveryStatus === "Delivered"
+      );
+      if (!completedDelivery && order.fulfillmentStatus !== "cancelled") {
+        throw conflict("Cancel grouped deliveries through their checkout before deleting them.");
+      }
+      if (!completedDelivery && !["refunded", "not_required"].includes(order.refundStatus)) {
+        throw conflict("Complete or reconcile this delivery's refund before deleting it.");
+      }
+      const group = await models.CheckoutGroup.findById(order.checkoutGroup).session(session);
+      if (!group || !group.orders?.some((orderId) => String(orderId) === String(order._id))) {
+        throw conflict("Checkout payment record is inconsistent. Contact support.");
+      }
+      group.orders = group.orders.filter((orderId) => String(orderId) !== String(order._id));
+      await group.save({ session });
+    }
+    if (order.checkoutGroup && ["4", "Cancelled"].includes(String(fields.status))) {
       throw conflict("Cancel grouped deliveries through their checkout so payment and refunds stay coordinated.");
     }
     if (order.checkoutGroup && (order.fulfillmentStatus === "payment_pending" ||

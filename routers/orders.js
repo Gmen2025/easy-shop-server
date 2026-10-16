@@ -1776,7 +1776,7 @@ router.put("/:id", async (req, res) => {
  * /api/v1/orders/{id}:
  *   delete:
  *     summary: Delete an order (admin only)
- *     description: Deletes an order and its related order items. Requires an admin token (403 otherwise). Optionally notify customer by email using query or body flag.
+ *     description: Deletes an order and its related order items. Grouped deliveries can be deleted only after cancellation and after their refund is complete or not required. Requires an admin token (403 otherwise). Optionally notify customer by email using query or body flag.
  *     tags: [Orders]
  *     security:
  *       - bearerAuth: []
@@ -1849,6 +1849,18 @@ router.put("/:id", async (req, res) => {
  *                 message:
  *                   type: string
  *                   example: order not found!
+ *       409:
+ *         description: Grouped delivery has not been cancelled or its refund is not complete
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: false
+ *                 message:
+ *                   type: string
  *       400:
  *         description: Delete operation failed
  *         content:
@@ -1868,7 +1880,7 @@ router.delete("/:id", requireAdmin, async (req, res) => {
 
   try {
     const existing = await Order.findById(req.params.id);
-    const order = existing?.inventoryManaged
+    const order = existing?.inventoryManaged || existing?.checkoutGroup
       ? await updateManagedOrder(req.dbModels, req.params.id, {}, { deleting: true })
       : await Order.findByIdAndDelete(req.params.id).exec();
 
@@ -1893,16 +1905,21 @@ router.delete("/:id", requireAdmin, async (req, res) => {
     // A completed delivery isn't a "cancellation" - only send the cancelled/refund email for
     // orders that hadn't finished delivering yet (e.g. still Processing), unless an admin
     // explicitly forces it via notifyCustomer=true.
-    const isAlreadyDelivered = String(order.status) === "3" || order.deliveryStatus === "Delivered";
+    const isAlreadyDelivered = String(order.status) === "3" ||
+      order.deliveryStatus === "Delivered" || order.fulfillmentStatus === "completed";
+    const isAlreadyCancelledGrouped = Boolean(order.checkoutGroup && order.fulfillmentStatus === "cancelled");
     const shouldNotify =
       !skipNotify &&
+      !isAlreadyCancelledGrouped &&
       (explicitNotifyProvided ? explicitNotifyValue : !isAlreadyDelivered);
 
     const notification = {
       attempted: shouldNotify,
       delivered: false,
-      skipped: !shouldNotify && isAlreadyDelivered && !skipNotify,
-      reason: !shouldNotify && isAlreadyDelivered && !skipNotify ? "already_delivered" : null,
+      skipped: !shouldNotify && (isAlreadyDelivered || isAlreadyCancelledGrouped) && !skipNotify,
+      reason: !shouldNotify && !skipNotify
+        ? isAlreadyCancelledGrouped ? "already_cancelled" : isAlreadyDelivered ? "already_delivered" : null
+        : null,
     };
 
     if (shouldNotify) {
@@ -1958,7 +1975,9 @@ router.delete("/:id", requireAdmin, async (req, res) => {
       notification,
     });
   } catch (err) {
-    return res.status(400).json({ success: false, error: err?.message || err });
+    return res.status(err?.status || 400).json(err?.status
+      ? { success: false, message: err?.message || String(err) }
+      : { success: false, error: err?.message || String(err) });
   }
 });
 

@@ -19,6 +19,7 @@ function query(value, onSelect = () => {}) {
       if (Array.isArray(value)) value = value.slice(0, limit);
       return chain;
     },
+    session() { return chain; },
     lean() { return chain; },
     then(resolve, reject) {
       const project = (entry) => fields && entry
@@ -85,6 +86,75 @@ test("AdminStore product queue includes every unanswered product on its active a
     assert.ok(!res.body.products.some((product) => product._id === "ready"));
     if (location) assert.ok(!res.body.products.some((product) => product._id === "unrelated-partner"));
   }
+});
+
+test("Admin may delete a grouped delivery after cancellation and refund settlement or completion", async () => {
+  const orderId = "delivery-1";
+  const group = {
+    orders: [orderId],
+    async save() { this.saved = true; },
+  };
+  const order = {
+    _id: orderId,
+    checkoutGroup: "checkout-1",
+    fulfillmentStatus: "accepted",
+    refundStatus: "refunded",
+    status: "4",
+    orderItems: ["item-1"],
+    set(fields) { Object.assign(this, fields); },
+    async deleteOne() { this.deleted = true; },
+  };
+  const deletedItems = [];
+  const dbModels = {
+    Order: {
+      findById: () => query(order),
+      db: { transaction: async (action) => action({}) },
+    },
+    CheckoutGroup: { findById: () => query(group) },
+    OrderItem: { findByIdAndDelete: async (id) => deletedItems.push(id) },
+  };
+  const removeOrder = handler(orderRouter, "/:id", "delete");
+  const request = {
+    params: { id: orderId },
+    query: { notifyCustomer: "false" },
+    body: {},
+    dbModels,
+  };
+  let res = response();
+  await removeOrder(request, res);
+  assert.equal(res.statusCode, 409);
+  assert.equal(order.deleted, undefined);
+
+  order.fulfillmentStatus = "cancelled";
+  order.refundStatus = "pending";
+  res = response();
+  await removeOrder(request, res);
+  assert.equal(res.statusCode, 409);
+  assert.equal(order.deleted, undefined);
+
+  order.refundStatus = "refunded";
+  res = response();
+  await removeOrder(request, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(order.deleted, true);
+  assert.equal(group.saved, true);
+  assert.deepEqual(group.orders, []);
+  assert.deepEqual(deletedItems, ["item-1"]);
+  assert.equal(res.body.notification.attempted, false);
+
+  order.deleted = false;
+  order.fulfillmentStatus = "completed";
+  order.status = "3";
+  order.deliveryStatus = "Delivered";
+  order.refundStatus = undefined;
+  group.orders = [orderId];
+  res = response();
+  await removeOrder(request, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(order.deleted, true);
+  assert.deepEqual(group.orders, []);
+  assert.deepEqual(deletedItems, ["item-1", "item-1"]);
+  assert.equal(res.body.notification.attempted, false);
 });
 
 test("admin and company product lists both retain nearby company-owned products", async () => {
