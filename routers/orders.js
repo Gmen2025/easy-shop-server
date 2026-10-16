@@ -1775,8 +1775,8 @@ router.put("/:id", async (req, res) => {
  * @swagger
  * /api/v1/orders/{id}:
  *   delete:
- *     summary: Delete an order
- *     description: Deletes an order and its related order items. Optionally notify customer by email using query or body flag.
+ *     summary: Delete an order (admin only)
+ *     description: Deletes an order and its related order items. Requires an admin token (403 otherwise). Optionally notify customer by email using query or body flag.
  *     tags: [Orders]
  *     security:
  *       - bearerAuth: []
@@ -1863,7 +1863,7 @@ router.put("/:id", async (req, res) => {
  *                   type: string
  */
 //deleting order
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", requireAdmin, async (req, res) => {
   const { Order, OrderItem, User } = req.dbModels;
 
   try {
