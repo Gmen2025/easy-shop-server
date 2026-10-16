@@ -6,6 +6,8 @@ const SESSION = /^[A-Za-z0-9-]{8,64}$/;
 const STREET_WORDS = {
   st: "street", rd: "road", ave: "avenue", blvd: "boulevard", dr: "drive",
   ln: "lane", pkwy: "parkway", hwy: "highway", ct: "court", pl: "place", ter: "terrace",
+  n: "north", s: "south", e: "east", w: "west",
+  ne: "northeast", nw: "northwest", se: "southeast", sw: "southwest",
 };
 const comparableAddress = (value) => value.toLowerCase().replace(/[.,]/g, " ")
   .trim().split(/\s+/).map((word) => STREET_WORDS[word] || word).join(" ");

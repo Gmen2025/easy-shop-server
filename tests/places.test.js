@@ -71,6 +71,31 @@ test("place details do not repeat a street address used as the display name", as
   }
 });
 
+test("place details deduplicate directional abbreviations including the reported Grace Street address", async (t) => {
+  process.env.GOOGLE_MAPS_API_KEY = "server-key";
+  t.after(() => { delete process.env.GOOGLE_MAPS_API_KEY; });
+  for (const [short, full] of [
+    ["W", "West"], ["E", "East"], ["N", "North"], ["S", "South"],
+    ["NE", "Northeast"], ["NW", "Northwest"], ["SE", "Southeast"], ["SW", "Southwest"],
+  ]) {
+    for (const [name, route] of [
+      [`810 ${short} Grace St`, `${full} Grace Street`],
+      [`810 ${full} Grace Street`, `${short} Grace St`],
+    ]) {
+      const result = await placeDetails(PLACE, "US", "", { fetcher: reply({
+        id: PLACE, displayName: { text: name },
+        location: { latitude: 40, longitude: -75 },
+        addressComponents: [
+          { longText: "810", types: ["street_number"] },
+          { longText: route, types: ["route"] },
+          { shortText: "US", types: ["country"] },
+        ],
+      }) });
+      assert.equal(result.address1, `810 ${route}`, name);
+    }
+  }
+});
+
 test("ZIP is optional only for Ethiopian addresses", () => {
   const base = { label: "Home", address1: "Bole", address2: "", city: "Addis Ababa", phone: "0911000000" };
   assert.equal(addressInput({ ...base, country: "Ethiopia" }).zip, "");
