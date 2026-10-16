@@ -15,6 +15,39 @@ test.afterEach(() => { stripeRouter.getStripe = originalStripeResolver; });
 const id = (value) => value.toString(16).padStart(24, "0");
 const productId = id(10);
 const userId = id(99);
+test("saved delivery address deletion is authenticated, owner-only and validates identifiers", async () => {
+  const router = require("../routers/multi-delivery");
+  const remove = router.stack.find((entry) =>
+    entry.route?.path === "/delivery-addresses/:id" && entry.route.methods.delete).route.stack[0].handle;
+  const addressId = id(70);
+  let saved = { _id: addressId, user: userId };
+  let deletes = 0;
+  const dbModels = {
+    DeliveryAddress: { findOneAndDelete: async (filter) => {
+      deletes++;
+      if (!saved || filter._id !== saved._id || filter.user !== saved.user) return null;
+      const deleted = saved;
+      saved = null;
+      return deleted;
+    } },
+  };
+  const request = async (auth, value = addressId) => {
+    const res = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+    await remove({ auth, params: { id: value }, dbModels }, res);
+    return res;
+  };
+  assert.equal((await request(undefined)).code, 401);
+  assert.equal((await request({ userId }, "invalid")).code, 409);
+  assert.equal(deletes, 0);
+  assert.equal((await request({ userId: id(98), isAdmin: true })).code, 404);
+  assert.ok(saved);
+  const deleted = await request({ userId });
+  assert.equal(deleted.code, 200);
+  assert.deepEqual(deleted.body, { message: "Saved address deleted." });
+  assert.equal(saved, null);
+  assert.equal((await request({ userId })).code, 404);
+});
+
 const address = { id: "home", label: "Home", address1: "123 Street", address2: "", city: "City", zip: "12345",
   country: "USA", phone: "12345678", location: { type: "Point", coordinates: [0, 0] } };
 const packageSize = { weightKg: 1, lengthCm: 10, widthCm: 10, heightCm: 10 };

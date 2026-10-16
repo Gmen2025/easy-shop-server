@@ -107,6 +107,14 @@ router.put("/delivery-addresses/:id", endpoint(async (req, res) => {
   if (!address) throw conflict("Address not found.");
   res.json(address);
 }));
+router.delete("/delivery-addresses/:id", endpoint(async (req, res) => {
+  validId(req.params.id);
+  const address = await req.dbModels.DeliveryAddress.findOneAndDelete({
+    _id: req.params.id, user: req.auth.userId,
+  });
+  if (!address) throw Object.assign(new Error("Saved address not found."), { status: 404 });
+  res.json({ message: "Saved address deleted." });
+}));
 
 router.post("/checkouts/quote", endpoint(async (req, res) => {
   res.status(201).json(serial(await createQuote(req.dbModels, req.auth.userId, req.dbName, req.body)));

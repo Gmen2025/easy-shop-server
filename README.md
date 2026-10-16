@@ -321,10 +321,12 @@ Authenticated APIs (all paths below are relative to `/api/v1/stores/`):
 
 - `GET delivery-config`; Admin-only `PUT delivery-config` and
   `PUT delivery-products/:productId` for capacities/rates and packaged sizes.
-- `GET/POST delivery-addresses`, `PUT delivery-addresses/:id` for private saved
+- `GET/POST delivery-addresses`, `PUT/DELETE delivery-addresses/:id` for private saved
   addresses; `GET delivery-current-address` prefills the latest order/profile.
   Addresses contain `label`, `address1`, `address2`, `city`, `zip`, `country`,
-  `phone`. Order addresses are immutable snapshots, independent of saved edits.
+  `phone`. Deletion is owner-only and returns 404 for missing or other users'
+  addresses. Order addresses are immutable snapshots, independent of saved edits
+  or deletion.
   Postal code is optional for Ethiopia (`Ethiopia`, `Ethio`, `ET`, case-insensitive)
   in both address validation and persisted child orders; other countries still
   require it. This applies when reserving deliveries as well as requesting quotes.
