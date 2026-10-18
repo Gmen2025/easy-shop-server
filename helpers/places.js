@@ -88,4 +88,49 @@ async function placeDetails(placeId, regionCode, session, { fetcher = fetch } = 
   };
 }
 
-module.exports = { autocompletePlaces, placeDetails };
+async function currentLocationAddress(point, regionCode, { fetcher = fetch } = {}) {
+  const latitude = point?.latitude, longitude = point?.longitude;
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude) || Math.abs(latitude) > 90 ||
+      Math.abs(longitude) > 180 || (latitude === 0 && longitude === 0)) {
+    throw conflict("A valid current GPS location is required. Enter your pickup address manually or retry.");
+  }
+  const key = process.env.GOOGLE_MAPS_API_KEY;
+  if (!key) throw conflict("Current location lookup requires the server Google Geocoding API key.");
+  const url = new URL("https://maps.googleapis.com/maps/api/geocode/json");
+  url.searchParams.set("latlng", `${latitude},${longitude}`);
+  url.searchParams.set("language", "en");
+  url.searchParams.set("key", key);
+  let response;
+  try { response = await fetcher(url, { signal: AbortSignal.timeout(8000) }); }
+  catch (error) {
+    console.error("Pickup location lookup failed:", String(error.message).split(key).join("[redacted]"));
+    throw conflict("Current location lookup is temporarily unavailable. Enter your pickup address manually or retry.");
+  }
+  const body = await response.json();
+  if (["REQUEST_DENIED", "OVER_QUERY_LIMIT"].includes(body.status)) {
+    throw conflict("Current location lookup is unavailable. Admin must check Google Geocoding permissions, quota and billing.");
+  }
+  const result = body.results?.[0];
+  if (!response.ok || body.status !== "OK" || !result) {
+    throw conflict("No address was found at your current location. Enter your pickup address manually.");
+  }
+  const part = (type, form = "long_name") =>
+    result.address_components?.find((component) => component.types?.includes(type))?.[form] || "";
+  const country = part("country", "short_name").toUpperCase();
+  if (country !== regionCode.toUpperCase()) {
+    throw conflict("Your current location is outside the selected shopping region. Change region or enter a pickup in that region.");
+  }
+  return {
+    address1: ([part("street_number"), part("route")].filter(Boolean).join(" ") ||
+      String(result.formatted_address || "").split(",")[0]).slice(0, 300),
+    city: (part("locality") || part("postal_town") || part("sublocality") ||
+      part("administrative_area_level_2") || part("administrative_area_level_1")).slice(0, 300),
+    zip: part("postal_code").slice(0, 300),
+    country: COUNTRY_NAMES[country],
+    formattedAddress: String(result.formatted_address || "").slice(0, 300),
+    currentLocation: { latitude, longitude },
+    location: { type: "Point", coordinates: [longitude, latitude] },
+  };
+}
+
+module.exports = { autocompletePlaces, placeDetails, currentLocationAddress };

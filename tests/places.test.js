@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { autocompletePlaces, placeDetails } = require("../helpers/places");
+const { autocompletePlaces, placeDetails, currentLocationAddress } = require("../helpers/places");
 const { addressInput } = require("../helpers/multi-delivery");
 
 const reply = (body, status = 200) => async (url, init) => {
@@ -101,4 +101,34 @@ test("ZIP is optional only for Ethiopian addresses", () => {
   assert.equal(addressInput({ ...base, country: "Ethiopia" }).zip, "");
   assert.equal(addressInput({ ...base, zip: "", country: "ET" }).zip, "");
   assert.throws(() => addressInput({ ...base, zip: "", country: "USA" }), /zip/);
+});
+
+test("current pickup reverse lookup verifies the region and keeps the exact GPS point", async (t) => {
+  process.env.GOOGLE_MAPS_API_KEY = "server-key";
+  t.after(() => { delete process.env.GOOGLE_MAPS_API_KEY; });
+  const point = { latitude: 8.996, longitude: 38.787 };
+  const body = { status: "OK", results: [{
+    formatted_address: "Bole Road, Addis Ababa, Ethiopia",
+    address_components: [
+      { long_name: "Bole Road", types: ["route"] },
+      { long_name: "Addis Ababa", types: ["locality"] },
+      { short_name: "ET", types: ["country"] },
+    ],
+    geometry: { location: { lat: 9, lng: 38.8 } },
+  }] };
+  reply.calls = [];
+  const address = await currentLocationAddress(point, "ET", { fetcher: reply(body) });
+  assert.equal(new URL(reply.calls[0].url).searchParams.get("latlng"), "8.996,38.787");
+  assert.equal(address.address1, "Bole Road");
+  assert.equal(address.country, "Ethiopia");
+  assert.equal(address.zip, "");
+  assert.deepEqual(address.location, { type: "Point", coordinates: [38.787, 8.996] });
+  assert.deepEqual(address.currentLocation, point);
+  await assert.rejects(currentLocationAddress(point, "US", { fetcher: reply(body) }), /outside the selected shopping region/);
+  for (const invalid of [{ latitude: 91, longitude: 38 }, { latitude: 0, longitude: 0 },
+    { latitude: "9", longitude: 38 }, {}]) {
+    await assert.rejects(currentLocationAddress(invalid, "ET"), /valid current GPS/);
+  }
+  await assert.rejects(currentLocationAddress(point, "ET", { fetcher: reply({ status: "ZERO_RESULTS" }) }), /No address/);
+  await assert.rejects(currentLocationAddress(point, "ET", { fetcher: reply({ status: "REQUEST_DENIED" }) }), /permissions/);
 });

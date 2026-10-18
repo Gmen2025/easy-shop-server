@@ -5,7 +5,7 @@ const { CONFIG_KEY, OFFER_MS, validateStops, fareFor, roadLeg, routeMetrics, cac
 const { cents, vehicleName } = require("../helpers/vehicle-delivery");
 const { sendPushToUser } = require("../helpers/push-notify");
 const { computeDrivingRoute } = require("../helpers/google-route");
-const { placeDetails } = require("../helpers/places");
+const { placeDetails, currentLocationAddress } = require("../helpers/places");
 const { RIDE_PROFILE_PHOTO_MAX_AGE_MS, hasCurrentRideProfilePhoto } = require("../helpers/ride-driver-profile");
 
 const MAX_ROUTE_POINTS = 1500;
@@ -46,13 +46,21 @@ const modeEnabled = (driver, mode, now = new Date()) => driver.isCompanyOwned &&
   Number.isSafeInteger(driver.passengerSeats) && driver.passengerSeats > 0 &&
   hasCurrentRideProfilePhoto(driver, now);
 
-async function quoteRide(models, user, databaseName, body, { geocode = geocodeAddress, lookup = roadLeg, place = placeDetails } = {}) {
+async function quoteRide(models, user, databaseName, body, {
+  geocode = geocodeAddress, lookup = roadLeg, place = placeDetails, currentLocation = currentLocationAddress,
+} = {}) {
   const config = (await models.SiteSetting.findOne({ key: CONFIG_KEY }).lean())?.rideConfig;
   if (!config?.enabled) throw conflict("Ride service is not enabled in this region.");
   const validated = validateStops(body.mode, body.stops);
   const currency = /usa/i.test(databaseName) ? "usd" : "etb";
   const region = currency === "usd" ? "US" : "ET";
   const stops = await Promise.all(validated.stops.map(async (stop) => {
+    if (stop.address?.currentLocation) {
+      if (stop.type !== "pickup") throw conflict("Current GPS location can only be used for a pickup.");
+      const verified = await currentLocation(stop.address.currentLocation, region);
+      const address = addressInput({ ...stop.address, ...verified });
+      return { ...stop, address: { ...address, location: verified.location } };
+    }
     const address = addressInput(stop.address);
     if (countryCode(address.country) !== region) throw conflict("Ride addresses must match the selected shopping region.");
     const placeId = stop.address?.placeId;

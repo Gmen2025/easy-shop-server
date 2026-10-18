@@ -226,6 +226,10 @@ function limitPlaceSearch(req) {
   placeSearches.set(key, window);
 }
 const placeRegion = (req) => (/usa/i.test(req.dbName) ? "US" : "ET");
+router.post("/places/current-location", endpoint(async (req, res) => {
+  limitPlaceSearch(req);
+  res.json(await places.currentLocationAddress(req.body, placeRegion(req)));
+}));
 router.get("/places/autocomplete", endpoint(async (req, res) => {
   limitPlaceSearch(req);
   res.json(await places.autocompletePlaces(req.query.input, placeRegion(req), req.query.session));

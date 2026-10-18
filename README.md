@@ -472,6 +472,16 @@ database header:
   rides allow 2-12 arranged stops with balanced passenger counts and one payer.
   A shared booking has one pickup/dropoff for its own party; separate unrelated
   bookings are pooled by the server. Quotes last ten minutes.
+- `POST places/current-location`: takes numeric `{latitude, longitude}` from
+  device GPS, reverse geocodes with `GOOGLE_MAPS_API_KEY`, and rejects locations
+  outside the selected region. Returns address fields, `currentLocation`, and
+  the exact GPS point rather than moving pickup to a nearby street centroid.
+  A pickup address in `POST quote` can include this `currentLocation` object;
+  the server reverse geocodes it again instead of trusting client address/pin
+  fields. Manual address edits must remove `currentLocation`. Other stops use
+  the existing place-selection/manual-geocoding flow. Every stop's required
+  `address.phone` is persisted with the quote and retained on request; this
+  contact number does not update the user's account profile.
 - `POST :id/request`: idempotently submits that owner's quote. Approved,
   unsuspended, online company drivers with enabled mode, adequate seats, fresh
   GPS (120 seconds), no delivery load and a suitable verified road route are

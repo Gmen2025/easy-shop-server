@@ -239,6 +239,32 @@ test("request is owner-scoped and idempotent; stale quotes cannot be requested",
   await assert.rejects(service.requestRide(f.models, expired._id, userId), /expired/);
 });
 
+test("GPS pickup is server-resolved and ride request persists editable contact phone numbers", async () => {
+  const f = fixture();
+  const pickup = { ...address(0), phone: "+13125550123",
+    currentLocation: { latitude: 41.95, longitude: -87.65 } };
+  const body = { mode: "regular", stops: [
+    { type: "pickup", passengers: 1, address: pickup }, stop("dropoff", 2),
+  ] };
+  const currentLocation = async (point, region) => {
+    assert.deepEqual(point, pickup.currentLocation);
+    assert.equal(region, "US");
+    return { address1: "Verified pickup", city: "Chicago", zip: "60613", country: "USA", location: pointLocation };
+  };
+  const pointLocation = point(1);
+  const quote = await service.quoteRide(f.models, userId, "E_ShopUSA", body, {
+    lookup, currentLocation, geocode: async () => point(2),
+  });
+  assert.equal(quote.stops[0].address.address1, "Verified pickup");
+  assert.deepEqual(quote.stops[0].address.location, pointLocation);
+  assert.equal(quote.stops[0].address.phone, "+13125550123");
+  await service.requestRide(f.models, quote._id, userId);
+  assert.equal(f.tables.Ride[0].stops[0].address.phone, "+13125550123");
+  await assert.rejects(service.quoteRide(f.models, userId, "E_ShopUSA", {
+    ...body, stops: [{ ...body.stops[0], address: { ...pickup, phone: "" } }, body.stops[1]],
+  }, { lookup, currentLocation, geocode: async () => point(2) }), /phone/);
+});
+
 test("offers last exactly three minutes; reject/timeout reroutes without assigning or charging", async () => {
   const f = fixture(), ride = await f.booking(), now = new Date();
   await service.requestRide(f.models, ride._id, userId, now);
