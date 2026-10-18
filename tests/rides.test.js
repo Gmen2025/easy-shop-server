@@ -18,6 +18,11 @@ const address = (x) => ({ label: `Stop ${x}`, address1: `Street ${x}`, address2:
 const stop = (type, x, passengers = 1, key = type === "pickup" ? "0" : "1") => ({ type, passengers, key, address: address(x) });
 const config = { enabled: true, baseFare: 2, distanceRate: 1, minuteRate: 0.5, sharedDiscountPercent: 25,
   maxPickupMinutes: 20, maxDetourMinutes: 5, driverRadiusKm: 5 };
+const classConfig = { ...config, vehicleRates: {
+  economy: { enabled: true, baseFare: 2, distanceRate: 1, minuteRate: 0.5 },
+  comfort: { enabled: true, baseFare: 4, distanceRate: 2, minuteRate: 1 },
+  van: { enabled: true, baseFare: 6, distanceRate: 3, minuteRate: 1.5 },
+} };
 const lookup = async (start, end) => {
   const distanceKm = Math.abs(start.coordinates[0] - end.coordinates[0]) * 1000;
   return { distanceKm, minutes: distanceKm * 2 };
@@ -143,6 +148,12 @@ test("ride schemas retain one payer and separate vehicle route; existing drivers
   assert.equal(configured.toObject().carClass, "comfort");
   assert.equal(new Driver({}).pendingVehicleType, "");
   assert.ok(new Driver({ carClass: "luxury" }).validateSync().errors.carClass);
+  const classQuote = new Ride({ user: userId, mode: "regular", vehicleOption: "comfort", seats: 1,
+    stops: [], currency: "usd", tariff: config, baseline: {}, estimate: 10 });
+  assert.equal(classQuote.validateSync(), undefined);
+  assert.equal(classQuote.toObject().vehicleOption, "comfort");
+  classQuote.vehicleOption = "truck";
+  assert.ok(classQuote.validateSync().errors.vehicleOption);
 });
 
 test("ride driver profile photos expire after 90 days and only HTTPS Cloudinary image URLs are accepted", () => {
@@ -189,6 +200,144 @@ test("fares use USA miles / Ethiopia km and shared discount, never pooled distan
   assert.equal(routing.fareFor("regular", { distanceKm: 1.609344 }, 10, config, "usd"), 8);
   assert.equal(routing.fareFor("shared", { distanceKm: 1.609344 }, 10, config, "usd"), 6);
   assert.equal(routing.fareFor("regular", { distanceKm: 2 }, 10, config, "etb"), 9);
+});
+
+test("Admin validates independent vehicle prices without enabling unpriced or unsupported options", () => {
+  const validated = routing.validateConfig(classConfig);
+  assert.deepEqual(validated.vehicleRates, classConfig.vehicleRates);
+  assert.equal(validated.baseFare, undefined, "class pricing must not use legacy global rates");
+  for (const patch of [{ baseFare: "" }, { distanceRate: -1 }, { minuteRate: 0.001 }, { minuteRate: Infinity },
+    { baseFare: 0, distanceRate: 0, minuteRate: 0 }]) {
+    assert.throws(() => routing.validateConfig({ ...classConfig,
+      vehicleRates: { ...classConfig.vehicleRates, comfort: { ...classConfig.vehicleRates.comfort, ...patch } },
+    }));
+  }
+  assert.throws(() => routing.validateConfig({ ...classConfig, vehicleRates: { economy: classConfig.vehicleRates.economy } }), /availability/);
+  const disabled = Object.fromEntries(routing.RIDE_OPTIONS.map((option) => [option, { enabled: false }]));
+  assert.throws(() => routing.validateConfig({ ...classConfig, vehicleRates: disabled }), /at least one/);
+  assert.deepEqual(routing.validateConfig({ ...classConfig, enabled: false, vehicleRates: disabled }).vehicleRates, disabled);
+});
+
+test("comparison quotes price every option using one verified route and preserve selected tariffs", async () => {
+  for (const [database, country, expected] of [
+    ["E_ShopUSA", "USA", [8, 16, 24]], ["E_ShopETH", "Ethiopia", [8.61, 17.22, 25.83]],
+  ]) {
+    const f = fixture();
+    f.tables.SiteSetting[0].rideConfig = structuredClone(classConfig);
+    let geocodes = 0, routes = 0;
+    const body = { mode: "regular", estimate: 0.01, tariff: { baseFare: 0.01 }, stops: [
+      { ...stop("pickup", 0), address: { ...address(0), country } },
+      { ...stop("dropoff", 1), address: { ...address(1), country } },
+    ] };
+    const options = { compare: true, geocode: async () => point(geocodes++),
+      lookup: async () => { routes++; return { distanceKm: 1.609344, minutes: 10 }; } };
+    const quotes = await service.quoteRide(f.models, userId, database, body, options);
+    assert.equal(geocodes, 2);
+    assert.equal(routes, 1);
+    assert.deepEqual(quotes.map((ride) => ride.vehicleOption), ["economy", "comfort", "van"]);
+    assert.deepEqual(quotes.map((ride) => ride.estimate), expected);
+    assert.equal(new Set(quotes.map((ride) => String(ride.expiresAt))).size, 1);
+    assert.deepEqual(quotes.map((ride) => ride.tariff.minuteRate), [0.5, 1, 1.5]);
+    assert.ok(quotes.every((ride) => !ride.tariff.vehicleRates));
+    f.tables.SiteSetting[0].rideConfig.vehicleRates.comfort.baseFare = 100;
+    await service.requestRide(f.models, quotes[1]._id, userId);
+    assert.equal(f.tables.Ride[1].vehicleOption, "comfort");
+    assert.equal(f.tables.Ride[1].tariff.baseFare, 4, "already-quoted fares are not silently repriced");
+    assert.equal(f.tables.Ride[0].status, "quote", "comparison does not request the other alternatives");
+    f.tables.SiteSetting[0].rideConfig.vehicleRates.comfort.baseFare = 4;
+    const shared = await service.quoteRide(f.models, userId, database, { ...body, mode: "shared" }, options);
+    assert.deepEqual(shared.map((ride) => ride.estimate), database === "E_ShopUSA" ? [6, 12, 18] : [6.46, 12.91, 19.37]);
+  }
+});
+
+test("vehicle comparison rejects missing prices and disabled, invalid or omitted selections", async () => {
+  const f = fixture(), body = { mode: "regular", stops: [stop("pickup", 0), stop("dropoff", 1)] };
+  let pins = 0;
+  const options = { geocode: async () => point(pins++), lookup };
+  await assert.rejects(service.quoteRide(f.models, userId, "E_ShopUSA", body, { ...options, compare: true }), /Admin must configure/);
+  f.tables.SiteSetting[0].rideConfig = structuredClone(classConfig);
+  for (const vehicleOption of [undefined, "motorcycle", "truck", "car", "luxury"]) {
+    await assert.rejects(service.quoteRide(f.models, userId, "E_ShopUSA", { ...body, vehicleOption }, options), /Choose Economy/);
+  }
+  const quote = await service.quoteRide(f.models, userId, "E_ShopUSA", { ...body, vehicleOption: "comfort" }, options);
+  f.tables.SiteSetting[0].rideConfig.vehicleRates.comfort.enabled = false;
+  await assert.rejects(service.requestRide(f.models, quote._id, userId), /no longer available/);
+  await assert.rejects(service.quoteRide(f.models, userId, "E_ShopUSA", { ...body, vehicleOption: "comfort" }, options), /unavailable/);
+  const quotes = await service.quoteRide(f.models, userId, "E_ShopUSA", body, { ...options, compare: true });
+  assert.deepEqual(quotes.map((ride) => ride.vehicleOption), ["economy", "van"]);
+  f.fail("Ride");
+  await assert.rejects(service.quoteRide(f.models, userId, "E_ShopUSA", body, { ...options, compare: true }), /persistence/);
+  assert.equal(f.tables.Ride.length, 3, "failed comparisons do not leave partial quotes");
+});
+
+test("dispatch and claim enforce the selected car class or van, excluding unclassified cars and delivery vehicles", async () => {
+  for (const vehicleOption of routing.RIDE_OPTIONS) {
+    const f = fixture(), ride = await f.booking({ vehicleOption });
+    f.tables.SiteSetting[0].rideConfig = structuredClone(classConfig);
+    f.tables.Driver[0].vehicleType = vehicleOption === "van" ? "van" : "car";
+    f.tables.Driver[0].carClass = vehicleOption === "van" ? "" : vehicleOption;
+    for (const patch of [{ vehicleType: "motorcycle" }, { vehicleType: "truck" },
+      { vehicleType: "car", carClass: "" }, { vehicleType: "car", carClass: vehicleOption === "economy" ? "comfort" : "economy" },
+      ...(vehicleOption === "van" ? [] : [{ vehicleType: "van" }])]) {
+      assert.equal(await service.driverPlan(f.models, { ...f.tables.Driver[0], ...patch }, ride, { lookup }), null);
+    }
+    await service.requestRide(f.models, ride._id, userId);
+    await service.dispatchRide(f.models, ride._id, { lookup });
+    assert.equal(f.tables.Ride[0].status, "offered");
+    const accepted = await service.acceptRide(f.models, ride._id, driverId, { lookup });
+    assert.equal(accepted.vehicleOption, vehicleOption);
+    assert.equal(accepted.status, "assigned");
+  }
+});
+
+test("class matching is rechecked inside dispatch and claim transactions", async () => {
+  for (const action of ["dispatch", "claim"]) {
+    const f = fixture(), ride = await f.booking({ vehicleOption: "comfort" });
+    f.tables.SiteSetting[0].rideConfig = structuredClone(classConfig);
+    f.tables.Driver[0].carClass = "comfort";
+    await service.requestRide(f.models, ride._id, userId);
+    if (action === "claim") await service.dispatchRide(f.models, ride._id, { lookup });
+    let changed = false;
+    const changeDuringRoute = async (start, end) => {
+      if (!changed) { changed = true; f.tables.Driver[0].carClass = "economy"; }
+      return lookup(start, end);
+    };
+    if (action === "dispatch") {
+      await service.dispatchRide(f.models, ride._id, { lookup: changeDuringRoute });
+      assert.equal(f.tables.Ride[0].status, "waiting");
+      assert.equal(f.tables.Driver[0].pendingRideOffer, undefined);
+    } else {
+      await assert.rejects(service.acceptRide(f.models, ride._id, driverId, { lookup: changeDuringRoute }), /assignment changed/);
+      assert.equal(f.tables.Ride[0].status, "offered");
+      assert.equal(f.tables.RideTrip.length, 0);
+    }
+  }
+});
+
+test("selected class rates persist through Regular and Shared completion despite later Admin price changes", async () => {
+  for (const mode of ["regular", "shared"]) {
+    const f = fixture();
+    f.tables.SiteSetting[0].rideConfig = structuredClone(classConfig);
+    f.tables.Driver[0].carClass = "comfort";
+    let pin = 0;
+    const quote = await service.quoteRide(f.models, userId, "E_ShopUSA", {
+      mode, vehicleOption: "comfort", stops: [stop("pickup", 0), stop("dropoff", 1)],
+      estimate: 0.01, tariff: { baseFare: 0.01 },
+    }, { lookup, geocode: async () => point(pin++) });
+    f.tables.SiteSetting[0].rideConfig.vehicleRates.comfort = { enabled: true, baseFare: 100, distanceRate: 100, minuteRate: 100 };
+    await service.requestRide(f.models, quote._id, userId);
+    await service.dispatchRide(f.models, quote._id, { lookup });
+    await service.acceptRide(f.models, quote._id, driverId, { lookup });
+    const started = new Date();
+    await service.completeStop(f.models, driverId, `${quote._id}:0`, { lookup, now: started });
+    const completedAt = new Date(started.getTime() + 10 * 60000);
+    f.tables.Driver[0].rideLocationUpdatedAt = completedAt;
+    const completed = await service.completeStop(f.models, driverId, `${quote._id}:1`, { lookup, now: completedAt });
+    assert.equal(completed.vehicleOption, "comfort");
+    assert.equal(completed.finalFare, mode === "regular" ? 15.24 : 5.43);
+    assert.equal(completed.tariff.baseFare, 4);
+    assert.equal(completed.paymentStatus, "pending");
+  }
 });
 
 test("route insertion honors passenger capacity, pickup deadline, intake and cumulative detour promises", async () => {
@@ -565,6 +714,34 @@ test("ride APIs protect passenger privacy, Admin settings and driver-only action
   assert.equal(owned.body.paymentIntentId, undefined);
   assert.equal(owned.body.offerDriver, undefined);
   assert.equal((await invoke(f, "/config", "get", null)).code, 401);
+});
+
+test("comparison endpoint returns owner-bound quotes and protects configuration writes", async () => {
+  const f = fixture();
+  assert.equal((await invoke(f, "/config", "put", { userId }, {}, classConfig)).code, 403);
+  const saved = await invoke(f, "/config", "put", { userId, isAdmin: true }, {}, classConfig);
+  assert.equal(saved.code, 200);
+  assert.deepEqual(saved.body.vehicleRates, classConfig.vehicleRates);
+  assert.equal((await invoke(f, "/quote-options", "post", null)).code, 401);
+  const original = service.quoteRide;
+  service.quoteRide = async (models, owner, database, body, options) => {
+    assert.equal(models, f.models);
+    assert.equal(owner, userId);
+    assert.equal(database, "E_ShopUSA");
+    assert.equal(body.mode, "regular");
+    assert.equal(options.compare, true);
+    return [new models.Ride({ user: owner, vehicleOption: "comfort", estimate: 16,
+      paymentIntentId: "private", attemptedDrivers: [driverId], offerDriver: driverId })];
+  };
+  try {
+    const response = await invoke(f, "/quote-options", "post", { userId }, {}, { mode: "regular" });
+    assert.equal(response.code, 201);
+    assert.equal(response.body.quotes.length, 1);
+    assert.equal(response.body.quotes[0].vehicleOption, "comfort");
+    assert.equal(response.body.quotes[0].paymentIntentId, undefined);
+    assert.equal(response.body.quotes[0].offerDriver, undefined);
+    assert.equal(response.body.quotes[0].user, userId);
+  } finally { service.quoteRide = original; }
 });
 
 test("ride profile photo endpoint refreshes the server timestamp and ride modes require a current photo", async () => {

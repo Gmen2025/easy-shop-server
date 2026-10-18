@@ -454,7 +454,7 @@ this update does not run migration or change live settings automatically.
 Ride service is a separate, initially disabled regional feature. Deploy the
 matching mobile screens, configure **Admin > Rides**, and verify Google Geocoding
 and Distance Matrix driving/traffic permissions before enabling requests. Admin
-sets the base fare, rate per mile in USA / km in Ethiopia, minute rate, shared
+sets separate Economy/Comfort/Van base fares, rates per mile in USA / km in Ethiopia, minute rates, shared
 discount, maximum pickup wait, maximum additional shared travel and search
 radius. Configure each company car/van's usable passenger seats (excluding the
 driver, 1-16). Existing drivers remain delivery-only until they opt into regular
@@ -466,12 +466,29 @@ database header:
 - `GET/PUT config`: authenticated policy read / Admin-only write. No default
   pricing is silently activated. Existing requests retain their tariff snapshot.
   Disabling requests does not strand existing riders or prevent payment.
+- Per-option pricing uses `vehicleRates: { economy, comfort, van }`. Each entry
+  has `enabled`; enabled entries require non-negative `baseFare`, `distanceRate`
+  and `minuteRate` (at most two decimals, at least one nonzero). At least one
+  option must be priced/enabled when requests are enabled. Shared discount and
+  route limits remain common. Disabled entries may contain only `enabled: false`.
+  No class rates are auto-derived from old global rates.
+- `POST quote-options`: takes `mode` and ordered `stops`, verifies/geocodes once
+  and computes one road baseline, then atomically persists and returns
+  `{quotes: [...]}` for enabled Economy, Comfort and Van. Each quote has its own
+  ID, `vehicleOption`, estimate and snapshotted class tariff, with a common ten-minute
+  expiry. Customers explicitly select one quote and submit its ID to `:id/request`;
+  the other alternatives remain unrequested. A quoted option disabled by Admin
+  before submission cannot be requested. Prices do not imply driver availability.
 - `POST quote`: `mode` is `regular` or `shared`; ordered `stops` contain `type`
   (`pickup`/`dropoff`), whole `passengers` and the same complete address fields
   used by delivery checkout. Server geocoding verifies country/pins. Regular
   rides allow 2-12 arranged stops with balanced passenger counts and one payer.
   A shared booking has one pickup/dropoff for its own party; separate unrelated
   bookings are pooled by the server. Quotes last ten minutes.
+  With per-option pricing configured, `vehicleOption` (`economy`, `comfort`, `van`)
+  is mandatory and its enabled rate is authoritative; client fares are ignored.
+  The legacy global-rate path remains only for regions not yet migrated. Existing
+  unclassified quotes/bookings retain their prior tariff and matching behavior.
 - `POST places/current-location`: takes numeric `{latitude, longitude}` from
   device GPS, reverse geocodes with `GOOGLE_MAPS_API_KEY`, and rejects locations
   outside the selected region. Returns address fields, `currentLocation`, and
@@ -519,8 +536,11 @@ database header:
   seats and are reset to delivery-only modes. Changing vehicle type through older
   driver Admin forms clears the car class; use Ride settings to classify it again.
   `GET admin/drivers` and `GET me/driver` include pending type and car class.
-  Classes are metadata only, with no customer class selection, matching or fare
-  changes. Existing cars without a class remain eligible under existing rules.
+  Class-selected bookings match the exact car class, or a van for `van`, with
+  transactional rechecks at dispatch and acceptance. Unclassified cars do not
+  receive class-selected bookings. Motorcycle/truck are not passenger options.
+  Selected option and tariff persist through pooling, rerouting, completion and
+  payment; Regular final fares use actual elapsed minutes, Shared solo route/time.
 - `PUT me/modes`: explicit delivery/regular/shared booleans, at least one
   enabled. `POST me/shared-intake` with `{ open: false }` immediately removes and
   requeues accepted-but-not-picked-up shared bookings and any shared offer.

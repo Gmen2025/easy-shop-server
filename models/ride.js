@@ -2,6 +2,7 @@ const mongoose = require("mongoose");
 const rideSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
   mode: { type: String, enum: ["regular", "shared"], required: true },
+  vehicleOption: { type: String, enum: ["economy", "comfort", "van"] },
   status: { type: String, enum: ["quote", "waiting", "offered", "assigned", "onboard", "completed", "cancelled", "terminated"], default: "quote" },
   termination: mongoose.Schema.Types.Mixed,
   stops: { type: [mongoose.Schema.Types.Mixed], required: true },

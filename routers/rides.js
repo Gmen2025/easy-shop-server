@@ -54,6 +54,10 @@ async function dispatch(req, rideId) {
 router.get("/config", endpoint(async (req, res) => {
   res.json((await req.dbModels.SiteSetting.findOne({ key: CONFIG_KEY }).lean())?.rideConfig || { enabled: false });
 }));
+router.post("/quote-options", endpoint(async (req, res) => {
+  const quotes = await service.quoteRide(req.dbModels, req.auth.userId, req.dbName, req.body, { compare: true });
+  res.status(201).json({ quotes: quotes.map(publicRide) });
+}));
 router.put("/config", endpoint(async (req, res) => {
   admin(req);
   const config = validateConfig(req.body);
@@ -123,9 +127,9 @@ router.get("/me/driver", endpoint(async (req, res) => {
     _id: current.pendingRideOffer, status: "offered", offerDriver: current._id, offerDeadline: { $gt: new Date() },
   }).lean();
   const riders = trip ? await req.dbModels.Ride.find({ trip: trip._id, status: { $in: ["assigned", "onboard"] } })
-    .select("stops seats status user mode estimate").lean() : [];
+    .select("stops seats status user mode vehicleOption estimate").lean() : [];
   const payments = await req.dbModels.Ride.find({ driver: current._id, status: { $in: ["completed", "terminated"] } })
-    .select("stops currency finalFare estimate status termination paymentStatus paymentMethod bankReference completedAt").sort({ updatedAt: -1 }).limit(20).lean();
+    .select("stops currency vehicleOption finalFare estimate status termination paymentStatus paymentMethod bankReference completedAt").sort({ updatedAt: -1 }).limit(20).lean();
   res.json({ driver: { _id: current._id, name: current.name, vehicleType: vehicleName(current),
     pendingVehicleType: current.pendingVehicleType || "", carClass: current.carClass || "",
     location: current.location || null,

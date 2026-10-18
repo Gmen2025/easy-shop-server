@@ -4,21 +4,47 @@ const { cents } = require("./vehicle-delivery");
 
 const CONFIG_KEY = "ride-service-config";
 const OFFER_MS = 3 * 60 * 1000;
+const RIDE_OPTIONS = ["economy", "comfort", "van"];
+
+function validateRates(source, label) {
+  const rates = {};
+  for (const field of ["baseFare", "distanceRate", "minuteRate"]) {
+    const value = Number(source?.[field]);
+    if (source?.[field] == null || source[field] === "" || !["number", "string"].includes(typeof source[field]) ||
+        !Number.isFinite(value) || value < 0 || value > 100000 ||
+        Math.abs(value * 100 - cents(value)) > 0.000001) {
+      throw conflict(`Enter a valid ${label} ${field} with at most two decimals.`);
+    }
+    rates[field] = value;
+  }
+  if (!Object.values(rates).some(Boolean)) throw conflict(`Configure a nonzero fare for ${label}.`);
+  return rates;
+}
 
 function validateConfig(body) {
   if (!body || typeof body.enabled !== "boolean") throw conflict("Choose whether ride service is enabled.");
   const result = { enabled: body.enabled };
-  for (const field of ["baseFare", "distanceRate", "minuteRate", "sharedDiscountPercent", "maxPickupMinutes", "maxDetourMinutes", "driverRadiusKm"]) {
+  for (const field of ["sharedDiscountPercent", "maxPickupMinutes", "maxDetourMinutes", "driverRadiusKm"]) {
     const value = Number(body[field]);
     if (body[field] == null || body[field] === "" || !Number.isFinite(value) || value < 0 ||
         value > (field === "sharedDiscountPercent" ? 90 : field === "driverRadiusKm" ? 100 : field.startsWith("max") ? 120 : 100000) ||
-        (["maxPickupMinutes", "driverRadiusKm"].includes(field) && value <= 0) ||
-        (["baseFare", "distanceRate", "minuteRate"].includes(field) && Math.abs(value * 100 - cents(value)) > 0.000001)) {
+        (["maxPickupMinutes", "driverRadiusKm"].includes(field) && value <= 0)) {
       throw conflict(`Enter a valid ${field}. Fare rates need at most two decimals; pickup wait and radius must be positive.`);
     }
     result[field] = value;
   }
-  if (!result.baseFare && !result.distanceRate && !result.minuteRate) throw conflict("Configure a nonzero fare.");
+  if (body.vehicleRates !== undefined) {
+    result.vehicleRates = {};
+    for (const option of RIDE_OPTIONS) {
+      const source = body.vehicleRates?.[option];
+      if (typeof source?.enabled !== "boolean") throw conflict(`Choose ${option} availability and configure its rates.`);
+      result.vehicleRates[option] = source.enabled
+        ? { enabled: true, ...validateRates(source, option) } : { enabled: false };
+    }
+    if (body.enabled && !RIDE_OPTIONS.some((option) => result.vehicleRates[option].enabled)) {
+      throw conflict("Enable and price at least one passenger vehicle option.");
+    }
+  } else Object.assign(result, validateRates(body, "ride"));
   return result;
 }
 
@@ -169,4 +195,4 @@ async function planInsertion({ trip, ride, location, bookings = [], capacity, no
   return best;
 }
 
-module.exports = { CONFIG_KEY, OFFER_MS, validateConfig, validateStops, fareFor, roadLeg, cachedLeg, routeMetrics, capacityFits, planInsertion, routeFitsBookings };
+module.exports = { CONFIG_KEY, OFFER_MS, RIDE_OPTIONS, validateConfig, validateRates, validateStops, fareFor, roadLeg, cachedLeg, routeMetrics, capacityFits, planInsertion, routeFitsBookings };

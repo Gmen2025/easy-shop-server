@@ -1,7 +1,7 @@
 const { conflict } = require("../helpers/store-inventory");
 const { getCoordinates, distanceMeters } = require("../helpers/fulfillment-routing");
 const { addressInput, geocodeAddress, countryCode, stripeClient } = require("../helpers/multi-delivery");
-const { CONFIG_KEY, OFFER_MS, validateStops, fareFor, roadLeg, routeMetrics, cachedLeg, planInsertion, routeFitsBookings } = require("../helpers/ride-routing");
+const { CONFIG_KEY, OFFER_MS, RIDE_OPTIONS, validateRates, validateStops, fareFor, roadLeg, routeMetrics, cachedLeg, planInsertion, routeFitsBookings } = require("../helpers/ride-routing");
 const { cents, vehicleName } = require("../helpers/vehicle-delivery");
 const { sendPushToUser } = require("../helpers/push-notify");
 const { computeDrivingRoute } = require("../helpers/google-route");
@@ -62,12 +62,28 @@ const modeEnabled = (driver, mode, now = new Date()) => driver.isCompanyOwned &&
   driver.serviceModes?.[mode] === true && ["car", "van"].includes(vehicleName(driver)) &&
   Number.isSafeInteger(driver.passengerSeats) && driver.passengerSeats > 0 &&
   hasCurrentRideProfilePhoto(driver, now);
+const matchesRideOption = (driver, ride) => !ride.vehicleOption ||
+  (ride.vehicleOption === "van" ? vehicleName(driver) === "van" :
+    ["economy", "comfort"].includes(ride.vehicleOption) && vehicleName(driver) === "car" && driver.carClass === ride.vehicleOption);
 
 async function quoteRide(models, user, databaseName, body, {
-  geocode = geocodeAddress, lookup = roadLeg, place = placeDetails, currentLocation = currentLocationAddress,
+  geocode = geocodeAddress, lookup = roadLeg, place = placeDetails, currentLocation = currentLocationAddress, compare = false,
 } = {}) {
   const config = (await models.SiteSetting.findOne({ key: CONFIG_KEY }).lean())?.rideConfig;
   if (!config?.enabled) throw conflict("Ride service is not enabled in this region.");
+  let options;
+  if (compare) {
+    if (!config.vehicleRates) throw conflict("Admin must configure Economy, Comfort and Van pricing before comparing rides.");
+    options = RIDE_OPTIONS.filter((option) => config.vehicleRates[option]?.enabled === true);
+    if (!options.length) throw conflict("No passenger vehicle options are enabled in this region.");
+  } else if (body.vehicleOption !== undefined || config.vehicleRates) {
+    if (!RIDE_OPTIONS.includes(body.vehicleOption)) throw conflict("Choose Economy, Comfort or Van after calculating prices.");
+    if (!config.vehicleRates?.[body.vehicleOption]?.enabled) throw conflict("This vehicle option is unavailable. Calculate new prices.");
+    options = [body.vehicleOption];
+  } else options = [undefined];
+  const { vehicleRates, ...policy } = config;
+  const tariffs = options.map((option) => option
+    ? { ...policy, ...validateRates(vehicleRates[option], option) } : config);
   const validated = validateStops(body.mode, body.stops);
   const currency = /usa/i.test(databaseName) ? "usd" : "etb";
   const region = currency === "usd" ? "US" : "ET";
@@ -88,12 +104,21 @@ async function quoteRide(models, user, databaseName, body, {
     return { ...stop, address: { ...address, location: await geocode(address) } };
   }));
   const baseline = await routeMetrics(stops[0].address.location, stops.slice(1), cachedLeg(lookup));
-  return models.Ride.create({
-    user, mode: body.mode, stops, seats: validated.seats, currency, tariff: config,
-    baseline: { distanceKm: baseline.distanceKm, minutes: baseline.minutes },
-    estimate: fareFor(body.mode, baseline, baseline.minutes, config, currency),
-    expiresAt: new Date(Date.now() + 10 * 60000),
+  const expiresAt = new Date(Date.now() + 10 * 60000);
+  const quotes = await models.Ride.db.transaction(async (session) => {
+    const created = [];
+    for (let index = 0; index < options.length; index++) {
+      const quote = new models.Ride({
+        user, mode: body.mode, vehicleOption: options[index], stops, seats: validated.seats, currency, tariff: tariffs[index],
+        baseline: { distanceKm: baseline.distanceKm, minutes: baseline.minutes },
+        estimate: fareFor(body.mode, baseline, baseline.minutes, tariffs[index], currency), expiresAt,
+      });
+      await quote.save({ session });
+      created.push(quote);
+    }
+    return created;
   });
+  return compare ? quotes : quotes[0];
 }
 
 async function requestRide(models, rideId, user, now = new Date()) {
@@ -107,6 +132,9 @@ async function requestRide(models, rideId, user, now = new Date()) {
     if (ride.expiresAt <= now) throw conflict("Ride quote expired. Calculate a new fare.");
     const config = await models.SiteSetting.findOne({ key: CONFIG_KEY }).session(session).lean();
     if (!config?.rideConfig?.enabled) throw conflict("Ride service is no longer enabled.");
+    if (ride.vehicleOption && !config.rideConfig.vehicleRates?.[ride.vehicleOption]?.enabled) {
+      throw conflict("This vehicle option is no longer available. Calculate new prices.");
+    }
     ride.status = "waiting";
     ride.requestedAt = now;
     ride.pickupBy = new Date(now.getTime() + ride.tariff.maxPickupMinutes * 60000);
@@ -117,7 +145,7 @@ async function requestRide(models, rideId, user, now = new Date()) {
 }
 
 async function driverPlan(models, driver, ride, { now = new Date(), lookup = roadLeg } = {}) {
-  if (!driver || !modeEnabled(driver, ride.mode, now) || driver.exclusiveDelivery || driver.passengerSeats < ride.seats ||
+  if (!driver || !modeEnabled(driver, ride.mode, now) || !matchesRideOption(driver, ride) || driver.exclusiveDelivery || driver.passengerSeats < ride.seats ||
       (ride.mode === "shared" && driver.sharedIntakeOpen === false)) return null;
   if (!driver.rideLocationUpdatedAt || now.getTime() - new Date(driver.rideLocationUpdatedAt).getTime() > 120000) return null;
   const location = driver.location;
@@ -160,7 +188,7 @@ async function dispatchRide(models, rideId, { now = new Date(), lookup = roadLeg
       const candidate = await models.Driver.findById(driver._id).session(session);
       const offeredAt = new Date(Math.max(now.getTime(), Date.now()));
       if (current?.status !== "waiting" || !candidate || candidate.pendingRideOffer ||
-          !modeEnabled(candidate, current.mode, offeredAt) || candidate.exclusiveDelivery ||
+          !modeEnabled(candidate, current.mode, offeredAt) || !matchesRideOption(candidate, current) || candidate.exclusiveDelivery ||
           id(candidate.activeRideTrip) !== id(driver.activeRideTrip) || candidate.passengerSeats !== driver.passengerSeats ||
           JSON.stringify(getCoordinates(candidate.location)) !== JSON.stringify(getCoordinates(driver.location)) ||
           offeredAt - new Date(candidate.rideLocationUpdatedAt) > 120000 ||
@@ -237,7 +265,7 @@ async function acceptRide(models, rideId, driverId, { now = new Date(), lookup =
     const candidate = await models.Driver.findById(driverId).session(session);
     const at = new Date(Math.max(now.getTime(), Date.now()));
     if (!current || current.status !== "offered" || id(current.offerDriver) !== id(driverId) || current.offerDeadline <= at ||
-        id(candidate?.pendingRideOffer) !== id(current) || !modeEnabled(candidate, current.mode, at) ||
+        id(candidate?.pendingRideOffer) !== id(current) || !modeEnabled(candidate, current.mode, at) || !matchesRideOption(candidate, current) ||
         candidate.exclusiveDelivery || id(candidate.activeRideTrip) !== id(driver.activeRideTrip) ||
         JSON.stringify(getCoordinates(candidate.location)) !== JSON.stringify(getCoordinates(driver.location)) ||
         at - new Date(candidate.rideLocationUpdatedAt) > 120000 ||
