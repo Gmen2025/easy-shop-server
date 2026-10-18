@@ -506,6 +506,23 @@ database header:
   provide owner-scoped history/status; customers never receive other bookings'
   names, phones or stops. Driver GPS is returned only during the owner's active
   ride, not after drop-off; completed rides retain driver contact for payment.
+- `GET :id` also returns `pickupEta` for assigned bookings. It uses server-side
+  Google Routes (`GOOGLE_ROUTES_API_KEY`, Routes API enabled, billing required)
+  with `TRAFFIC_AWARE` driving from driver GPS through every pending trip stop
+  up to this booking's first remaining pickup, in the existing stop order.
+  No other customer's addresses or identifiers are exposed in the ETA.
+  Successful shape: `{status: "available", minutes, arrivalAt, computedAt,
+  expiresAt, driverLocationUpdatedAt, stopsBeforePickup}` (dates are ISO strings).
+  GPS must be less than 60 seconds old. Regional, bounded in-process caches
+  coalesce concurrent requests and reuse estimates for at most 30 seconds,
+  never past the source GPS freshness deadline; route/version changes invalidate
+  the cache immediately. Each server process maintains its own cache.
+  The route/assignment and GPS freshness are rechecked after the provider call.
+  Failure shape is `{status: "unavailable", reason}`; unassigned/onboard/finished
+  bookings return `pickupEta: null` without a paid routing request. Road routing
+  failures do not hide the booking or fall back to straight-line distance,
+  quote duration or a promised pickup deadline. Boarding delays are not included.
+  Deploy the matching customer app to show the arrival countdown.
 - Shared insertion preserves existing stop order and evaluates driving time,
   passenger capacity, every awaiting rider's pickup deadline and absolute
   drop-off promises. Additional insertions cannot repeatedly expand an existing

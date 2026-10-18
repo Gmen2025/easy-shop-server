@@ -7,6 +7,7 @@ const { vehicleName, VEHICLES } = require("../helpers/vehicle-delivery");
 const service = require("../service/rideService");
 const places = require("../helpers/places");
 const { hasCurrentRideProfilePhoto, isCloudinaryPhotoUrl } = require("../helpers/ride-driver-profile");
+const { rideArrivalEta } = require("../helpers/ride-arrival");
 
 const endpoint = (action) => async (req, res) => {
   try {
@@ -318,7 +319,8 @@ router.get("/:id", endpoint(async (req, res) => {
   const live = ["assigned", "onboard"].includes(current.status);
   const driver = current.driver && ["assigned", "onboard", "completed"].includes(current.status)
     ? await req.dbModels.Driver.findById(current.driver).select("name phone vehicleType vehicle profilePhotoUrl location rideLocationUpdatedAt").lean() : null;
-  res.json({ ...publicRide(current), assignedDriver: driver ? { name: driver.name, phone: driver.phone,
+  const pickupEta = current.status === "assigned" ? await rideArrivalEta(req.dbModels, current._id) : null;
+  res.json({ ...publicRide(current), pickupEta, assignedDriver: driver ? { name: driver.name, phone: driver.phone,
     vehicleType: vehicleName(driver), plateNumber: driver.vehicle?.plateNumber, profilePhotoUrl: driver.profilePhotoUrl || "",
     ...(live ? { location: driver.location, locationUpdatedAt: driver.rideLocationUpdatedAt || null } : {}) } : null });
 }));

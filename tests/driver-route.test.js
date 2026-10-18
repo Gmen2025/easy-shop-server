@@ -19,14 +19,22 @@ test("Routes request keeps the key in headers and returns km, minutes and coordi
   global.fetch = async (url, options) => {
     assert.equal(url, "https://routes.googleapis.com/directions/v2:computeRoutes");
     assert.equal(options.headers["X-Goog-Api-Key"], "server-only-test");
-    assert.equal(JSON.parse(options.body).origin.location.latLng.longitude, -120.2);
+    const body = JSON.parse(options.body);
+    assert.equal(body.origin.location.latLng.longitude, -120.2);
+    assert.equal(body.routingPreference, "TRAFFIC_AWARE");
+    assert.equal(body.optimizeWaypointOrder, undefined);
+    assert.deepEqual(body.intermediates, [
+      { location: { latLng: { latitude: 40.7, longitude: -120.95 } } },
+      { location: { latLng: { latitude: 41, longitude: -121 } } },
+    ]);
     return { ok: true, json: async () => ({ routes: [{
       distanceMeters: 1200, duration: "180s",
       polyline: { encodedPolyline: "_p~iF~ps|U_ulLnnqC_mqNvxq`@" },
     }] }) };
   };
   try {
-    const result = await computeDrivingRoute([-120.2, 38.5], [-126.453, 43.252]);
+    const result = await computeDrivingRoute([-120.2, 38.5], [-126.453, 43.252],
+      { intermediates: [[-120.95, 40.7], [-121, 41]] });
     assert.equal(result.distance, 1.2);
     assert.equal(result.duration, 3);
     assert.equal(result.coordinates.length, 3);

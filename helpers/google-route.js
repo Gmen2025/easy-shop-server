@@ -28,7 +28,7 @@ function decodePolyline(encoded) {
   return coordinates;
 }
 
-async function computeDrivingRoute(origin, destination) {
+async function computeDrivingRoute(origin, destination, { intermediates = [] } = {}) {
   const key = process.env.GOOGLE_ROUTES_API_KEY;
   if (!key) {
     const error = new Error("Driving routes are not configured. Set GOOGLE_ROUTES_API_KEY on the server.");
@@ -46,6 +46,7 @@ async function computeDrivingRoute(origin, destination) {
     },
     body: JSON.stringify({
       origin: waypoint(origin), destination: waypoint(destination),
+      ...(intermediates.length ? { intermediates: intermediates.map(waypoint) } : {}),
       travelMode: "DRIVE", routingPreference: "TRAFFIC_AWARE",
     }),
   });

@@ -9,6 +9,7 @@ const stripeRouter = require("../routers/stripe");
 const router = require("../routers/rides");
 const { rideSchema } = require("../models/ride");
 const { rideTripSchema } = require("../models/ride-trip");
+const { rideArrivalEta } = require("../helpers/ride-arrival");
 const { RIDE_PROFILE_PHOTO_MAX_AGE_MS, hasCurrentRideProfilePhoto, isCloudinaryPhotoUrl } = require("../helpers/ride-driver-profile");
 const id = (number) => number.toString(16).padStart(24, "0");
 const userId = id(1), driverId = id(2);
@@ -131,6 +132,106 @@ async function assigned(f, overrides) {
   await service.acceptRide(f.models, ride._id, driverId, { lookup });
   return f.models.Ride.findById(ride._id);
 }
+
+test("pickup ETA uses driver GPS and every pending stop through the owner's pickup without leaking shared stops", async () => {
+  const f = fixture(), ride = await assigned(f);
+  const trip = f.tables.RideTrip[0];
+  trip.stops = [
+    { ...stop("pickup", 90), ride: id(90), completedAt: new Date() },
+    { ...stop("dropoff", 1), ride: id(91) },
+    { ...stop("pickup", 2), ride: ride._id },
+    { ...stop("dropoff", 3), ride: ride._id },
+  ];
+  let calls = 0;
+  const now = Date.now();
+  const result = await rideArrivalEta(f.models, ride._id, { clock: () => now, compute: async (origin, destination, options) => {
+    calls++;
+    assert.deepEqual(origin, point(0).coordinates);
+    assert.deepEqual(destination, point(2).coordinates);
+    assert.deepEqual(options.intermediates, [point(1).coordinates]);
+    return { duration: 4.25 };
+  } });
+  assert.equal(calls, 1);
+  assert.equal(result.status, "available");
+  assert.equal(result.minutes, 4.25);
+  assert.equal(result.stopsBeforePickup, 1);
+  assert.equal(new Date(result.arrivalAt).getTime(), now + 255000);
+  assert.equal(new Date(result.expiresAt).getTime(), now + 30000);
+  assert.equal(result.driverLocationUpdatedAt, f.tables.Driver[0].rideLocationUpdatedAt.toISOString());
+  assert.equal(result.stops, undefined);
+  assert.equal(result.coordinates, undefined);
+});
+test("pickup ETA caches concurrent polls for 30 seconds, invalidates on route changes and isolates regions", async () => {
+  const f = fixture(), ride = await assigned(f);
+  let now = Date.now(), calls = 0;
+  const options = { clock: () => now, compute: async () => { calls++; return { duration: 5 }; } };
+  const first = await Promise.all([rideArrivalEta(f.models, ride._id, options), rideArrivalEta(f.models, ride._id, options)]);
+  assert.equal(calls, 1);
+  assert.deepEqual(first[0], first[1]);
+  now += 10000;
+  f.tables.Driver[0].rideLocationUpdatedAt = new Date(now);
+  f.tables.Driver[0].location = point(1);
+  assert.deepEqual(await rideArrivalEta(f.models, ride._id, options), first[0]);
+  assert.equal(calls, 1, "Moving GPS does not bill routing on every 10-second poll");
+  f.tables.RideTrip[0].version++;
+  await rideArrivalEta(f.models, ride._id, options);
+  assert.equal(calls, 2);
+  now += 30000;
+  await rideArrivalEta(f.models, ride._id, options);
+  assert.equal(calls, 3, "Exact cache expiry recalculates");
+  const other = fixture(), otherRide = await assigned(other);
+  await rideArrivalEta(other.models, otherRide._id, { ...options, clock: Date.now });
+  assert.equal(calls, 4, "Regional model caches do not share estimates even for matching identifiers");
+});
+test("pickup ETA rejects stale missing future GPS, invalid pending locations and inactive assignments", async () => {
+  for (const scenario of ["stale", "missing", "future", "invalid", "onboard", "completed", "cancelled", "terminated", "trip", "pickup"]) {
+    const f = fixture(), ride = await assigned(f);
+    const now = Date.now();
+    const driver = f.tables.Driver[0], trip = f.tables.RideTrip[0];
+    if (scenario === "stale") driver.rideLocationUpdatedAt = new Date(now - 60000);
+    if (scenario === "missing") driver.rideLocationUpdatedAt = undefined;
+    if (scenario === "future") driver.rideLocationUpdatedAt = new Date(now + 1);
+    if (scenario === "invalid") trip.stops[0].address.location = null;
+    if (["onboard", "completed", "cancelled", "terminated"].includes(scenario)) f.tables.Ride[0].status = scenario;
+    if (scenario === "trip") driver.activeRideTrip = id(999);
+    if (scenario === "pickup") trip.stops[0].completedAt = new Date();
+    const result = await rideArrivalEta(f.models, ride._id, { clock: () => now, compute: async () => { assert.fail("Invalid GPS/assignment must not request Google"); } });
+    assert.equal(result.status, "unavailable", scenario);
+    assert.ok(result.reason);
+    assert.equal(result.minutes, undefined);
+  }
+});
+test("pickup ETA rechecks route status and GPS freshness after routing and exposes failures without a fallback", async () => {
+  for (const scenario of ["route", "completed", "expired", "failure", "invalid-duration"]) {
+    const f = fixture(), ride = await assigned(f);
+    let now = Date.now();
+    const result = await rideArrivalEta(f.models, ride._id, { clock: () => now, compute: async () => {
+      if (scenario === "route") f.tables.RideTrip[0].version++;
+      if (scenario === "completed") f.tables.Ride[0].status = "completed";
+      if (scenario === "expired") now += 60000;
+      if (scenario === "failure") throw new Error("Private provider diagnostic");
+      return { duration: scenario === "invalid-duration" ? NaN : 5 };
+    } });
+    assert.equal(result.status, "unavailable", scenario);
+    assert.equal(result.minutes, undefined);
+    assert.doesNotMatch(result.reason, /Private provider diagnostic/);
+  }
+});
+test("cached pickup ETA is never returned after GPS becomes stale or a ride completes", async () => {
+  const f = fixture(), ride = await assigned(f);
+  let now = Date.now(), calls = 0;
+  f.tables.Driver[0].rideLocationUpdatedAt = new Date(now - 50000);
+  const options = { clock: () => now, compute: async () => { calls++; return { duration: 0 }; } };
+  const first = await rideArrivalEta(f.models, ride._id, options);
+  assert.equal(first.status, "available");
+  assert.equal(new Date(first.expiresAt).getTime(), now + 10000, "Expiry cannot outlive its source GPS");
+  now += 10000;
+  assert.equal((await rideArrivalEta(f.models, ride._id, options)).status, "unavailable");
+  f.tables.Driver[0].rideLocationUpdatedAt = new Date(now);
+  f.tables.Ride[0].status = "completed";
+  assert.equal((await rideArrivalEta(f.models, ride._id, options)).status, "unavailable");
+  assert.equal(calls, 1);
+});
 
 test("ride schemas retain one payer and separate vehicle route; existing drivers default to delivery only", () => {
   const Ride = mongoose.model("RideUnitBooking", rideSchema);
@@ -714,6 +815,42 @@ test("ride APIs protect passenger privacy, Admin settings and driver-only action
   assert.equal(owned.body.paymentIntentId, undefined);
   assert.equal(owned.body.offerDriver, undefined);
   assert.equal((await invoke(f, "/config", "get", null)).code, 401);
+});
+test("owned ride detail returns traffic-aware pickup ETA while preventing other users from triggering route lookups", async () => {
+  const f = fixture(), ride = await assigned(f);
+  const originalFetch = global.fetch, originalKey = process.env.GOOGLE_ROUTES_API_KEY;
+  let calls = 0;
+  process.env.GOOGLE_ROUTES_API_KEY = "eta-test-server-key";
+  global.fetch = async (url, options) => {
+    calls++;
+    assert.equal(url, "https://routes.googleapis.com/directions/v2:computeRoutes");
+    assert.equal(options.headers["X-Goog-Api-Key"], "eta-test-server-key");
+    assert.equal(JSON.parse(options.body).routingPreference, "TRAFFIC_AWARE");
+    return { ok: true, json: async () => ({ routes: [{ distanceMeters: 1000, duration: "150s",
+      polyline: { encodedPolyline: "_p~iF~ps|U_ulLnnqC_mqNvxq`@" } }] }) };
+  };
+  try {
+    assert.equal((await invoke(f, "/:id", "get", { userId: id(999) }, { id: ride._id })).code, 404);
+    assert.equal(calls, 0);
+    const result = await invoke(f, "/:id", "get", { userId }, { id: ride._id });
+    assert.equal(result.code, 200);
+    assert.equal(result.body.pickupEta.status, "available");
+    assert.equal(result.body.pickupEta.minutes, 2.5);
+    assert.equal(result.body.pickupEta.stopsBeforePickup, 0);
+    assert.equal(result.body.assignedDriver.name, "Driver");
+    assert.equal(result.body.pickupEta.stops, undefined);
+    assert.equal(JSON.stringify(result.body).includes("eta-test-server-key"), false);
+    assert.equal(calls, 1);
+    f.tables.Ride[0].status = "completed";
+    const finished = await invoke(f, "/:id", "get", { userId }, { id: ride._id });
+    assert.equal(finished.body.pickupEta, null);
+    assert.equal(finished.body.assignedDriver.location, undefined);
+    assert.equal(calls, 1);
+  } finally {
+    global.fetch = originalFetch;
+    if (originalKey === undefined) delete process.env.GOOGLE_ROUTES_API_KEY;
+    else process.env.GOOGLE_ROUTES_API_KEY = originalKey;
+  }
 });
 
 test("driver trip start is persistent, idempotent and does not board passengers or start fare time", async () => {
