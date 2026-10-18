@@ -8,6 +8,7 @@ const rideTripSchema = new mongoose.Schema({
   onboardSeats: { type: Number, default: 0 },
   stops: { type: [mongoose.Schema.Types.Mixed], default: [] },
   version: { type: Number, default: 0 },
+  startedAt: Date,
   completedAt: Date,
 }, { timestamps: true });
 rideTripSchema.index({ driver: 1, status: 1 });

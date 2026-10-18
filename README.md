@@ -520,6 +520,12 @@ database header:
   claimed. Claiming re-evaluates the current route and commits with optimistic
   trip-version checks. The independent 30-second scan retries waiting rides,
   expired offers and card-payment receipts, even with store inventory disabled.
+  Active `riders` include the booking owner's `customerName` (name only, not the
+  customer's full account) for the assigned driver's trip card.
+- `POST me/start-trip` takes `{tripId}` and idempotently records `startedAt` on
+  the authenticated company's active trip. A stale/different trip is rejected.
+  This does not mark a pickup complete, change passenger counts or set a fare
+  start time; normal next-stop boarding confirmation still controls those.
 - `GET me/route`: authenticated company driver only, resolved from that driver's
   active trip (not a client-supplied booking ID). Returns a driving polyline from
   the driver's GPS through every unfinished vehicle stop in order, including

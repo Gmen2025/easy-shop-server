@@ -118,6 +118,23 @@ router.put("/me/vehicle", endpoint(async (req, res) => {
 router.get("/me/route", endpoint(async (req, res) => {
   res.json(await service.driverRoutePath(req.dbModels, await selfDriver(req)));
 }));
+router.post("/me/start-trip", endpoint(async (req, res) => {
+  const driver = await selfDriver(req);
+  const startedAt = await req.dbModels.Driver.db.transaction(async (session) => {
+    const current = await req.dbModels.Driver.findById(driver._id).session(session);
+    const trip = current.activeRideTrip && await req.dbModels.RideTrip.findOne({
+      _id: current.activeRideTrip, driver: current._id, status: "active",
+    }).session(session);
+    if (!trip) throw conflict("No active passenger trip is assigned to you.");
+    if (String(trip._id) !== req.body.tripId) throw conflict("The passenger trip changed. Refresh before starting.");
+    if (!trip.startedAt) {
+      trip.startedAt = new Date();
+      await trip.save({ session });
+    }
+    return trip.startedAt;
+  });
+  res.json({ startedAt });
+}));
 router.get("/me/driver", endpoint(async (req, res) => {
   const driver = await selfDriver(req);
   await expireDriverOffer(req, driver);
@@ -128,6 +145,10 @@ router.get("/me/driver", endpoint(async (req, res) => {
   }).lean();
   const riders = trip ? await req.dbModels.Ride.find({ trip: trip._id, status: { $in: ["assigned", "onboard"] } })
     .select("stops seats status user mode vehicleOption estimate").lean() : [];
+  const customers = riders.length ? await req.dbModels.User.find({ _id: { $in: riders.map((rider) => rider.user) } }).select("name").lean() : [];
+  const namedRiders = riders.map((rider) => ({
+    ...rider, customerName: customers.find((customer) => String(customer._id) === String(rider.user))?.name || "Customer",
+  }));
   const payments = await req.dbModels.Ride.find({ driver: current._id, status: { $in: ["completed", "terminated"] } })
     .select("stops currency vehicleOption finalFare estimate status termination paymentStatus paymentMethod bankReference completedAt").sort({ updatedAt: -1 }).limit(20).lean();
   res.json({ driver: { _id: current._id, name: current.name, vehicleType: vehicleName(current),
@@ -138,7 +159,7 @@ router.get("/me/driver", endpoint(async (req, res) => {
     isAvailable: current.isAvailable || current.availabilityStatus, isSuspended: current.isSuspended,
     profilePhotoUrl: current.profilePhotoUrl || "", rideProfilePhotoUpdatedAt: current.rideProfilePhotoUpdatedAt || null,
     rideProfilePhotoRequired: !hasCurrentRideProfilePhoto(current) },
-    trip: trip || null, offer: offer ? publicRide(offer) : null, riders, payments });
+    trip: trip || null, offer: offer ? publicRide(offer) : null, riders: namedRiders, payments });
 }));
 router.put("/me/profile-photo", endpoint(async (req, res) => {
   const driver = await selfDriver(req);

@@ -716,6 +716,29 @@ test("ride APIs protect passenger privacy, Admin settings and driver-only action
   assert.equal((await invoke(f, "/config", "get", null)).code, 401);
 });
 
+test("driver trip start is persistent, idempotent and does not board passengers or start fare time", async () => {
+  const f = fixture(), auth = { userId: id(3) };
+  assert.equal((await invoke(f, "/me/start-trip", "post", { userId })).code, 403);
+  assert.equal((await invoke(f, "/me/start-trip", "post", auth, {}, { tripId: id(99) })).code, 409);
+  const ride = await assigned(f);
+  const trip = f.tables.RideTrip[0];
+  assert.equal((await invoke(f, "/me/start-trip", "post", auth, {}, { tripId: id(99) })).code, 409);
+  const start = await invoke(f, "/me/start-trip", "post", auth, {}, { tripId: trip._id });
+  assert.equal(start.code, 200);
+  assert.ok(start.body.startedAt);
+  const again = await invoke(f, "/me/start-trip", "post", auth, {}, { tripId: trip._id });
+  assert.equal(String(again.body.startedAt), String(start.body.startedAt));
+  assert.equal(f.tables.Ride[0].status, "assigned");
+  assert.equal(f.tables.Ride[0].pickedUpAt, undefined);
+  assert.equal(f.tables.RideTrip[0].onboardSeats, 0);
+  assert.equal(f.tables.RideTrip[0].stops.some((stop) => stop.completedAt), false);
+  f.tables.User.push({ _id: userId, name: "Passenger", email: "private@example.com" });
+  const overview = await invoke(f, "/me/driver", "get", auth);
+  assert.equal(overview.body.riders[0].customerName, "Passenger");
+  assert.equal(overview.body.riders[0].email, undefined);
+  assert.equal(overview.body.riders[0]._id, ride._id);
+});
+
 test("comparison endpoint returns owner-bound quotes and protects configuration writes", async () => {
   const f = fixture();
   assert.equal((await invoke(f, "/config", "put", { userId }, {}, classConfig)).code, 403);
