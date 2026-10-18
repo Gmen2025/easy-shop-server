@@ -18,7 +18,13 @@ const thinPath = (points) => {
 // Road path through every stop in booking order, cached on the ride so each quote pays Google once.
 async function rideRoutePath(models, ride, { compute = computeDrivingRoute } = {}) {
   if (Array.isArray(ride.routePath?.coordinates) && ride.routePath.coordinates.length > 1) return ride.routePath;
-  const points = (ride.stops || []).map((stop) => getCoordinates(stop.address?.location));
+  const routePath = await stopsRoutePath(ride.stops, compute);
+  await models.Ride.updateOne({ _id: ride._id }, { routePath });
+  return routePath;
+}
+
+async function stopsRoutePath(stops, compute) {
+  const points = (stops || []).map((stop) => getCoordinates(stop.address?.location));
   if (points.length < 2 || points.some((point) => !point)) {
     throw conflict("A ride stop has no verified map location. Calculate a new fare.");
   }
@@ -34,14 +40,25 @@ async function rideRoutePath(models, ride, { compute = computeDrivingRoute } = {
   }
   if (coordinates.length < 2) throw conflict("All ride stops are at the same location.");
   const routePath = { coordinates: thinPath(coordinates), distanceKm, minutes, computedAt: new Date() };
-  await models.Ride.updateOne({ _id: ride._id }, { routePath });
   return routePath;
+}
+
+async function driverRoutePath(models, driver, { compute = computeDrivingRoute } = {}) {
+  const trip = driver.activeRideTrip && await models.RideTrip.findOne({
+    _id: driver.activeRideTrip, driver: driver._id, status: "active",
+  }).lean();
+  if (!trip) throw conflict("No active passenger route is assigned to you.");
+  const pending = trip.stops.filter((stop) => !stop.completedAt);
+  if (!pending.length) throw conflict("There are no remaining passenger stops.");
+  if (!getCoordinates(driver.location)) throw conflict("Enable GPS before loading your driving route.");
+  return stopsRoutePath([{ address: { location: driver.location } }, ...pending], compute);
 }
 
 const id = (value) => String(value?._id || value || "");
 const available = (driver) => driver.approvalStatus === "approved" && !driver.isSuspended &&
   (driver.isAvailable === true || driver.availabilityStatus === true);
 const modeEnabled = (driver, mode, now = new Date()) => driver.isCompanyOwned && available(driver) &&
+  !driver.pendingVehicleType &&
   driver.serviceModes?.[mode] === true && ["car", "van"].includes(vehicleName(driver)) &&
   Number.isSafeInteger(driver.passengerSeats) && driver.passengerSeats > 0 &&
   hasCurrentRideProfilePhoto(driver, now);
@@ -562,5 +579,5 @@ async function scanRides(models, databaseName, now = new Date()) {
   }
 }
 
-module.exports = { id, modeEnabled, quoteRide, rideRoutePath, requestRide, driverPlan, dispatchRide, releaseOffer, acceptRide,
+module.exports = { id, modeEnabled, quoteRide, rideRoutePath, driverRoutePath, requestRide, driverPlan, dispatchRide, releaseOffer, acceptRide,
   completeStop, terminateRide, reviewTermination, payableRide, closeSharedIntake, cancelRide, prepareRidePayment, ridePaymentIntent, confirmRidePayment, verifyRidePayment, scanRides };

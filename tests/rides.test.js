@@ -138,6 +138,11 @@ test("ride schemas retain one payer and separate vehicle route; existing drivers
   assert.equal(trip.onboardSeats, 0);
   const { Driver } = require("../models/driver");
   assert.deepEqual(new Driver({}).serviceModes.toObject(), { delivery: true, regular: false, shared: false });
+  const configured = new Driver({ pendingVehicleType: "van", carClass: "comfort" });
+  assert.equal(configured.toObject().pendingVehicleType, "van");
+  assert.equal(configured.toObject().carClass, "comfort");
+  assert.equal(new Driver({}).pendingVehicleType, "");
+  assert.ok(new Driver({ carClass: "luxury" }).validateSync().errors.carClass);
 });
 
 test("ride driver profile photos expire after 90 days and only HTTPS Cloudinary image URLs are accepted", () => {
@@ -658,6 +663,63 @@ test("Admin seat and driver mode controls cannot bypass verified passenger vehic
   assert.equal((await invoke(f, "/me/modes", "put", driverAuth, {}, { delivery: false, regular: false, shared: false })).code, 409);
 });
 
+test("driver vehicle changes require Admin verification and car classes stay car-only", async () => {
+  const f = fixture(), driverAuth = { userId: id(3) }, adminAuth = { userId, isAdmin: true };
+  assert.equal((await invoke(f, "/me/vehicle", "put", { userId }, {}, { vehicleType: "van" })).code, 403);
+  assert.equal((await invoke(f, "/me/vehicle", "put", driverAuth, {}, { vehicleType: "plane" })).code, 409);
+  assert.equal((await invoke(f, "/me/vehicle", "put", driverAuth, {}, { vehicleType: "van" })).code, 200);
+  assert.equal(f.tables.Driver[0].vehicleType, "car", "driver cannot self-approve a new vehicle");
+  assert.equal(f.tables.Driver[0].pendingVehicleType, "van");
+  assert.equal(service.modeEnabled(f.tables.Driver[0], "regular"), false);
+  const waiting = await f.booking();
+  await service.requestRide(f.models, waiting._id, userId);
+  await service.dispatchRide(f.models, waiting._id, { lookup });
+  assert.equal(f.tables.Ride[0].status, "waiting");
+  assert.equal((await invoke(f, "/me/modes", "put", driverAuth, {}, { delivery: true, regular: false, shared: true })).code, 200,
+    "pending verification must not prevent disabling an existing ride mode");
+  assert.equal((await invoke(f, "/me/modes", "put", driverAuth, {}, { delivery: true, regular: true, shared: true })).code, 409);
+  assert.equal((await invoke(f, "/admin/drivers/:id", "put", driverAuth, { id: driverId }, { vehicleType: "van", passengerSeats: 5 })).code, 403);
+  assert.equal((await invoke(f, "/admin/drivers/:id", "put", adminAuth, { id: driverId }, { passengerSeats: 5 })).code, 409);
+  assert.equal((await invoke(f, "/admin/drivers/:id", "put", adminAuth, { id: driverId }, { vehicleType: "van", passengerSeats: 5, carClass: "comfort" })).code, 409);
+  assert.equal((await invoke(f, "/admin/drivers/:id", "put", adminAuth, { id: driverId }, { vehicleType: "van", passengerSeats: 5, carClass: "" })).code, 200);
+  assert.equal(f.tables.Driver[0].vehicleType, "van");
+  assert.equal(f.tables.Driver[0].passengerSeats, 5);
+  assert.equal(f.tables.Driver[0].pendingVehicleType, "");
+  for (const carClass of ["economy", "comfort"]) {
+    assert.equal((await invoke(f, "/admin/drivers/:id", "put", adminAuth, { id: driverId },
+      { vehicleType: "car", passengerSeats: 3, carClass })).code, 200);
+    assert.equal(f.tables.Driver[0].carClass, carClass);
+    const overview = await invoke(f, "/me/driver", "get", driverAuth);
+    assert.equal(overview.body.driver.carClass, carClass);
+  }
+  for (const vehicleType of ["motorcycle", "truck"]) {
+    assert.equal((await invoke(f, "/me/vehicle", "put", driverAuth, {}, { vehicleType })).code, 200);
+    assert.equal((await invoke(f, "/admin/drivers/:id", "put", adminAuth, { id: driverId }, { vehicleType, carClass: "" })).code, 200);
+    assert.equal(f.tables.Driver[0].carClass, "");
+    assert.equal(f.tables.Driver[0].passengerSeats, undefined);
+    assert.equal(f.tables.Driver[0].serviceModes.regular, false);
+    assert.equal(service.modeEnabled(f.tables.Driver[0], "regular"), false);
+  }
+  assert.equal((await invoke(f, "/me/vehicle", "put", driverAuth, {}, { vehicleType: "car" })).code, 200);
+  assert.equal((await invoke(f, "/me/vehicle", "put", driverAuth, {}, { vehicleType: "truck" })).code, 200);
+  assert.equal(f.tables.Driver[0].pendingVehicleType, "", "selecting the registered type cancels a pending request");
+  f.fail("Driver");
+  assert.equal((await invoke(f, "/me/vehicle", "put", driverAuth, {}, { vehicleType: "car" })).code, 500);
+  assert.equal(f.tables.Driver[0].pendingVehicleType, "", "failed vehicle requests must roll back");
+});
+
+test("vehicle configuration is locked during assignments and delivery work", async () => {
+  const f = fixture(), auth = { userId: id(3) }, adminAuth = { userId, isAdmin: true };
+  const ride = await assigned(f);
+  assert.equal((await invoke(f, "/me/vehicle", "put", auth, {}, { vehicleType: "van" })).code, 409);
+  assert.equal((await invoke(f, "/admin/drivers/:id", "put", adminAuth, { id: driverId },
+    { vehicleType: "car", passengerSeats: 3, carClass: "comfort" })).code, 409);
+  await service.cancelRide(f.models, ride._id, userId);
+  f.tables.Order.push({ driver: driverId, deliveryStatus: "Picked Up" });
+  assert.equal((await invoke(f, "/me/vehicle", "put", auth, {}, { vehicleType: "van" })).code, 409);
+  assert.equal(f.tables.Driver[0].pendingVehicleType || "", "");
+});
+
 test("only Admin verifies bank transfers and only the assigned driver/Admin can confirm cash receipts", async () => {
   const f = fixture(), ride = await f.booking({ status: "completed", finalFare: 8, driver: driverId,
     paymentMethod: "bank", bankReference: "Transfer" });
@@ -737,6 +799,51 @@ test("ride route path joins every leg in stop order, caches it, and stays owner-
   assert.equal((await invoke(f, "/:id/route", "get", { userId: id(999) }, { id: ride._id })).code, 404);
   const unlocated = await f.booking({ stops: [stop("pickup", 0), { ...stop("dropoff", 2), address: { ...address(2), location: null } }] });
   await assert.rejects(service.rideRoutePath(f.models, unlocated, { compute }), /no verified map location/);
+});
+
+test("driver driving route starts at GPS and follows only remaining pooled stops in order", async () => {
+  const f = fixture(), ride = await assigned(f);
+  const trip = f.tables.RideTrip[0];
+  trip.stops = [
+    { ...stop("pickup", 1), completedAt: new Date() },
+    { ...stop("dropoff", 2), ride: ride._id },
+    { ...stop("pickup", 3), ride: id(999) },
+    { ...stop("dropoff", 5), ride: id(999) },
+  ];
+  const driver = await f.models.Driver.findById(driverId);
+  driver.location = point(1);
+  const calls = [];
+  const path = await service.driverRoutePath(f.models, driver, { compute: async (start, end) => {
+    calls.push([start[0], end[0]]);
+    return { coordinates: [{ latitude: start[1], longitude: start[0] }, { latitude: end[1], longitude: end[0] }],
+      distance: 1, duration: 2 };
+  } });
+  assert.deepEqual(calls, [[0.001, 0.002], [0.002, 0.003], [0.003, 0.005]]);
+  assert.equal(path.distanceKm, 3);
+  assert.equal(path.minutes, 6);
+  trip.stops[1].completedAt = new Date();
+  trip.stops[2].completedAt = new Date();
+  calls.length = 0;
+  await service.driverRoutePath(f.models, driver, { compute: async (start, end) => {
+    calls.push([start[0], end[0]]);
+    return { coordinates: [{ latitude: 0, longitude: start[0] }, { latitude: 0, longitude: end[0] }], distance: 1, duration: 2 };
+  } });
+  assert.deepEqual(calls, [[0.001, 0.005]], "the route still works when only the last drop-off remains");
+  const original = service.driverRoutePath;
+  service.driverRoutePath = async (models, current) => {
+    assert.equal(current._id, driverId);
+    return path;
+  };
+  try {
+    assert.equal((await invoke(f, "/me/route", "get", { userId: id(3) })).body, path);
+    assert.equal((await invoke(f, "/me/route", "get", { userId })).code, 403);
+    assert.equal((await invoke(f, "/me/route", "get", null)).code, 401);
+  } finally { service.driverRoutePath = original; }
+  trip.driver = id(999);
+  await assert.rejects(service.driverRoutePath(f.models, driver), /No active passenger route/);
+  trip.driver = driverId;
+  trip.stops.forEach((entry) => { entry.completedAt = new Date(); });
+  await assert.rejects(service.driverRoutePath(f.models, driver), /no remaining passenger stops/);
 });
 
 test("quotes use server-verified place coordinates for selected suggestions and allow Ethiopia without ZIP", async () => {

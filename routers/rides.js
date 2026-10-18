@@ -3,7 +3,7 @@ const mongoose = require("mongoose");
 const { CONFIG_KEY, validateConfig } = require("../helpers/ride-routing");
 const { conflict } = require("../helpers/store-inventory");
 const { getCoordinates } = require("../helpers/fulfillment-routing");
-const { vehicleName } = require("../helpers/vehicle-delivery");
+const { vehicleName, VEHICLES } = require("../helpers/vehicle-delivery");
 const service = require("../service/rideService");
 const places = require("../helpers/places");
 const { hasCurrentRideProfilePhoto, isCloudinaryPhotoUrl } = require("../helpers/ride-driver-profile");
@@ -62,24 +62,57 @@ router.put("/config", endpoint(async (req, res) => {
 }));
 router.get("/admin/drivers", endpoint(async (req, res) => {
   admin(req);
-  res.json(await req.dbModels.Driver.find({ isCompanyOwned: true }).select("name vehicleType vehicle.type passengerSeats serviceModes sharedIntakeOpen activeRideTrip").lean());
+  res.json(await req.dbModels.Driver.find({ isCompanyOwned: true }).select("name vehicleType vehicle.type pendingVehicleType carClass passengerSeats serviceModes sharedIntakeOpen activeRideTrip").lean());
 }));
 router.put("/admin/drivers/:id", endpoint(async (req, res) => {
   admin(req);
   checkId(req.params.id);
-  const seats = Number(req.body.passengerSeats);
-  if (!Number.isSafeInteger(seats) || seats < 1 || seats > 16) throw conflict("Configure 1-16 usable passenger seats, excluding the driver.");
   const driver = await req.dbModels.Driver.findOne({ _id: req.params.id, isCompanyOwned: true });
   if (!driver) throw conflict("Company driver not found.");
-  if (!["car", "van"].includes(vehicleName(driver))) throw conflict("Only a car or van can be enabled for passenger rides. Correct the driver's vehicle type first.");
   await req.dbModels.Driver.db.transaction(async (session) => {
     const current = await req.dbModels.Driver.findById(driver._id).session(session);
-    if (!["car", "van"].includes(vehicleName(current))) throw conflict("The vehicle type changed. Configure a car or van first.");
-    if (current.activeRideTrip || current.pendingRideOffer) throw conflict("Change seat capacity after finishing rides and responding to outstanding offers.");
-    current.passengerSeats = seats;
+    const type = req.body.vehicleType === undefined ? vehicleName(current) : req.body.vehicleType;
+    if (!VEHICLES.includes(type)) throw conflict("Choose motorcycle, car, van or truck.");
+    if (current.activeRideTrip || current.pendingRideOffer || current.exclusiveDelivery ||
+        await req.dbModels.Order.countDocuments({ driver: current._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] } }).session(session)) {
+      throw conflict("Change vehicle configuration after finishing rides/deliveries and responding to outstanding offers.");
+    }
+    if (current.pendingVehicleType && req.body.vehicleType === undefined) throw conflict("Select and verify the requested vehicle type before saving.");
+    const passengerVehicle = ["car", "van"].includes(type);
+    const seats = Number(req.body.passengerSeats);
+    if (passengerVehicle && (!Number.isSafeInteger(seats) || seats < 1 || seats > 16)) {
+      throw conflict("Configure 1-16 usable passenger seats, excluding the driver.");
+    }
+    const carClass = req.body.carClass === undefined ? (type === "car" ? current.carClass || "" : "") : req.body.carClass;
+    if (!["", "economy", "comfort"].includes(carClass) || (type !== "car" && carClass !== "")) {
+      throw conflict("Economy and Comfort can only be assigned to cars.");
+    }
+    current.vehicleType = type;
+    if (current.vehicle) current.vehicle.type = type;
+    current.carClass = carClass;
+    current.passengerSeats = passengerVehicle ? seats : undefined;
+    if (!passengerVehicle) current.serviceModes = { delivery: true, regular: false, shared: false };
+    current.pendingVehicleType = "";
     await current.save({ session });
   });
-  res.json({ message: "Passenger seats saved. The driver can select their service modes." });
+  res.json({ message: "Vehicle verified and configuration saved. Only cars/vans can enable passenger rides." });
+}));
+router.put("/me/vehicle", endpoint(async (req, res) => {
+  const driver = await selfDriver(req);
+  if (!VEHICLES.includes(req.body.vehicleType)) throw conflict("Choose motorcycle, car, van or truck.");
+  await req.dbModels.Driver.db.transaction(async (session) => {
+    const current = await req.dbModels.Driver.findById(driver._id).session(session);
+    if (current.activeRideTrip || current.pendingRideOffer || current.exclusiveDelivery ||
+        await req.dbModels.Order.countDocuments({ driver: current._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] } }).session(session)) {
+      throw conflict("Finish rides/deliveries and respond to offers before requesting a vehicle change.");
+    }
+    current.pendingVehicleType = req.body.vehicleType === vehicleName(current) ? "" : req.body.vehicleType;
+    await current.save({ session });
+  });
+  res.json({ message: "Vehicle selection saved. Changes require Admin verification before new passenger offers." });
+}));
+router.get("/me/route", endpoint(async (req, res) => {
+  res.json(await service.driverRoutePath(req.dbModels, await selfDriver(req)));
 }));
 router.get("/me/driver", endpoint(async (req, res) => {
   const driver = await selfDriver(req);
@@ -94,6 +127,8 @@ router.get("/me/driver", endpoint(async (req, res) => {
   const payments = await req.dbModels.Ride.find({ driver: current._id, status: { $in: ["completed", "terminated"] } })
     .select("stops currency finalFare estimate status termination paymentStatus paymentMethod bankReference completedAt").sort({ updatedAt: -1 }).limit(20).lean();
   res.json({ driver: { _id: current._id, name: current.name, vehicleType: vehicleName(current),
+    pendingVehicleType: current.pendingVehicleType || "", carClass: current.carClass || "",
+    location: current.location || null,
     passengerSeats: current.passengerSeats, serviceModes: current.serviceModes,
     sharedIntakeOpen: current.sharedIntakeOpen, approvalStatus: current.approvalStatus,
     isAvailable: current.isAvailable || current.availabilityStatus, isSuspended: current.isSuspended,
@@ -129,6 +164,10 @@ router.put("/me/modes", endpoint(async (req, res) => {
     modes[mode] = req.body[mode];
   }
   if (!Object.values(modes).some(Boolean)) throw conflict("Choose at least one service mode. Use your existing availability controls to go offline.");
+  if (driver.pendingVehicleType &&
+      ((modes.regular && !driver.serviceModes?.regular) || (modes.shared && !driver.serviceModes?.shared))) {
+    throw conflict("Admin must verify your vehicle change before enabling passenger rides.");
+  }
   if (((modes.regular && !driver.serviceModes?.regular) || (modes.shared && !driver.serviceModes?.shared)) &&
       !hasCurrentRideProfilePhoto(driver)) {
     throw conflict("Update your ride profile photo before enabling rides. Photos must be refreshed every 90 days.");

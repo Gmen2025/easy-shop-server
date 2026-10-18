@@ -61,6 +61,8 @@ const driverSchema = new mongoose.Schema({
     shared: { type: Boolean, default: false },
   },
   passengerSeats: { type: Number, min: 1, max: 16 },
+  pendingVehicleType: { type: String, enum: ["", "motorcycle", "car", "van", "truck"], default: "" },
+  carClass: { type: String, enum: ["", "economy", "comfort"], default: "" },
   sharedIntakeOpen: { type: Boolean, default: true },
   activeRideTrip: { type: mongoose.Schema.Types.ObjectId, ref: "RideTrip", default: null },
   pendingRideOffer: { type: mongoose.Schema.Types.ObjectId, ref: "Ride", default: null },

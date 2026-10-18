@@ -255,6 +255,7 @@ router.put("/admin/company-drivers/:id", requireAdmin, async (req, res) => {
         return res.status(409).json({ success: false, message: "Finish the passenger ride and respond to offers before changing vehicle type." });
       }
       if (vehicleType !== driver.vehicleType) driver.$where = { activeRideTrip: null, pendingRideOffer: null };
+      if (vehicleType !== driver.vehicleType) driver.carClass = "";
       driver.vehicleType = vehicleType;
     }
     if (parsedPoint.value) driver.location = parsedPoint.value;
@@ -1219,6 +1220,7 @@ router.put(`/:id`, async (req, res) => {
   if (req.body.name !== undefined) updateFields.name = req.body.name;
   if (req.body.isAvailable !== undefined) updateFields.isAvailable = Boolean(req.body.isAvailable);
   if (req.body.vehicleType !== undefined) updateFields.vehicleType = req.body.vehicleType;
+  if (changingVehicle) updateFields.carClass = "";
   if (parsedPoint.value) updateFields.location = parsedPoint.value;
 
   if (updateFields.isAvailable === true) {

@@ -503,6 +503,24 @@ database header:
   claimed. Claiming re-evaluates the current route and commits with optimistic
   trip-version checks. The independent 30-second scan retries waiting rides,
   expired offers and card-payment receipts, even with store inventory disabled.
+- `GET me/route`: authenticated company driver only, resolved from that driver's
+  active trip (not a client-supplied booking ID). Returns a driving polyline from
+  the driver's GPS through every unfinished vehicle stop in order, including
+  pooled bookings. Uses `GOOGLE_ROUTES_API_KEY`; errors are explicit and stop pins
+  and external navigation remain usable. Clients reload on trip version changes.
+- `PUT me/vehicle` takes `{vehicleType}` (`motorcycle`, `car`, `van`, `truck`) and
+  stores `pendingVehicleType`, not an approved vehicle change. Passenger dispatch
+  and mode activation are blocked while a request is pending. Selecting the
+  registered type cancels it. Vehicle requests/configuration are blocked during
+  active passenger trips, offers or deliveries.
+- `PUT admin/drivers/:id` verifies the selected `vehicleType`, clears its pending
+  request, and saves `passengerSeats` (1-16 for car/van) and optional `carClass`
+  (`economy`, `comfort`, or empty; cars only). Motorcycle/truck have no passenger
+  seats and are reset to delivery-only modes. Changing vehicle type through older
+  driver Admin forms clears the car class; use Ride settings to classify it again.
+  `GET admin/drivers` and `GET me/driver` include pending type and car class.
+  Classes are metadata only, with no customer class selection, matching or fare
+  changes. Existing cars without a class remain eligible under existing rules.
 - `PUT me/modes`: explicit delivery/regular/shared booleans, at least one
   enabled. `POST me/shared-intake` with `{ open: false }` immediately removes and
   requeues accepted-but-not-picked-up shared bookings and any shared offer.
