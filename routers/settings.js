@@ -1,6 +1,8 @@
 const router = require('express').Router();
 const mongoose = require('mongoose');
-const { normalizeDeliveryConfig } = require('../helpers/delivery');
+const {
+  normalizeDeliveryConfig, validateDeliveryConfigInput, defaultBusinessTimeZone, NEW_DELIVERY_CONFIG_KEYS,
+} = require('../helpers/delivery');
 const { isGoogleDistanceApiConfigured, getDrivingDistanceKm } = require('../helpers/google-distance');
 const { getCoordinates, resolvePickupStore } = require('../helpers/fulfillment-routing');
 
@@ -370,6 +372,10 @@ router.put('/bank-account', async (req, res) => {
  *       500:
  *         description: Failed to read delivery settings
  */
+function effectiveTimeZone(config, dbName) {
+  return normalizeDeliveryConfig(config).businessTimeZone || defaultBusinessTimeZone(dbName);
+}
+
 router.get('/delivery', async (req, res) => {
   try {
     const { SiteSetting } = req.dbModels;
@@ -380,6 +386,7 @@ router.get('/delivery', async (req, res) => {
     return res.status(200).json({
       success: true,
       deliveryConfig: normalizeDeliveryConfig(setting?.deliveryConfig),
+      effectiveBusinessTimeZone: effectiveTimeZone(setting?.deliveryConfig, req.dbName),
       deliveryOrigin: { address: setting?.deliveryOrigin?.address || '' },
       distanceApiEnabled: isGoogleDistanceApiConfigured(),
       updatedAt: setting?.updatedAt || null,
@@ -408,7 +415,12 @@ router.get('/delivery', async (req, res) => {
  *               deliveryConfig:
  *                 type: object
  *                 additionalProperties: true
- *                 description: Delivery pricing and distance configuration.
+ *                 description: >
+ *                   Delivery pricing and scheduling. sameDay* rates price EXPRESS and nextDay* rates price STANDARD
+ *                   in the legacy checkout. expressMin/MaxBusinessDays (1/2), standardMin/MaxBusinessDays (2/5),
+ *                   businessDayStartHour/EndHour (9/18), businessTimeZone (empty = region default) and the
+ *                   per-delivery expressSurcharge/standardSurcharge/scheduledSurcharge (default 0, vehicle checkout only)
+ *                   are validated; invalid values return 400.
  *               deliveryOrigin:
  *                 type: object
  *                 properties:
@@ -432,7 +444,17 @@ router.put('/delivery', async (req, res) => {
 
   try {
     const { SiteSetting } = req.dbModels;
-    const deliveryConfig = normalizeDeliveryConfig(req.body?.deliveryConfig || req.body);
+    const input = req.body?.deliveryConfig || req.body;
+    const existing = await SiteSetting.findOne({ key: DELIVERY_SETTING_KEY }).select('deliveryConfig').lean();
+    const validationError = validateDeliveryConfigInput(input || {}, existing?.deliveryConfig);
+    if (validationError) {
+      return res.status(400).json({ success: false, message: validationError });
+    }
+    // Clients that predate business-day delivery omit the new keys; keep the stored values instead of resetting them.
+    const preserved = Object.fromEntries(NEW_DELIVERY_CONFIG_KEYS
+      .filter((key) => input?.[key] === undefined && existing?.deliveryConfig?.[key] !== undefined)
+      .map((key) => [key, existing.deliveryConfig[key]]));
+    const deliveryConfig = normalizeDeliveryConfig({ ...preserved, ...input });
     const originAddress = String(req.body?.deliveryOrigin?.address || '').trim();
     const setting = await SiteSetting.findOneAndUpdate(
       { key: DELIVERY_SETTING_KEY },
@@ -450,6 +472,7 @@ router.put('/delivery', async (req, res) => {
     return res.status(200).json({
       success: true,
       deliveryConfig,
+      effectiveBusinessTimeZone: effectiveTimeZone(deliveryConfig, req.dbName),
       deliveryOrigin: { address: originAddress },
       updatedAt: setting.updatedAt,
       message: 'Delivery settings updated.',

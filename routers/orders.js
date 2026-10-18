@@ -962,8 +962,9 @@ router.delete("/:id/company-responses/:responseId", requireAdmin, async (req, re
  *                 type: string
  *               deliveryMode:
  *                 type: string
- *                 enum: [SAME_DAY, NEXT_DAY, SCHEDULED]
- *                 default: SAME_DAY
+ *                 enum: [EXPRESS, STANDARD, SCHEDULED]
+ *                 default: STANDARD
+ *                 description: EXPRESS is 1-2 and STANDARD 2-5 business days (Mon-Fri, no holidays) by default. SAME_DAY/NEXT_DAY are retired for new orders.
  *               deliveryDistanceKm:
  *                 type: number
  *               deliveryFee:
@@ -1315,6 +1316,8 @@ router.post(`/`, async (req, res) => {
       if (ord.dispatchStatus === "scheduled") {
         const scheduleLabel = ord.scheduledFor
           ? ` for ${new Date(ord.scheduledFor).toLocaleString()}`
+          : ord.deliveryWindowStart && ord.deliveryWindowEnd
+          ? ` between ${new Date(ord.deliveryWindowStart).toLocaleString()} and ${new Date(ord.deliveryWindowEnd).toLocaleString()}`
           : "";
         await sendPushToUser({
           User,
@@ -1429,7 +1432,7 @@ router.post(`/`, async (req, res) => {
  *                 type: string
  *               deliveryMode:
  *                 type: string
- *                 enum: [SAME_DAY, NEXT_DAY, SCHEDULED]
+ *                 enum: [EXPRESS, STANDARD, SAME_DAY, NEXT_DAY, SCHEDULED]
  *               deliveryDistanceKm:
  *                 type: number
  *               deliveryFee:
@@ -1558,8 +1561,11 @@ router.put("/:id", async (req, res) => {
   const hasDeliveryUpdate = hasDeliveryPlanChange(req.body, existingOrder);
 
   if (hasDeliveryUpdate) {
+    const patchSetting = await req.dbModels.SiteSetting.findOne({ key: "delivery-config" })
+      .select("deliveryConfig")
+      .lean();
     const deliveryPlanResult = resolveDeliveryPlan(req.body, {
-      currentOrder: existingOrder, databaseName: req.dbName,
+      currentOrder: existingOrder, databaseName: req.dbName, deliveryConfig: patchSetting?.deliveryConfig,
     });
     if (!deliveryPlanResult.ok) {
       return res.status(400).json({

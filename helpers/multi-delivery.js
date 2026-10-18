@@ -3,10 +3,13 @@ const { conflict, inventoryEnabled, normalizeLines, eligibleStores, reserve, rel
 const { getCoordinates } = require("./fulfillment-routing");
 const { getDrivingDistanceKm } = require("./google-distance");
 const { VEHICLE_CONFIG_KEY, cargoFor, suitableVehicles, vehicleFee, cents } = require("./vehicle-delivery");
-const { resolveDeliveryPlan } = require("./delivery");
+const {
+  resolveDeliveryPlan, normalizeDeliveryConfig, speedSurchargeFor, getBusinessDeliveryPolicy, BUSINESS_DELIVERY_MODES, LEGACY_DELIVERY_MODES,
+} = require("./delivery");
 const { sendPushToUser } = require("./push-notify");
 const fx = require("./exchange-rate");
 
+const DELIVERY_CONFIG_KEY = "delivery-config";
 const QUOTE_MS = 10 * 60 * 1000;
 const HOLD_MS = 15 * 60 * 1000;
 const id = (value) => String(value?._id || value || "");
@@ -30,17 +33,36 @@ function addressInput(body) {
   return result;
 }
 
-function checkoutDeliveryPlan(body, databaseName, now = new Date()) {
-  const deliveryMode = body.deliveryMode === undefined ? "SAME_DAY" : body.deliveryMode;
+// The policy that produced a quoted window; any difference at prepare time means the customer reviewed stale terms.
+function deliveryPolicyFor(deliveryMode, deliveryConfig, databaseName) {
+  if (BUSINESS_DELIVERY_MODES.includes(deliveryMode)) return getBusinessDeliveryPolicy(deliveryMode, deliveryConfig, databaseName);
+  if (deliveryMode === "SCHEDULED") return { scheduledWindowHours: normalizeDeliveryConfig(deliveryConfig).scheduledWindowHours };
+  return null;
+}
+
+function checkoutDeliveryPlan(body, databaseName, now = new Date(), deliveryConfig) {
+  const deliveryMode = body.deliveryMode === undefined ? "STANDARD" : body.deliveryMode;
   const scheduledFor = body.scheduledFor ?? null;
   if (deliveryMode !== "SCHEDULED" && scheduledFor !== null) {
     throw conflict("scheduledFor is only allowed for SCHEDULED delivery.");
   }
   const result = resolveDeliveryPlan({ deliveryMode, scheduledFor }, {
-    now, databaseName, currentOrder: { deliveryFee: 0 },
+    now, databaseName, deliveryConfig, currentOrder: { deliveryFee: 0 },
   });
   if (!result.ok) throw conflict(result.error);
-  return { deliveryMode: result.value.deliveryMode, scheduledFor: result.value.scheduledFor };
+  const plan = result.value;
+  return {
+    deliveryMode: plan.deliveryMode,
+    scheduledFor: plan.scheduledFor,
+    deliveryWindowStart: plan.deliveryWindowStart,
+    deliveryWindowEnd: plan.deliveryWindowEnd,
+    deliverySnapshot: {
+      version: 1, quotedAt: now, deliveryMode: plan.deliveryMode, scheduledFor: plan.scheduledFor,
+      windowStart: plan.deliveryWindowStart, windowEnd: plan.deliveryWindowEnd,
+      policy: deliveryPolicyFor(plan.deliveryMode, deliveryConfig, databaseName),
+      speedSurcharge: speedSurchargeFor(plan.deliveryMode, deliveryConfig),
+    },
+  };
 }
 
 function normalizeAllocations(cart, allocations, addresses) {
@@ -143,7 +165,8 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
   if (/usa/i.test(databaseName) && String(body.paymentCurrency).toLowerCase() === "etb") {
     return require("./international-shipping").createQuote(models, user, databaseName, body, { geocode, distance });
   }
-  const deliveryPlan = checkoutDeliveryPlan(body, databaseName);
+  const deliveryConfig = (await models.SiteSetting.findOne({ key: DELIVERY_CONFIG_KEY }).lean())?.deliveryConfig;
+  const deliveryPlan = checkoutDeliveryPlan(body, databaseName, new Date(), deliveryConfig);
   const nativeCurrency = /usa/i.test(databaseName) ? "usd" : "etb";
   const currency = String(body.paymentCurrency || nativeCurrency).toLowerCase();
   if (![nativeCurrency, ...(fx.isEthiopia(databaseName) ? ["usd"] : [])].includes(currency)) throw conflict("Choose ETB or an enabled USD payment for the selected region.");
@@ -178,7 +201,12 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
     if (!types.length) throw conflict(`No configured vehicle can carry the delivery from ${delivery.store.name}. Contact Admin.`);
     try { delivery.distanceKm = await distance(`${pickup[1]},${pickup[0]}`, `${dropoff[1]},${dropoff[0]}`, { throwOnError: true }); }
     catch (error) { throw conflict(error.message); }
-    delivery.vehicleOptions = types.map((type) => ({ type, fee: vehicleFee(delivery.distanceKm, type, config, databaseName) }));
+    // fee = vehicleFee + speedSurcharge, so selection and totals need no further changes.
+    delivery.speedSurcharge = deliveryPlan.deliverySnapshot.speedSurcharge;
+    delivery.vehicleOptions = types.map((type) => {
+      const base = vehicleFee(delivery.distanceKm, type, config, databaseName);
+      return { type, fee: (cents(base) + cents(delivery.speedSurcharge)) / 100, vehicleFee: base, speedSurcharge: delivery.speedSurcharge };
+    });
     delivery.requiresVehicleSelection = delivery.cargo.measurementsAvailable === false;
     delivery.vehicle = delivery.requiresVehicleSelection ? "" : types[0];
     delivery.deliveryFee = delivery.requiresVehicleSelection
@@ -298,6 +326,20 @@ async function prepare(models, groupId, user, databaseName, body) {
       if (!account) throw conflict(`Choose an active ${group.currency.toUpperCase()} bank account.`);
       group.bankAccount = { bankName: account.bankName, accountHolderName: account.accountHolderName, accountNumber: account.accountNumber, bankCode: account.bankCode, currency: group.currency };
     }
+    const deliveryConfig = (await models.SiteSetting.findOne({ key: DELIVERY_CONFIG_KEY }).session(session).lean())?.deliveryConfig;
+    // Writing the settings document makes a concurrent admin edit conflict with this transaction.
+    await models.SiteSetting.updateOne({ key: DELIVERY_CONFIG_KEY }, { $inc: { reservationVersion: 1 } }, { session });
+    const snapshot = group.deliverySnapshot;
+    if (snapshot) {
+      const current = { policy: deliveryPolicyFor(snapshot.deliveryMode, deliveryConfig, databaseName),
+        speedSurcharge: speedSurchargeFor(snapshot.deliveryMode, deliveryConfig) };
+      if (JSON.stringify(current.policy) !== JSON.stringify(snapshot.policy) || current.speedSurcharge !== snapshot.speedSurcharge) {
+        throw conflict("Delivery timing or fees changed after quoting. Request a new quote.");
+      }
+      if (BUSINESS_DELIVERY_MODES.includes(snapshot.deliveryMode) && new Date(snapshot.windowStart) <= new Date()) {
+        throw conflict("The quoted delivery window is no longer available. Request a new quote.");
+      }
+    }
     group.paymentMethod = body.method;
     group.status = "awaiting_payment";
     group.expiresAt = new Date(Date.now() + HOLD_MS);
@@ -344,11 +386,19 @@ async function prepare(models, groupId, user, databaseName, body) {
         items.push(item._id);
       }
       const address = delivery.address;
+      // Business-day windows are rebuilt from the quote time so the reviewed window is what is persisted.
+      const frozenWindow = snapshot && BUSINESS_DELIVERY_MODES.includes(group.deliveryMode);
       const deliveryPlan = resolveDeliveryPlan({
         deliveryMode: group.deliveryMode || "SAME_DAY",
         scheduledFor: group.scheduledFor || null,
-      }, { now: planNow, databaseName, currentOrder: { deliveryFee: delivery.deliveryFee } });
+      }, { now: frozenWindow ? new Date(snapshot.quotedAt) : planNow, databaseName, deliveryConfig,
+        allowLegacyModes: LEGACY_DELIVERY_MODES.includes(group.deliveryMode || "SAME_DAY"),
+        currentOrder: { deliveryFee: delivery.deliveryFee } });
       if (!deliveryPlan.ok) throw conflict(deliveryPlan.error);
+      if (frozenWindow && (deliveryPlan.value.deliveryWindowStart.getTime() !== new Date(snapshot.windowStart).getTime() ||
+          deliveryPlan.value.deliveryWindowEnd.getTime() !== new Date(snapshot.windowEnd).getTime())) {
+        throw conflict("The quoted delivery window changed. Request a new quote.");
+      }
       const order = new models.Order({ orderItems: items, user, customer: user,
         shippingAddress1: address.address1, shippingAddress2: address.address2, city: address.city,
         zip: address.zip, country: address.country, phone: address.phone, customerLocation: address.location,

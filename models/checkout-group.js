@@ -9,7 +9,11 @@ const checkoutGroupSchema = new mongoose.Schema({
   itemsSubtotal: { type: Number, required: true },
   deliveryFee: { type: Number, required: true },
   totalPrice: { type: Number, required: true },
-  deliveryMode: { type: String, enum: ["SAME_DAY", "NEXT_DAY", "SCHEDULED"] },
+  deliveryMode: { type: String, enum: ["EXPRESS", "STANDARD", "SAME_DAY", "NEXT_DAY", "SCHEDULED"] },
+  // Quote-time delivery window, policy and speed surcharge reviewed by the customer; enforced again at prepare.
+  deliverySnapshot: mongoose.Schema.Types.Mixed,
+  deliveryWindowStart: { type: Date, default: null },
+  deliveryWindowEnd: { type: Date, default: null },
   scheduledFor: { type: Date, default: null },
   currency: { type: String, required: true },
   exchangeRate: mongoose.Schema.Types.Mixed,

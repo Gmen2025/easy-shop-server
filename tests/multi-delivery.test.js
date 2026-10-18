@@ -563,8 +563,17 @@ test("quote geocodes destinations on the server, splits nearest inventory, price
 
 test("delivery speed is validated, quoted, and persisted on each reserved order", async () => {
   const scheduledFor = new Date(Date.now() + 48 * 60 * 60 * 1000);
-  assert.deepEqual(checkoutDeliveryPlan({ deliveryMode: "NEXT_DAY", scheduledFor: null }, "E_Shopping"),
-    { deliveryMode: "NEXT_DAY", scheduledFor: null });
+  const standard = checkoutDeliveryPlan({ scheduledFor: null }, "E_Shopping", new Date("2026-10-16T16:00:00Z"));
+  assert.equal(standard.deliveryMode, "STANDARD");
+  assert.equal(standard.scheduledFor, null);
+  assert.equal(standard.deliveryWindowStart.toISOString(), "2026-10-20T06:00:00.000Z");
+  assert.equal(standard.deliveryWindowEnd.toISOString(), "2026-10-23T15:00:00.000Z");
+  assert.equal(standard.deliverySnapshot.windowStart.toISOString(), "2026-10-20T06:00:00.000Z");
+  assert.equal(standard.deliverySnapshot.windowEnd.toISOString(), "2026-10-23T15:00:00.000Z");
+  assert.deepEqual(standard.deliverySnapshot.policy, { minBusinessDays: 2, maxBusinessDays: 5, businessDayStartHour: 9,
+    businessDayEndHour: 18, businessTimeZone: "Africa/Addis_Ababa" });
+  assert.equal(standard.deliverySnapshot.speedSurcharge, 0);
+  assert.throws(() => checkoutDeliveryPlan({ deliveryMode: "NEXT_DAY" }, "E_Shopping"), /EXPRESS or STANDARD/);
   assert.throws(() => checkoutDeliveryPlan({ deliveryMode: "SCHEDULED" }, "E_Shopping"),
     /scheduledFor is required/);
   assert.throws(() => checkoutDeliveryPlan({ deliveryMode: "SAME_DAY", scheduledFor }, "E_Shopping"),
@@ -588,7 +597,7 @@ test("delivery speed is validated, quoted, and persisted on each reserved order"
   const selections = quote.deliveries.map((delivery) => ({ key: delivery.key, vehicle: delivery.vehicle }));
 
   await assert.rejects(prepare(models, group._id, userId, "E_ShopUSA", {
-    ...body, selections, deliveryMode: "NEXT_DAY", scheduledFor: null,
+    ...body, selections, deliveryMode: "EXPRESS", scheduledFor: null,
   }), /Delivery speed changed after quoting/);
   await prepare(models, group._id, userId, "E_ShopUSA", {
     ...body, selections, deliveryMode: "SCHEDULED", scheduledFor: scheduledFor.toISOString(),
@@ -602,6 +611,63 @@ test("delivery speed is validated, quoted, and persisted on each reserved order"
     assert.equal(order.deliveryFee, quote.deliveries
       .find((delivery) => delivery.vehicle === order.requiredVehicle)
       .vehicleOptions.find((option) => option.type === order.requiredVehicle).fee);
+  }
+});
+
+test("EXPRESS quotes snapshot the window and surcharge; prepare keeps them or rejects changed policy", async () => {
+  const quoteExpress = async (deliveryConfig) => {
+    const data = fixture();
+    const { models, stocks, group } = data;
+    const stores = [1, 2].map((number) => ({ _id: id(number), name: "Pickup", location: address.location, approvalStatus: "approved" }));
+    models.Store.find = () => query(stores);
+    models.StoreInventory.find = () => query(stocks);
+    models.CheckoutGroup.create = async (fields) => { Object.assign(group, fields); return group; };
+    const current = { deliveryConfig };
+    const findSetting = models.SiteSetting.findOne;
+    models.SiteSetting.findOne = (filter) => filter.key === "delivery-config" ? query(current) : findSetting(filter);
+    const quote = await createQuote(models, userId, "E_Shopping", {
+      cart: [line], addresses: [{ ...address, country: "Ethiopia" }], deliveryMode: "EXPRESS",
+      allocations: [{ key: line.key, addressId: address.id, quantity: line.quantity }],
+    }, { geocode: async () => address.location, distance: async () => 1 });
+    return { ...data, quote, current };
+  };
+  const { quote, models, group, body, orders, current } = await quoteExpress({ expressSurcharge: 1.25 });
+  assert.equal(quote.deliveryMode, "EXPRESS");
+  assert.equal(quote.deliverySnapshot.speedSurcharge, 1.25);
+  assert.equal(quote.deliverySnapshot.policy.businessTimeZone, "Africa/Addis_Ababa");
+  assert.ok(quote.deliverySnapshot.windowStart > new Date());
+  for (const delivery of quote.deliveries) {
+    assert.equal(delivery.speedSurcharge, 1.25);
+    for (const option of delivery.vehicleOptions) {
+      assert.equal(option.fee, Math.round((option.vehicleFee + 1.25) * 100) / 100);
+      assert.equal(option.speedSurcharge, 1.25);
+    }
+  }
+  const selections = quote.deliveries.map((delivery) => ({ key: delivery.key, vehicle: delivery.vehicle }));
+
+  current.deliveryConfig = { expressSurcharge: 2 };
+  await assert.rejects(prepare(models, group._id, userId, "E_Shopping", { ...body, method: "cash", selections }), /timing or fees changed/);
+  current.deliveryConfig = { expressSurcharge: 1.25, expressMaxBusinessDays: 3 };
+  await assert.rejects(prepare(models, group._id, userId, "E_Shopping", { ...body, method: "cash", selections }), /timing or fees changed/);
+  current.deliveryConfig = { expressSurcharge: 1.25 };
+  await prepare(models, group._id, userId, "E_Shopping", { ...body, method: "cash", selections });
+  assert.ok(orders.length > 0);
+  for (const order of orders) {
+    assert.equal(order.deliveryMode, "EXPRESS");
+    assert.equal(order.dispatchStatus, "scheduled");
+    assert.equal(order.deliveryWindowStart.getTime(), quote.deliverySnapshot.windowStart.getTime());
+    assert.equal(order.deliveryWindowEnd.getTime(), quote.deliverySnapshot.windowEnd.getTime());
+  }
+});
+
+test("in-flight legacy SAME_DAY checkout groups still prepare with their original immediate timing", async () => {
+  const { models, group, body, orders } = fixture();
+  const selections = group.deliveries.map((delivery) => ({ key: delivery.key, vehicle: "car" }));
+  await prepare(models, group._id, userId, "E_ShopUSA", { ...body, selections });
+  assert.ok(orders.length > 0);
+  for (const order of orders) {
+    assert.equal(order.deliveryMode, "SAME_DAY");
+    assert.equal(order.dispatchStatus, "pending_assignment");
   }
 });
 

@@ -334,11 +334,17 @@ Authenticated APIs (all paths below are relative to `/api/v1/stores/`):
   whole `quantity`, quoted `price`, optional `storefrontId`. `addresses` contain
   unique local `id` and address fields. `allocations` contain `key`, `addressId`,
   whole `quantity`; every cart unit must be allocated exactly once.
-  Optional `deliveryMode` accepts `SAME_DAY`, `NEXT_DAY` or `SCHEDULED` and
-  defaults to `SAME_DAY` for older clients. `scheduledFor` is required and must
-  be a future date/time for `SCHEDULED`; it is rejected for other modes. The
-  quote stores the selected delivery plan. Vehicle fees remain based on the
-  selected vehicle and route; the delivery mode sets dispatch timing/priority.
+  Optional `deliveryMode` accepts `EXPRESS`, `STANDARD` or `SCHEDULED` and
+  defaults to `STANDARD`. `SAME_DAY`/`NEXT_DAY` are rejected for new quotes (see
+  "Delivery speeds" below). `scheduledFor` is required and must be a future
+  date/time for `SCHEDULED`; it is rejected for other modes. The quote stores
+  the delivery plan plus `deliveryWindowStart`/`deliveryWindowEnd` and a
+  `deliverySnapshot` (`quotedAt`, window, `policy`, `speedSurcharge`).
+  Vehicle fees remain based on the selected vehicle and route; each
+  `vehicleOptions[]` entry is `{ type, fee, vehicleFee, speedSurcharge }` where
+  `fee = vehicleFee + speedSurcharge` (surcharge defaults to 0). Reserving
+  (`prepare`) persists the quoted window on every child order and fails with a
+  conflict if the delivery policy or surcharge changed since the quote.
   Limits are 50 cart lines, 10 destinations, 100 allocations and 20 deliveries.
   This saves a ten-minute authoritative quote, without reserving stock.
   Stock is allocated nearest-first within price/scope constraints, using one
@@ -747,6 +753,51 @@ note is required. Zero sets payment to `waived`; a positive fare enables the
 existing regional payment methods. The booking remains `terminated` and the
 review records the Admin and timestamp. Reviews cannot be overwritten through
 this endpoint. Deploy the server update before the matching mobile UI.
+
+### Delivery speeds
+
+- `EXPRESS`: 1-2 business days; `STANDARD`: 2-5 business days (default);
+  `SCHEDULED`: unchanged. Business days are Monday-Friday with no holiday
+  calendar. Counting starts on the next business day after the order date
+  (weekend orders count from Monday) in the business time zone. The window
+  opens at `businessDayStartHour` (9) of the earliest day and closes at
+  `businessDayEndHour` (18) of the latest day. Time zone defaults to
+  `Africa/Addis_Ababa` (`America/New_York` for USA databases) unless an admin
+  sets `businessTimeZone`; there was no earlier regional time-zone convention.
+- New orders get `dispatchStatus: scheduled` (priority 80 Express, 55
+  Standard), so dispatch only routes them once `deliveryWindowStart` is due.
+- Historical `SAME_DAY`/`NEXT_DAY` orders keep their mode and timing (the
+  Order model default stays `SAME_DAY` so old documents are not relabelled).
+  New plans reject those values unless the order already has that mode.
+  Quotes created before this release still prepare with their old timing.
+- `GET/PUT /api/v1/settings/delivery` `deliveryConfig` adds
+  `expressMinBusinessDays`=1, `expressMaxBusinessDays`=2,
+  `standardMinBusinessDays`=2, `standardMaxBusinessDays`=5 (whole numbers 1-30,
+  max >= min), `businessDayStartHour`=9, `businessDayEndHour`=18,
+  `businessTimeZone`="" (region default; GET also returns
+  `effectiveBusinessTimeZone`), and `expressSurcharge`, `standardSurcharge`,
+  `scheduledSurcharge` (default 0). Invalid PUT values return 400. A PUT that
+  omits these keys keeps the stored values.
+- Legacy single-order checkout (`POST /orders`) prices EXPRESS with the
+  existing `sameDayBase`/`sameDayPremium`/`sameDayPerKm` fields and STANDARD
+  with `nextDayBase`/`nextDayPerKm`; initial fees are unchanged.
+- Vehicle multi-delivery does not charge the per-distance speed fees (vehicle
+  fees already cover distance); it only adds the flat per-delivery
+  `expressSurcharge`/`standardSurcharge`/`scheduledSurcharge`.
+
+- International US-to-Ethiopia quotes (`paymentCurrency:"etb"`) reuse the same
+  group fields (`deliveryMode`, `deliveryWindowStart/End`, `deliverySnapshot`
+  with the USA-region policy and surcharge, per-delivery `speedSurcharge`).
+  The window and surcharge apply to the US store-to-hub leg only. `international`
+  and each delivery's `quotedCargo` are unchanged; child orders created at
+  prepare carry `internationalShipping.shipmentId` and the quoted window.
+- Hour validation: `businessDayStartHour` is a whole hour 0-23 and
+  `businessDayEndHour` a whole hour 1-24, with end after start; the check also
+  uses stored values for fields omitted from a PUT.
+- Deployment: deploy this backend first, then the upgraded mobile app. New
+  orders and quotes reject `SAME_DAY`/`NEXT_DAY` (400/conflict), so older mobile
+  builds that still send them cannot place new orders until updated. Existing
+  orders and in-flight quotes are unaffected.
 
 ### Checkout driving-distance configuration
 

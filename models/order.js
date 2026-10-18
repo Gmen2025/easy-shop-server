@@ -127,7 +127,9 @@ const orderSchema = new mongoose.Schema({
     },
     deliveryMode: {
         type: String,
-        enum: ['SAME_DAY', 'NEXT_DAY', 'SCHEDULED'],
+        // SAME_DAY/NEXT_DAY are retired for new orders but stay valid for historical records.
+        // The SAME_DAY default is kept so old documents without a mode keep their original timing.
+        enum: ['EXPRESS', 'STANDARD', 'SAME_DAY', 'NEXT_DAY', 'SCHEDULED'],
         default: 'SAME_DAY'
     },
     deliveryFee: {

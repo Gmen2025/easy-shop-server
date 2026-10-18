@@ -851,7 +851,7 @@ test("checkout persists the company pickup and GeoJSON coordinates instead of an
       storeId: String(partnerId),
       customerLocation: { latitude: 0, longitude: 0 },
       orderItems: [{ product: "product", quantity: 2 }],
-      status: "1", deliveryMode: "SAME_DAY",
+      status: "1", deliveryMode: "EXPRESS",
     },
     dbModels: {
       Order, OrderItem, Store,
@@ -883,6 +883,7 @@ test("checkout persists the company pickup and GeoJSON coordinates instead of an
   assert.match(res.body.message, /waiting for an eligible pickup store/);
   assert.equal(res.body.assignmentPending, true);
   assert.equal(savedOrder.store, null);
-  assert.equal(savedOrder.dispatchStatus, "pending_assignment");
+  // EXPRESS is a future business-day window, so it waits as scheduled instead of routing immediately.
+  assert.equal(savedOrder.dispatchStatus, "scheduled");
   assert.equal(savedItemCount, 2);
 });

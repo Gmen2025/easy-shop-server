@@ -5,6 +5,9 @@ const {
   getDeliverySchedule,
   hasDeliveryPlanChange,
   resolveDeliveryPlan,
+  normalizeDeliveryConfig,
+  validateDeliveryConfigInput,
+  speedSurchargeFor,
 } = require("../helpers/delivery");
 const { buildDriverOrderSummary } = require("../helpers/driver-view");
 const { buildStoreOrderSummary } = require("../helpers/store-order-view");
@@ -30,7 +33,7 @@ test("USA fees apply unchanged rates per mile for every delivery mode without ch
     scheduledBase: 0, scheduledPerKm: 2,
     scheduledPeakSurcharge: 0, scheduledOffPeakDiscount: 0,
   };
-  for (const deliveryMode of ["SAME_DAY", "NEXT_DAY", "SCHEDULED"]) {
+  for (const deliveryMode of ["EXPRESS", "STANDARD", "SCHEDULED"]) {
     for (const databaseName of ["E_ShopUSA", "E_ShoppingUSA", "E_Shopping", "E_Shopping_2"]) {
       const result = resolveDeliveryPlan({
         deliveryMode, deliveryDistanceKm: 10, scheduledFor,
@@ -45,16 +48,16 @@ test("USA fees apply unchanged rates per mile for every delivery mode without ch
 test("USA base fees, premiums and saved order fees are not converted", () => {
   const options = { now, databaseName: "E_ShopUSA" };
   assert.equal(resolveDeliveryPlan({
-    deliveryMode: "SAME_DAY", deliveryDistanceKm: 1.609344,
+    deliveryMode: "EXPRESS", deliveryDistanceKm: 1.609344,
   }, options).value.deliveryFee, 14);
   assert.equal(resolveDeliveryPlan({
-    deliveryMode: "SAME_DAY", deliveryDistanceKm: 10,
+    deliveryMode: "EXPRESS", deliveryDistanceKm: 10,
   }, options).value.deliveryFee, 19.21);
   assert.equal(resolveDeliveryPlan({
-    deliveryMode: "NEXT_DAY", deliveryDistanceKm: 10,
+    deliveryMode: "STANDARD", deliveryDistanceKm: 10,
   }, options).value.deliveryFee, 7.73);
   assert.equal(resolveDeliveryPlan({
-    deliveryMode: "NEXT_DAY", deliveryDistanceKm: 10,
+    deliveryMode: "STANDARD", deliveryDistanceKm: 10,
   }, { ...options, currentOrder: { deliveryFee: 30 } }).value.deliveryFee, 30);
   for (const [hour, expected] of [[18, 11.16], [12, 9.16], [8, 9.66]]) {
     assert.equal(resolveDeliveryPlan({
@@ -104,13 +107,99 @@ test("accepts matching date aliases and rejects invalid delivery modes", () => {
   assert.equal(resolveDeliveryPlan({ deliveryMode: "unknown" }, { now }).ok, false);
 });
 
-test("same-day and next-day plans remain unchanged and clear scheduled dates", () => {
-  for (const [deliveryMode, fee] of [["SAME_DAY", 13], ["NEXT_DAY", 4]]) {
-    const result = resolveDeliveryPlan({ deliveryMode, scheduledDeliveryDate: null }, { now });
+test("legacy same-day and next-day plans keep their original timing and fees for historical orders", () => {
+  for (const [deliveryMode, fee, start, end] of [
+    ["SAME_DAY", 13, now, new Date("2026-10-02T16:00:00Z")],
+    ["NEXT_DAY", 4, null, null],
+  ]) {
+    const result = resolveDeliveryPlan({ deliveryMode, scheduledDeliveryDate: null }, {
+      now, currentOrder: { deliveryMode },
+    });
     assert.equal(result.ok, true);
+    assert.equal(result.value.deliveryMode, deliveryMode);
     assert.equal(result.value.deliveryFee, fee);
     assert.equal(result.value.scheduledFor, null);
+    if (start) {
+      assert.deepEqual([result.value.deliveryWindowStart, result.value.deliveryWindowEnd], [start, end]);
+      assert.equal(result.value.dispatchStatus, "pending_assignment");
+    } else {
+      assert.equal(result.value.dispatchStatus, "scheduled");
+      assert.equal(result.value.deliveryWindowEnd - result.value.deliveryWindowStart, 8 * 3_600_000);
+    }
   }
+  assert.equal(resolveDeliveryPlan({ deliveryMode: "SAME_DAY" }, { now, allowLegacyModes: true }).ok, true);
+});
+
+test("new plans reject retired modes unless the order already has that mode, and default to STANDARD", () => {
+  for (const deliveryMode of ["SAME_DAY", "NEXT_DAY"]) {
+    const result = resolveDeliveryPlan({ deliveryMode }, { now });
+    assert.equal(result.ok, false);
+    assert.match(result.error, /EXPRESS or STANDARD/);
+    assert.equal(resolveDeliveryPlan({ deliveryMode }, { now, currentOrder: { deliveryMode: "SCHEDULED" } }).ok, false);
+    assert.equal(resolveDeliveryPlan({ deliveryMode: "EXPRESS" }, { now, currentOrder: { deliveryMode } }).value.deliveryMode, "EXPRESS");
+  }
+  assert.equal(resolveDeliveryPlan({}, { now }).value.deliveryMode, "STANDARD");
+});
+
+test("legacy checkout prices EXPRESS with sameDay* rates and STANDARD with nextDay* rates", () => {
+  const config = { sameDayBase: 1, sameDayPremium: 2, sameDayPerKm: 3, nextDayBase: 5, nextDayPerKm: 7 };
+  const options = { now, deliveryConfig: config, databaseName: "E_Shopping" };
+  assert.equal(resolveDeliveryPlan({ deliveryMode: "EXPRESS", deliveryDistanceKm: 2 }, options).value.deliveryFee, 9);
+  assert.equal(resolveDeliveryPlan({ deliveryMode: "STANDARD", deliveryDistanceKm: 2 }, options).value.deliveryFee, 19);
+  const defaults = normalizeDeliveryConfig();
+  assert.deepEqual([defaults.expressMinBusinessDays, defaults.expressMaxBusinessDays,
+    defaults.standardMinBusinessDays, defaults.standardMaxBusinessDays], [1, 2, 2, 5]);
+  assert.deepEqual([defaults.expressSurcharge, defaults.standardSurcharge, defaults.scheduledSurcharge], [0, 0, 0]);
+});
+
+test("EXPRESS and STANDARD windows count Monday-Friday business days in the regional zone", () => {
+  const plan = (mode, iso, databaseName = "E_Shopping", deliveryConfig) =>
+    resolveDeliveryPlan({ deliveryMode: mode }, { now: new Date(iso), databaseName, deliveryConfig }).value;
+  // Fri 2026-10-16 19:00 Addis (UTC+3): Express = Mon 9:00 to Tue 18:00 local.
+  let result = plan("EXPRESS", "2026-10-16T16:00:00Z");
+  assert.equal(result.deliveryWindowStart.toISOString(), "2026-10-19T06:00:00.000Z");
+  assert.equal(result.deliveryWindowEnd.toISOString(), "2026-10-20T15:00:00.000Z");
+  assert.equal(result.dispatchStatus, "scheduled");
+  assert.equal(result.dispatchPriority, 80);
+  assert.equal(result.deliveryPolicy.businessTimeZone, "Africa/Addis_Ababa");
+  // Saturday and Sunday orders both start counting from Monday.
+  for (const iso of ["2026-10-17T10:00:00Z", "2026-10-18T10:00:00Z"]) {
+    result = plan("STANDARD", iso);
+    assert.equal(result.deliveryWindowStart.toISOString(), "2026-10-20T06:00:00.000Z");
+    assert.equal(result.deliveryWindowEnd.toISOString(), "2026-10-23T15:00:00.000Z");
+    assert.equal(result.dispatchPriority, 55);
+  }
+  // Late evening UTC is already the next local day in Addis.
+  assert.equal(plan("EXPRESS", "2026-10-15T21:30:00Z").deliveryWindowStart.toISOString(), "2026-10-19T06:00:00.000Z");
+  // USA defaults to America/New_York (EDT, UTC-4) and honours the admin-configured zone and hours.
+  assert.equal(plan("EXPRESS", "2026-10-15T12:00:00Z", "E_ShopUSA").deliveryWindowStart.toISOString(), "2026-10-16T13:00:00.000Z");
+  result = plan("EXPRESS", "2026-10-15T12:00:00Z", "E_ShopUSA", {
+    businessTimeZone: "America/Los_Angeles", businessDayStartHour: 8, businessDayEndHour: 17,
+    expressMinBusinessDays: 2, expressMaxBusinessDays: 3,
+  });
+  assert.deepEqual([result.deliveryWindowStart.toISOString(), result.deliveryWindowEnd.toISOString()],
+    ["2026-10-19T15:00:00.000Z", "2026-10-21T00:00:00.000Z"]);
+  // The daylight-saving change (US fall back on 2026-11-01) is respected.
+  assert.equal(plan("EXPRESS", "2026-10-30T12:00:00Z", "E_ShopUSA").deliveryWindowStart.toISOString(), "2026-11-02T14:00:00.000Z");
+});
+
+test("delivery config validation rejects bad business-day windows, zones, hours and surcharges", () => {
+  assert.equal(validateDeliveryConfigInput({ expressMinBusinessDays: 1, expressMaxBusinessDays: 2, expressSurcharge: 0 }), null);
+  for (const input of [
+    { expressMinBusinessDays: 3 },
+    { standardMaxBusinessDays: 1 },
+    { standardMinBusinessDays: 1.5 },
+    { expressMinBusinessDays: 0 },
+    { expressSurcharge: -1 },
+    { standardSurcharge: "abc" },
+    { businessTimeZone: "Mars/Base" },
+    { businessDayStartHour: 18, businessDayEndHour: 9 },
+    { businessDayEndHour: 25 },
+  ]) assert.ok(validateDeliveryConfigInput(input), JSON.stringify(input));
+  assert.equal(validateDeliveryConfigInput({ businessTimeZone: "" }), null);
+  assert.equal(normalizeDeliveryConfig({ expressMinBusinessDays: 5 }).expressMinBusinessDays, 1);
+  assert.equal(speedSurchargeFor("EXPRESS", { expressSurcharge: 1.5 }), 1.5);
+  assert.equal(speedSurchargeFor("SAME_DAY", { expressSurcharge: 1.5 }), 0);
 });
 
 test("status updates echoing delivery metadata do not reset dispatch or reject elapsed schedules", () => {
@@ -125,7 +214,7 @@ test("status updates echoing delivery metadata do not reset dispatch or reject e
     scheduledDeliveryDate: "2026-10-06T12:00:00Z",
   }, scheduledOrder), true);
   assert.equal(hasDeliveryPlanChange({ scheduledFor: "invalid" }, scheduledOrder), true);
-  assert.equal(hasDeliveryPlanChange({ deliveryMode: "NEXT_DAY" }, scheduledOrder), true);
+  assert.equal(hasDeliveryPlanChange({ deliveryMode: "STANDARD" }, scheduledOrder), true);
 });
 
 test("driver summaries expose both schedule names without revealing private dropoff details", () => {
