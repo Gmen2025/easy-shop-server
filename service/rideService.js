@@ -6,6 +6,7 @@ const { cents, vehicleName } = require("../helpers/vehicle-delivery");
 const { sendPushToUser } = require("../helpers/push-notify");
 const { computeDrivingRoute } = require("../helpers/google-route");
 const { placeDetails } = require("../helpers/places");
+const { RIDE_PROFILE_PHOTO_MAX_AGE_MS, hasCurrentRideProfilePhoto } = require("../helpers/ride-driver-profile");
 
 const MAX_ROUTE_POINTS = 1500;
 const thinPath = (points) => {
@@ -40,9 +41,10 @@ async function rideRoutePath(models, ride, { compute = computeDrivingRoute } = {
 const id = (value) => String(value?._id || value || "");
 const available = (driver) => driver.approvalStatus === "approved" && !driver.isSuspended &&
   (driver.isAvailable === true || driver.availabilityStatus === true);
-const modeEnabled = (driver, mode) => driver.isCompanyOwned && available(driver) &&
+const modeEnabled = (driver, mode, now = new Date()) => driver.isCompanyOwned && available(driver) &&
   driver.serviceModes?.[mode] === true && ["car", "van"].includes(vehicleName(driver)) &&
-  Number.isSafeInteger(driver.passengerSeats) && driver.passengerSeats > 0;
+  Number.isSafeInteger(driver.passengerSeats) && driver.passengerSeats > 0 &&
+  hasCurrentRideProfilePhoto(driver, now);
 
 async function quoteRide(models, user, databaseName, body, { geocode = geocodeAddress, lookup = roadLeg, place = placeDetails } = {}) {
   const config = (await models.SiteSetting.findOne({ key: CONFIG_KEY }).lean())?.rideConfig;
@@ -90,7 +92,7 @@ async function requestRide(models, rideId, user, now = new Date()) {
 }
 
 async function driverPlan(models, driver, ride, { now = new Date(), lookup = roadLeg } = {}) {
-  if (!driver || !modeEnabled(driver, ride.mode) || driver.exclusiveDelivery || driver.passengerSeats < ride.seats ||
+  if (!driver || !modeEnabled(driver, ride.mode, now) || driver.exclusiveDelivery || driver.passengerSeats < ride.seats ||
       (ride.mode === "shared" && driver.sharedIntakeOpen === false)) return null;
   if (!driver.rideLocationUpdatedAt || now.getTime() - new Date(driver.rideLocationUpdatedAt).getTime() > 120000) return null;
   const location = driver.location;
@@ -118,6 +120,8 @@ async function dispatchRide(models, rideId, { now = new Date(), lookup = roadLeg
   const drivers = await models.Driver.find({
     isCompanyOwned: true, approvalStatus: "approved", isSuspended: { $ne: true },
     [`serviceModes.${ride.mode}`]: true, pendingRideOffer: null, exclusiveDelivery: null,
+    profilePhotoUrl: { $ne: "" },
+    rideProfilePhotoUpdatedAt: { $gt: new Date(now.getTime() - RIDE_PROFILE_PHOTO_MAX_AGE_MS) },
     _id: { $nin: ride.attemptedDrivers || [] },
     $or: [{ isAvailable: true }, { availabilityStatus: true }],
   }).lean();
@@ -131,7 +135,7 @@ async function dispatchRide(models, rideId, { now = new Date(), lookup = roadLeg
       const candidate = await models.Driver.findById(driver._id).session(session);
       const offeredAt = new Date(Math.max(now.getTime(), Date.now()));
       if (current?.status !== "waiting" || !candidate || candidate.pendingRideOffer ||
-          !modeEnabled(candidate, current.mode) || candidate.exclusiveDelivery ||
+          !modeEnabled(candidate, current.mode, offeredAt) || candidate.exclusiveDelivery ||
           id(candidate.activeRideTrip) !== id(driver.activeRideTrip) || candidate.passengerSeats !== driver.passengerSeats ||
           JSON.stringify(getCoordinates(candidate.location)) !== JSON.stringify(getCoordinates(driver.location)) ||
           offeredAt - new Date(candidate.rideLocationUpdatedAt) > 120000 ||
@@ -193,6 +197,11 @@ async function acceptRide(models, rideId, driverId, { now = new Date(), lookup =
   const ride = await models.Ride.findById(rideId).lean();
   const driver = await models.Driver.findById(driverId).lean();
   if (!ride || ride.status !== "offered" || id(ride.offerDriver) !== id(driverId) || ride.offerDeadline <= now) throw conflict("This three-minute offer is no longer available.");
+  if (!hasCurrentRideProfilePhoto(driver, now)) {
+    await releaseOffer(models, rideId, driverId);
+    await dispatchRide(models, rideId, { now, lookup });
+    throw conflict("Update your ride profile photo to continue accepting ride offers. Photos must be refreshed every 90 days.");
+  }
   const prepared = await driverPlan(models, driver, ride, { now, lookup });
   if (!prepared) {
     await releaseOffer(models, rideId, driverId);
@@ -203,7 +212,7 @@ async function acceptRide(models, rideId, driverId, { now = new Date(), lookup =
     const candidate = await models.Driver.findById(driverId).session(session);
     const at = new Date(Math.max(now.getTime(), Date.now()));
     if (!current || current.status !== "offered" || id(current.offerDriver) !== id(driverId) || current.offerDeadline <= at ||
-        id(candidate?.pendingRideOffer) !== id(current) || !modeEnabled(candidate, current.mode) ||
+        id(candidate?.pendingRideOffer) !== id(current) || !modeEnabled(candidate, current.mode, at) ||
         candidate.exclusiveDelivery || id(candidate.activeRideTrip) !== id(driver.activeRideTrip) ||
         JSON.stringify(getCoordinates(candidate.location)) !== JSON.stringify(getCoordinates(driver.location)) ||
         at - new Date(candidate.rideLocationUpdatedAt) > 120000 ||

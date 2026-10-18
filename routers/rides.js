@@ -6,6 +6,7 @@ const { getCoordinates } = require("../helpers/fulfillment-routing");
 const { vehicleName } = require("../helpers/vehicle-delivery");
 const service = require("../service/rideService");
 const places = require("../helpers/places");
+const { hasCurrentRideProfilePhoto, isCloudinaryPhotoUrl } = require("../helpers/ride-driver-profile");
 
 const endpoint = (action) => async (req, res) => {
   try {
@@ -95,8 +96,22 @@ router.get("/me/driver", endpoint(async (req, res) => {
   res.json({ driver: { _id: current._id, name: current.name, vehicleType: vehicleName(current),
     passengerSeats: current.passengerSeats, serviceModes: current.serviceModes,
     sharedIntakeOpen: current.sharedIntakeOpen, approvalStatus: current.approvalStatus,
-    isAvailable: current.isAvailable || current.availabilityStatus, isSuspended: current.isSuspended },
+    isAvailable: current.isAvailable || current.availabilityStatus, isSuspended: current.isSuspended,
+    profilePhotoUrl: current.profilePhotoUrl || "", rideProfilePhotoUpdatedAt: current.rideProfilePhotoUpdatedAt || null,
+    rideProfilePhotoRequired: !hasCurrentRideProfilePhoto(current) },
     trip: trip || null, offer: offer ? publicRide(offer) : null, riders, payments });
+}));
+router.put("/me/profile-photo", endpoint(async (req, res) => {
+  const driver = await selfDriver(req);
+  const profilePhotoUrl = typeof req.body.profilePhotoUrl === "string" ? req.body.profilePhotoUrl.trim() : "";
+  if (!isCloudinaryPhotoUrl(profilePhotoUrl)) {
+    throw conflict("Upload a valid HTTPS Cloudinary profile photo before saving.");
+  }
+  driver.profilePhotoUrl = profilePhotoUrl;
+  driver.rideProfilePhotoUpdatedAt = new Date();
+  await driver.save();
+  res.json({ profilePhotoUrl: driver.profilePhotoUrl, rideProfilePhotoUpdatedAt: driver.rideProfilePhotoUpdatedAt,
+    rideProfilePhotoRequired: false });
 }));
 async function expireDriverOffer(req, driver) {
   if (!driver.pendingRideOffer) return;
@@ -114,6 +129,10 @@ router.put("/me/modes", endpoint(async (req, res) => {
     modes[mode] = req.body[mode];
   }
   if (!Object.values(modes).some(Boolean)) throw conflict("Choose at least one service mode. Use your existing availability controls to go offline.");
+  if (((modes.regular && !driver.serviceModes?.regular) || (modes.shared && !driver.serviceModes?.shared)) &&
+      !hasCurrentRideProfilePhoto(driver)) {
+    throw conflict("Update your ride profile photo before enabling rides. Photos must be refreshed every 90 days.");
+  }
   if ((modes.regular || modes.shared) && (!driver.passengerSeats || !["car", "van"].includes(vehicleName(driver)))) {
     throw conflict("Admin must configure passenger seats on a car/van before you enable ride service.");
   }
@@ -143,6 +162,9 @@ router.post("/me/shared-intake", endpoint(async (req, res) => {
     const rides = await service.closeSharedIntake(req.dbModels, driver._id);
     for (const rideId of rides) await dispatch(req, rideId);
   } else {
+    if (!hasCurrentRideProfilePhoto(driver)) {
+      throw conflict("Update your ride profile photo before accepting shared rides. Photos must be refreshed every 90 days.");
+    }
     await req.dbModels.Driver.db.transaction(async (session) => {
       const current = await req.dbModels.Driver.findById(driver._id).session(session);
       if (!current.serviceModes?.shared) throw conflict("Enable shared rides first.");
@@ -227,9 +249,9 @@ router.get("/:id", endpoint(async (req, res) => {
   const current = await req.dbModels.Ride.findById(ride._id);
   const live = ["assigned", "onboard"].includes(current.status);
   const driver = current.driver && ["assigned", "onboard", "completed"].includes(current.status)
-    ? await req.dbModels.Driver.findById(current.driver).select("name phone vehicleType vehicle location rideLocationUpdatedAt").lean() : null;
+    ? await req.dbModels.Driver.findById(current.driver).select("name phone vehicleType vehicle profilePhotoUrl location rideLocationUpdatedAt").lean() : null;
   res.json({ ...publicRide(current), assignedDriver: driver ? { name: driver.name, phone: driver.phone,
-    vehicleType: vehicleName(driver), plateNumber: driver.vehicle?.plateNumber,
+    vehicleType: vehicleName(driver), plateNumber: driver.vehicle?.plateNumber, profilePhotoUrl: driver.profilePhotoUrl || "",
     ...(live ? { location: driver.location, locationUpdatedAt: driver.rideLocationUpdatedAt || null } : {}) } : null });
 }));
 router.get("/:id/route", endpoint(async (req, res) => {

@@ -24,6 +24,12 @@ const driverSchema = new mongoose.Schema({
     default: "",
     trim: true,
   },
+  profilePhotoUrl: {
+    type: String,
+    default: "",
+    trim: true,
+  },
+  rideProfilePhotoUpdatedAt: Date,
   address: {
     type: String,
     default: "",

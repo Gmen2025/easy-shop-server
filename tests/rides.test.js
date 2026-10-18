@@ -9,6 +9,7 @@ const stripeRouter = require("../routers/stripe");
 const router = require("../routers/rides");
 const { rideSchema } = require("../models/ride");
 const { rideTripSchema } = require("../models/ride-trip");
+const { RIDE_PROFILE_PHOTO_MAX_AGE_MS, hasCurrentRideProfilePhoto, isCloudinaryPhotoUrl } = require("../helpers/ride-driver-profile");
 const id = (number) => number.toString(16).padStart(24, "0");
 const userId = id(1), driverId = id(2);
 const point = (x) => ({ type: "Point", coordinates: [x / 1000, 0] });
@@ -111,7 +112,8 @@ function fixture() {
     { _id: id(11), key: "bank-account-info", bankAccounts: [{ _id: id(12), bankName: "Bank", accountNumber: "123", isActive: true }] });
   tables.Driver.push({ _id: driverId, user: id(3), name: "Driver", isCompanyOwned: true, approvalStatus: "approved",
     isAvailable: true, serviceModes: { delivery: true, regular: true, shared: true }, sharedIntakeOpen: true,
-    passengerSeats: 3, vehicleType: "car", location: point(0), rideLocationUpdatedAt: new Date() });
+    passengerSeats: 3, vehicleType: "car", profilePhotoUrl: "https://res.cloudinary.com/test/image/upload/v1/driver.jpg",
+    rideProfilePhotoUpdatedAt: new Date(), location: point(0), rideLocationUpdatedAt: new Date() });
   const booking = async (overrides = {}) => models.Ride.create({ user: userId, mode: "shared", currency: "usd", tariff: config,
     baseline: { distanceKm: 2, minutes: 4 }, estimate: 4, seats: 1,
     stops: [stop("pickup", 0), stop("dropoff", 2)], expiresAt: new Date(Date.now() + 600000), ...overrides });
@@ -136,6 +138,32 @@ test("ride schemas retain one payer and separate vehicle route; existing drivers
   assert.equal(trip.onboardSeats, 0);
   const { Driver } = require("../models/driver");
   assert.deepEqual(new Driver({}).serviceModes.toObject(), { delivery: true, regular: false, shared: false });
+});
+
+test("ride driver profile photos expire after 90 days and only HTTPS Cloudinary image URLs are accepted", () => {
+  const now = new Date("2026-10-18T12:00:00.000Z");
+  const fresh = { profilePhotoUrl: "https://res.cloudinary.com/demo/image/upload/v1/driver.jpg",
+    rideProfilePhotoUpdatedAt: new Date(now.getTime() - RIDE_PROFILE_PHOTO_MAX_AGE_MS + 1) };
+  assert.equal(hasCurrentRideProfilePhoto(fresh, now), true);
+  assert.equal(hasCurrentRideProfilePhoto({ ...fresh,
+    rideProfilePhotoUpdatedAt: new Date(now.getTime() - RIDE_PROFILE_PHOTO_MAX_AGE_MS) }, now), false);
+  assert.equal(hasCurrentRideProfilePhoto({ ...fresh, rideProfilePhotoUpdatedAt: new Date(now.getTime() + 1) }, now), false);
+  assert.equal(hasCurrentRideProfilePhoto({ ...fresh, profilePhotoUrl: "" }, now), false);
+  assert.equal(isCloudinaryPhotoUrl(fresh.profilePhotoUrl), true);
+  assert.equal(isCloudinaryPhotoUrl("http://res.cloudinary.com/demo/image/upload/a.jpg"), false);
+  assert.equal(isCloudinaryPhotoUrl("https://example.com/photo.jpg"), false);
+  assert.equal(isCloudinaryPhotoUrl("https://res.cloudinary.com/demo/video/upload/a.mp4"), false);
+});
+
+test("a pending ride offer cannot be accepted after its driver's profile photo expires", async () => {
+  const f = fixture(), ride = await f.booking();
+  await service.requestRide(f.models, ride._id, userId);
+  await service.dispatchRide(f.models, ride._id, { lookup });
+  assert.equal(f.tables.Ride[0].status, "offered");
+  f.tables.Driver[0].rideProfilePhotoUpdatedAt = new Date(Date.now() - RIDE_PROFILE_PHOTO_MAX_AGE_MS);
+  await assert.rejects(service.acceptRide(f.models, ride._id, driverId, { lookup }), /refreshed every 90 days/);
+  assert.equal(f.tables.Ride[0].status, "waiting");
+  assert.equal(f.tables.Driver[0].pendingRideOffer, null);
 });
 
 test("regular itineraries conserve passengers and peak seats; shared bookings have exactly two balanced stops", () => {
@@ -233,7 +261,8 @@ test("offers last exactly three minutes; reject/timeout reroutes without assigni
 test("ride eligibility excludes wrong modes/vehicles, stale GPS, delivery loads and ride offers", async () => {
   for (const change of [{ serviceModes: { delivery: true } }, { passengerSeats: 0 }, { vehicleType: "truck" },
     { isSuspended: true }, { approvalStatus: "pending" }, { isAvailable: false },
-    { rideLocationUpdatedAt: new Date(0) }, { sharedIntakeOpen: false }, { exclusiveDelivery: id(80) }]) {
+    { rideLocationUpdatedAt: new Date(0) }, { sharedIntakeOpen: false }, { exclusiveDelivery: id(80) },
+    { profilePhotoUrl: "" }, { rideProfilePhotoUpdatedAt: new Date(0) }]) {
     const f = fixture(), ride = await f.booking();
     Object.assign(f.tables.Driver[0], change);
     await service.requestRide(f.models, ride._id, userId);
@@ -507,6 +536,34 @@ test("ride APIs protect passenger privacy, Admin settings and driver-only action
   assert.equal((await invoke(f, "/config", "get", null)).code, 401);
 });
 
+test("ride profile photo endpoint refreshes the server timestamp and ride modes require a current photo", async () => {
+  const f = fixture(), driverAuth = { userId: id(3) };
+  f.tables.Driver[0].profilePhotoUrl = "";
+  f.tables.Driver[0].rideProfilePhotoUpdatedAt = undefined;
+  f.tables.Driver[0].serviceModes = { delivery: true, regular: false, shared: false };
+  const driverRoute = await invoke(f, "/me/driver", "get", driverAuth);
+  assert.equal(driverRoute.body.driver.rideProfilePhotoRequired, true);
+  assert.equal((await invoke(f, "/me/profile-photo", "put", { userId }, {}, {
+    profilePhotoUrl: "https://res.cloudinary.com/demo/image/upload/v1/driver.jpg",
+  })).code, 403);
+  assert.equal((await invoke(f, "/me/profile-photo", "put", driverAuth, {}, {
+    profilePhotoUrl: "https://example.com/driver.jpg",
+  })).code, 409);
+  assert.equal((await invoke(f, "/me/modes", "put", driverAuth, {}, {
+    delivery: true, regular: true, shared: false,
+  })).code, 409);
+  const updated = await invoke(f, "/me/profile-photo", "put", driverAuth, {}, {
+    profilePhotoUrl: "https://res.cloudinary.com/demo/image/upload/v1/driver.jpg",
+  });
+  assert.equal(updated.code, 200);
+  assert.equal(updated.body.rideProfilePhotoRequired, false);
+  assert.ok(updated.body.rideProfilePhotoUpdatedAt);
+  assert.equal((await invoke(f, "/me/modes", "put", driverAuth, {}, {
+    delivery: true, regular: true, shared: false,
+  })).code, 200);
+  assert.equal((await invoke(f, "/me/driver", "get", driverAuth)).body.driver.rideProfilePhotoRequired, false);
+});
+
 test("termination endpoints enforce driver ownership and Admin-only fare review", async () => {
   const f = fixture(), ride = await assigned(f);
   assert.equal((await invoke(f, "/me/rides/:id/terminate", "post", { userId },
@@ -589,6 +646,7 @@ test("only Admin verifies bank transfers and only the assigned driver/Admin can 
   assert.equal(f.tables.Ride[0].paymentStatus, "completed");
   const receipt = await invoke(f, "/:id", "get", { userId }, { id: ride._id });
   assert.equal(receipt.body.assignedDriver.name, "Driver");
+  assert.equal(receipt.body.assignedDriver.profilePhotoUrl, f.tables.Driver[0].profilePhotoUrl);
   assert.equal(receipt.body.assignedDriver.location, undefined, "Completed riders must not follow the driver's next passengers.");
 });
 
