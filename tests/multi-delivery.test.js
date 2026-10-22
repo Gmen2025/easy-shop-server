@@ -2,6 +2,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
   addressInput, normalizeAllocations, allocateStock, quoteTotals, selectVehicles, checkoutDeliveryPlan,
+  groupNearbyStores, allocateDeliveryFees, NEARBY_STORE_METERS,
   createQuote, createServiceQuote, prepare, activate, ensureIntent, reconcile, cancelDelivery, refundDelivery,
 } = require("../helpers/multi-delivery");
 const { validateVehicleConfig, validatePackageSize, cargoFor, suitableVehicles, vehicleFee, vehicleMatches } = require("../helpers/vehicle-delivery");
@@ -341,8 +342,8 @@ test("international quoting consolidates shipping once per recipient and never r
   assert.equal(quoted.currency, "etb");
   assert.equal(quoted.international.shipments.length, 1);
   assert.equal(quoted.international.shippingFee, 30);
-  assert.equal(quoted.totalPrice, 74.48);
-  assert.equal(quoted.paymentAmount, 11172);
+  assert.equal(quoted.totalPrice, 72.24);
+  assert.equal(quoted.paymentAmount, 10836);
   assert.equal(quoted.deliveries.reduce((sum, delivery) => sum + Math.round(delivery.internationalShippingFee * 100), 0), 3000);
   const multiple = await createQuote(models, userId, "E_ShopUSA", { ...body,
     addresses: [body.addresses[0], { ...body.addresses[0], id: "second" }],
@@ -561,6 +562,112 @@ test("quote geocodes destinations on the server, splits nearest inventory, price
   assert.deepEqual(stocks.map((stock) => stock.reserved), [0, 0]);
 });
 
+function pricedDelivery(key, meters, distanceKm, { addressId = "home", vehicle = "car" } = {}) {
+  return {
+    key, store: { _id: key, name: key, location: { coordinates: [meters / 6371000 * 180 / Math.PI, 0] } },
+    address: { ...address, id: addressId }, distanceKm, vehicle, itemsSubtotal: 20,
+    vehicleOptions: [{ type: "car", fee: 2 + distanceKm }, { type: "van", fee: 4 + distanceKm * 2 }],
+  };
+}
+
+test("nearby stores share the nearest road-distance fee once, with exact cents independent of product count", () => {
+  const deliveries = [pricedDelivery("farther", 100, 9), pricedDelivery("nearest", 0, 2.01),
+    pricedDelivery("distant", 1000, 5)];
+  deliveries[0].lines = Array.from({ length: 10 }, () => ({ quantity: 50 }));
+  groupNearbyStores(deliveries);
+  allocateDeliveryFees(deliveries);
+  assert.equal(NEARBY_STORE_METERS, 500);
+  assert.deepEqual(deliveries.map((delivery) => delivery.deliveryFee), [2.01, 2, 7]);
+  assert.equal(quoteTotals(deliveries).deliveryFee, 11.01);
+  assert.equal(deliveries[0].pricingGroup.storeId, "nearest");
+  assert.equal(deliveries[0].pricingGroup.distanceKm, 2.01);
+  assert.equal(deliveries[0].pricingGroup.storeCount, 2);
+  assert.equal(deliveries[0].pricingGroup.deliveryFee, 4.01);
+});
+
+test("the 500 meter boundary includes nearby pairs, excludes distant pairs, and never chains far endpoints", () => {
+  for (const [meters, shared] of [[499.99, true], [500, true], [500.01, false]]) {
+    const deliveries = [pricedDelivery("a", 0, 1), pricedDelivery("b", meters, 2)];
+    groupNearbyStores(deliveries);
+    assert.equal(deliveries[0].pricingGroup.key === deliveries[1].pricingGroup.key, shared);
+  }
+  const chain = [pricedDelivery("c", 800, 3), pricedDelivery("b", 400, 2), pricedDelivery("a", 0, 1)];
+  groupNearbyStores(chain);
+  assert.equal(chain[1].pricingGroup.key, chain[2].pricingGroup.key);
+  assert.notEqual(chain[0].pricingGroup.key, chain[2].pricingGroup.key);
+  const reversed = structuredClone(chain).reverse();
+  groupNearbyStores(reversed);
+  assert.deepEqual(reversed.reverse().map((delivery) => delivery.pricingGroup.key),
+    chain.map((delivery) => delivery.pricingGroup.key));
+  assert.throws(() => groupNearbyStores([{ ...pricedDelivery("bad", 0, 1), store: { name: "Bad" } }]), /pickup pin/);
+});
+
+test("different destinations and vehicle types are billed separately; changing back restores the shared fee", () => {
+  const deliveries = [pricedDelivery("a", 0, 1), pricedDelivery("b", 100, 3),
+    pricedDelivery("c", 0, 1, { addressId: "work" })];
+  groupNearbyStores(deliveries);
+  allocateDeliveryFees(deliveries);
+  assert.equal(quoteTotals(deliveries).deliveryFee, 6);
+  const group = { status: "quote", expiresAt: new Date(Date.now() + 60000), deliveries, markModified() {} };
+  selectVehicles(group, [{ key: "a", vehicle: "van" }, { key: "b", vehicle: "car" }, { key: "c", vehicle: "car" }]);
+  assert.equal(group.deliveryFee, 14);
+  assert.equal(deliveries[1].pricingGroup.storeId, "b");
+  assert.equal(deliveries[1].pricingGroup.storeCount, 1);
+  selectVehicles(group, deliveries.map((delivery) => ({ key: delivery.key, vehicle: "van" })));
+  assert.equal(group.deliveryFee, 12);
+  assert.deepEqual(deliveries.map((delivery) => delivery.deliveryFee), [3, 3, 6]);
+});
+
+test("multiple products and quantities from one store create one charge, not one per product", async () => {
+  const { models, stocks, group } = fixture();
+  const secondProduct = { ...product, _id: id(11), name: "Other product" };
+  const store = group.deliveries[0].store;
+  models.Product.find = () => query([product, secondProduct]);
+  models.Store.find = () => query([store]);
+  models.StoreInventory.find = () => query([stocks[0],
+    { ...stocks[0], product: secondProduct._id, countInStock: 100 }]);
+  models.CheckoutGroup.create = async (fields) => fields;
+  const cart = [{ ...line, quantity: 2 }, { ...line, key: "other", product: secondProduct._id, quantity: 3 }];
+  const quoted = await createQuote(models, userId, "E_Shopping", {
+    cart, addresses: [{ ...address, country: "Ethiopia" }],
+    allocations: cart.map((entry) => ({ key: entry.key, addressId: "home", quantity: entry.quantity })),
+  }, { geocode: async () => address.location, distance: async () => 2 });
+  assert.equal(quoted.deliveries.length, 1);
+  assert.equal(quoted.deliveries[0].lines.length, 2);
+  assert.equal(quoted.itemsSubtotal, 50);
+  assert.equal(quoted.deliveryFee, 3);
+});
+
+test("shared fee cents persist through payment and partial refund without repricing siblings", async () => {
+  const { models, group, body, orders } = fixture();
+  group.deliveries[0].vehicleOptions[0].fee = 2.01;
+  group.deliveries[1].vehicleOptions[0].fee = 8;
+  group.deliveries[1].distanceKm = 3;
+  groupNearbyStores(group.deliveries);
+  allocateDeliveryFees(group.deliveries);
+  Object.assign(group, quoteTotals(group.deliveries));
+  await prepare(models, group._id, userId, "E_ShopUSA", body);
+  assert.deepEqual(orders.map((order) => order.deliveryFee), [1.01, 1]);
+  assert.deepEqual(orders.map((order) => order.totalPrice), [21.01, 21]);
+  assert.ok(orders.every((order) => order.deliveryPricingGroup.storeCount === 2));
+  assert.equal(group.totalPrice, 42.01);
+  group.paymentIntentId = "pi_shared";
+  await activate(models, group._id, { paymentIntent: { id: "pi_shared", status: "succeeded", amount: 4201,
+    amount_received: 4201, currency: "usd", metadata: { checkoutGroup: group._id, user: userId } } });
+  await cancelDelivery(models, group._id, orders[0]._id, userId, false);
+  stripeRouter.getStripe = () => ({ stripe: { refunds: {
+    list: async () => ({ data: [], has_more: false }),
+    create: async (input) => {
+      assert.equal(input.amount, 2101);
+      return { id: "re_shared", status: "succeeded", amount: input.amount, payment_intent: input.payment_intent };
+    },
+  } } });
+  await refundDelivery(models, group, orders[0]._id, "E_ShopUSA");
+  assert.equal(orders[0].refundStatus, "refunded");
+  assert.equal(orders[1].totalPrice, 21);
+  assert.equal(orders[1].fulfillmentStatus, "pending");
+});
+
 test("delivery speed is validated, quoted, and persisted on each reserved order", async () => {
   const scheduledFor = new Date(Date.now() + 48 * 60 * 60 * 1000);
   const standard = checkoutDeliveryPlan({ scheduledFor: null }, "E_Shopping", new Date("2026-10-16T16:00:00Z"));
@@ -609,8 +716,9 @@ test("delivery speed is validated, quoted, and persisted on each reserved order"
     assert.equal(order.deliveryWindowStart.toISOString(), scheduledFor.toISOString());
     assert.equal(order.dispatchStatus, "scheduled");
     assert.equal(order.deliveryFee, quote.deliveries
-      .find((delivery) => delivery.vehicle === order.requiredVehicle)
-      .vehicleOptions.find((option) => option.type === order.requiredVehicle).fee);
+      .find((delivery) => delivery.store._id === String(order.store)).deliveryFee);
+    assert.deepEqual(order.deliveryPricingGroup, quote.deliveries
+      .find((delivery) => delivery.store._id === String(order.store)).pricingGroup);
   }
 });
 
@@ -682,10 +790,10 @@ test("USD quote converts the authoritative Ethiopia total, rejects foreign desti
   const routing = { geocode: async () => address.location, distance: async () => 2 };
   const quoted = await createQuote(models, userId, "E_Shopping", body, routing);
   assert.equal(quoted.currency, "usd");
-  assert.equal(quoted.totalPrice, 46);
-  assert.equal(quoted.paymentAmount, 15.33);
+  assert.equal(quoted.totalPrice, 43);
+  assert.equal(quoted.paymentAmount, 14.33);
   assert.equal(quoted.exchangeRate.revision, 5);
-  assert.equal(quoted.deliveries.reduce((sum, row) => sum + Math.round(row.paymentAmount * 100), 0), 1533);
+  assert.equal(quoted.deliveries.reduce((sum, row) => sum + Math.round(row.paymentAmount * 100), 0), 1433);
   await assert.rejects(createQuote(models, userId, "E_Shopping", { ...body, addresses: [address] }, routing), /selected shopping region/);
   await assert.rejects(createQuote(models, userId, "E_Shopping", body, { ...routing,
     distance: async () => { exchangeConfig.revision++; return 2; } }), /changed while calculating/);
@@ -766,7 +874,9 @@ test("domestic quote without package sizes requires explicit vehicle selection a
   { geocode: async () => address.location, distance: async () => 2 });
   assert.ok(quote.deliveries.every((delivery) => delivery.requiresVehicleSelection && delivery.vehicle === "" &&
     delivery.cargo.weightKg === null && delivery.lines[0].packageSize === null));
-  assert.ok(quote.deliveries.every((delivery) => delivery.deliveryFee === Math.min(...delivery.vehicleOptions.map((option) => option.fee))));
+  assert.equal(quote.deliveryFee, Math.min(...quote.deliveries[0].vehicleOptions.map((option) => option.fee)));
+  assert.equal(quote.deliveries.reduce((sum, delivery) => sum + Math.round(delivery.deliveryFee * 100), 0),
+    Math.round(quote.deliveryFee * 100));
   await assert.rejects(prepare(models, group._id, userId, "E_ShopUSA",
     { ...body, selections: quote.deliveries.map((delivery) => ({ key: delivery.key, vehicle: "" })) }), /Select one vehicle/);
   assert.deepEqual(stocks.map((stock) => stock.reserved), [0, 0]);

@@ -352,6 +352,28 @@ Authenticated APIs (all paths below are relative to `/api/v1/stores/`):
   before main-catalog lines so their limited supply cannot be consumed first.
   Products from the same pickup and destination share one delivery fee.
   Mixed main/storefront groups preserve the storefront branch constraint.
+  New quotes also group stores for pricing when **every pair is within 500
+  meters** (straight-line pickup distance) and they serve the same destination.
+  Groups are formed deterministically, nearest road-distance pickup first;
+  chains of nearby stores cannot join distant endpoints. Within a group, only
+  deliveries using the **same selected vehicle type** share a fee. The fee
+  (including the speed surcharge once) comes from that type's option at the
+  store with the shortest quoted driving distance to the drop-off. Different
+  vehicle types, distant stores and separate destination IDs are billed
+  separately. Each option still shows its own store's unshared route price.
+  `deliveries[].pricingGroup` snapshots the geographic group `key`,
+  `radiusMeters`, and selected billing subgroup's `storeId`, `storeName`,
+  `distanceKm`, `storeCount`, `vehicle`, `deliveryFee` (the full shared fee).
+  Each delivery's `deliveryFee` is its equal share, rounded in cents with
+  remainders assigned by delivery key. Child orders persist this snapshot as
+  `deliveryPricingGroup`; their totals sum exactly to the parent and partial
+  refunds use only that child's saved share, without repricing siblings.
+  Fulfillment, stock, vehicle capacity and driver tracking remain per store,
+  not a consolidated multi-stop driver route. International quotes apply this
+  rule to the US hub leg per recipient; onward shipping fees are unchanged.
+  Existing quotes/orders without pricing groups retain their original fees.
+  Deploy the updated backend and mobile together: old mobile builds sum
+  individual vehicle options and cannot preview the new shared total correctly.
 - `POST checkouts/:id/prepare`: `method` is `card`, `bank` or `cash`;
   `selections` contain one `{ key, vehicle }` for each quoted delivery.
   `deliveryMode` and `scheduledFor` may be echoed from the quote; if supplied,

@@ -136,6 +136,7 @@ const orderSchema = new mongoose.Schema({
         type: Number,
         default: 0
     },
+    deliveryPricingGroup: mongoose.Schema.Types.Mixed,
     deliveryDistanceKm: {
         type: Number,
         default: 0

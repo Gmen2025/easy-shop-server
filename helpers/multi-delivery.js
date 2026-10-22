@@ -1,6 +1,6 @@
 const mongoose = require("mongoose");
 const { conflict, inventoryEnabled, normalizeLines, eligibleStores, reserve, release, assignStore, ACCEPTANCE_MS } = require("./store-inventory");
-const { getCoordinates } = require("./fulfillment-routing");
+const { getCoordinates, distanceMeters } = require("./fulfillment-routing");
 const { getDrivingDistanceKm } = require("./google-distance");
 const { VEHICLE_CONFIG_KEY, cargoFor, suitableVehicles, vehicleFee, cents } = require("./vehicle-delivery");
 const {
@@ -12,6 +12,7 @@ const fx = require("./exchange-rate");
 const DELIVERY_CONFIG_KEY = "delivery-config";
 const QUOTE_MS = 10 * 60 * 1000;
 const HOLD_MS = 15 * 60 * 1000;
+const NEARBY_STORE_METERS = 500;
 const id = (value) => String(value?._id || value || "");
 const countryCode = (country) => {
   const value = String(country).trim().toLowerCase();
@@ -161,6 +162,49 @@ function allocateStock(allocations, candidatesByAllocation, stocks, products, ad
   return [...grouped.values()];
 }
 
+function groupNearbyStores(deliveries) {
+  const clusters = [];
+  for (const delivery of [...deliveries].sort((a, b) => a.distanceKm - b.distanceKm || a.key.localeCompare(b.key))) {
+    const coordinates = getCoordinates(delivery.store.location);
+    if (!coordinates) throw conflict(`Store ${delivery.store.name} needs a valid pickup pin.`);
+    // Require every pair to be close; a chain of nearby stores must not join distant endpoints.
+    let cluster = clusters.find((members) => members.every((member) =>
+      member.address.id === delivery.address.id &&
+      distanceMeters(coordinates, getCoordinates(member.store.location)) <= NEARBY_STORE_METERS));
+    if (!cluster) { cluster = []; clusters.push(cluster); }
+    cluster.push(delivery);
+    delivery.pricingGroup = { key: cluster[0].key, radiusMeters: NEARBY_STORE_METERS };
+  }
+}
+
+function allocateDeliveryFees(deliveries) {
+  const groups = new Map();
+  for (const delivery of deliveries) {
+    const option = delivery.vehicle
+      ? delivery.vehicleOptions.find((entry) => entry.type === delivery.vehicle)
+      : [...delivery.vehicleOptions].sort((a, b) => a.fee - b.fee)[0];
+    if (!option) throw conflict("Choose one of the suitable vehicles offered for this delivery.");
+    const key = JSON.stringify([delivery.pricingGroup?.key || delivery.key, option.type]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ delivery, option });
+  }
+  for (const members of groups.values()) {
+    members.sort((a, b) => a.delivery.distanceKm - b.delivery.distanceKm || a.delivery.key.localeCompare(b.delivery.key));
+    const anchor = members[0];
+    const fee = cents(anchor.option.fee);
+    const ordered = [...members].sort((a, b) => a.delivery.key.localeCompare(b.delivery.key));
+    ordered.forEach(({ delivery }, index) => {
+      delivery.deliveryFee = (Math.floor(fee / members.length) + (index < fee % members.length ? 1 : 0)) / 100;
+      delivery.totalPrice = (cents(delivery.itemsSubtotal) + cents(delivery.deliveryFee)) / 100;
+      if (delivery.pricingGroup) Object.assign(delivery.pricingGroup, {
+        storeId: anchor.delivery.store._id, storeName: anchor.delivery.store.name,
+        distanceKm: anchor.delivery.distanceKm, storeCount: members.length, vehicle: anchor.option.type,
+        deliveryFee: fee / 100,
+      });
+    });
+  }
+}
+
 async function createQuote(models, user, databaseName, body, { geocode = geocodeAddress, distance = getDrivingDistanceKm, transient = false } = {}) {
   if (/usa/i.test(databaseName) && String(body.paymentCurrency).toLowerCase() === "etb") {
     return require("./international-shipping").createQuote(models, user, databaseName, body, { geocode, distance });
@@ -201,7 +245,6 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
     if (!types.length) throw conflict(`No configured vehicle can carry the delivery from ${delivery.store.name}. Contact Admin.`);
     try { delivery.distanceKm = await distance(`${pickup[1]},${pickup[0]}`, `${dropoff[1]},${dropoff[0]}`, { throwOnError: true }); }
     catch (error) { throw conflict(error.message); }
-    // fee = vehicleFee + speedSurcharge, so selection and totals need no further changes.
     delivery.speedSurcharge = deliveryPlan.deliverySnapshot.speedSurcharge;
     delivery.vehicleOptions = types.map((type) => {
       const base = vehicleFee(delivery.distanceKm, type, config, databaseName);
@@ -209,11 +252,10 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
     });
     delivery.requiresVehicleSelection = delivery.cargo.measurementsAvailable === false;
     delivery.vehicle = delivery.requiresVehicleSelection ? "" : types[0];
-    delivery.deliveryFee = delivery.requiresVehicleSelection
-      ? Math.min(...delivery.vehicleOptions.map((option) => option.fee)) : delivery.vehicleOptions[0].fee;
     delivery.itemsSubtotal = delivery.lines.reduce((sum, line) => sum + cents(line.price) * line.quantity, 0) / 100;
-    delivery.totalPrice = (cents(delivery.itemsSubtotal) + cents(delivery.deliveryFee)) / 100;
   }));
+  groupNearbyStores(deliveries);
+  allocateDeliveryFees(deliveries);
   const totals = quoteTotals(deliveries);
   if (exchangeRate && (await fx.requireCurrent(models, databaseName)).revision !== exchangeRate.revision) {
     throw conflict("The exchange rate changed while calculating routes. Calculate a new USD quote.");
@@ -262,9 +304,8 @@ function selectVehicles(group, selections) {
     const option = delivery.vehicleOptions.find((entry) => entry.type === selected?.vehicle);
     if (!option) throw conflict("Choose one of the suitable vehicles offered for this delivery.");
     delivery.vehicle = option.type;
-    delivery.deliveryFee = option.fee;
-    delivery.totalPrice = (cents(delivery.itemsSubtotal) + cents(option.fee)) / 100;
   }
+  allocateDeliveryFees(group.deliveries);
   Object.assign(group, quoteTotals(group.deliveries));
   if (group.international) require("./international-shipping").recalculate(group);
   else if (group.exchangeRate) group.paymentAmount = fx.allocateDollars(group.deliveries, group.exchangeRate);
@@ -404,7 +445,8 @@ async function prepare(models, groupId, user, databaseName, body) {
         zip: address.zip, country: address.country, phone: address.phone, customerLocation: address.location,
         inventoryManaged: true, checkoutGroup: group._id, storefrontId: delivery.storefrontId,
         requiredVehicle: delivery.vehicle, cargo: delivery.cargo,
-        deliveryFee: delivery.deliveryFee, deliveryDistanceKm: delivery.distanceKm, quotedDeliveryDistanceKm: delivery.distanceKm,
+        deliveryFee: delivery.deliveryFee, deliveryPricingGroup: delivery.pricingGroup,
+        deliveryDistanceKm: delivery.distanceKm, quotedDeliveryDistanceKm: delivery.distanceKm,
         deliveryMode: deliveryPlan.value.deliveryMode,
         scheduledFor: deliveryPlan.value.scheduledFor,
         deliveryWindowStart: deliveryPlan.value.deliveryWindowStart,
@@ -679,6 +721,7 @@ async function refundDelivery(models, group, orderId, databaseName, { retryFaile
   return persist({ refundId: refund.id, refundStatus: "refunded" });
 }
 
-module.exports = { QUOTE_MS, HOLD_MS, addressInput, normalizeAllocations, allocateStock, quoteTotals, selectVehicles,
+module.exports = { QUOTE_MS, HOLD_MS, NEARBY_STORE_METERS, groupNearbyStores, allocateDeliveryFees,
+  addressInput, normalizeAllocations, allocateStock, quoteTotals, selectVehicles,
   checkoutDeliveryPlan, createQuote, createServiceQuote, prepare, activate, ensureIntent, reconcile, expireCheckouts, cancelDelivery, refundDelivery, syncCashPayment,
   geocodeAddress, countryCode, stripeClient };
