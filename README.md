@@ -347,9 +347,14 @@ Authenticated APIs (all paths below are relative to `/api/v1/stores/`):
   conflict if the delivery policy or surcharge changed since the quote.
   Limits are 50 cart lines, 10 destinations, 100 allocations and 20 deliveries.
   This saves a ten-minute authoritative quote, without reserving stock.
-  Stock is allocated nearest-first within price/scope constraints, using one
-  shared budget across destinations. Constrained storefront lines are allocated
-  before main-catalog lines so their limited supply cannot be consumed first.
+  Stock allocation first selects the first eligible store in the existing
+  store ranking that can fulfill the entire checkout. It must be eligible for
+  every cart allocation at its quoted price and storefront scope, with enough
+  unreserved stock for the combined quantity of each product across all lines
+  and destinations. If no single eligible store can fulfill everything, stock
+  is split using the existing nearest-first allocation and one shared budget
+  across destinations. Constrained storefront lines are allocated before
+  main-catalog lines so their limited supply cannot be consumed first.
   Products from the same pickup and destination share one delivery fee.
   Mixed main/storefront groups preserve the storefront branch constraint.
   New quotes also group stores for pricing when **every pair is within 500

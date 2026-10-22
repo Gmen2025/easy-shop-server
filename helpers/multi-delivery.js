@@ -126,13 +126,21 @@ async function geocodeAddress(address) {
 
 function allocateStock(allocations, candidatesByAllocation, stocks, products, addresses) {
   const available = new Map(stocks.map((row) => [`${row.store}:${row.product}`, row.countInStock - row.reserved]));
+  const required = new Map();
+  for (const allocation of allocations) {
+    required.set(allocation.product, (required.get(allocation.product) || 0) + allocation.quantity);
+  }
+  const commonStore = candidatesByAllocation[0]?.find((store) =>
+    candidatesByAllocation.every((candidates) => candidates.some((candidate) => id(candidate) === id(store))) &&
+    [...required].every(([product, quantity]) => (available.get(`${store._id}:${product}`) || 0) >= quantity));
+  const candidates = commonStore ? allocations.map(() => [commonStore]) : candidatesByAllocation;
   const grouped = new Map();
   // Allocate constrained storefront stock first so main-catalog lines cannot consume its only eligible supply.
-  const indices = allocations.map((_, index) => index).sort((a, b) => candidatesByAllocation[a].length - candidatesByAllocation[b].length);
+  const indices = allocations.map((_, index) => index).sort((a, b) => candidates[a].length - candidates[b].length);
   indices.forEach((index) => {
     const allocation = allocations[index];
     let remaining = allocation.quantity;
-    for (const store of candidatesByAllocation[index]) {
+    for (const store of candidates[index]) {
       const stockKey = `${store._id}:${allocation.product}`;
       const quantity = Math.min(remaining, Math.max(0, available.get(stockKey) || 0));
       if (!quantity) continue;

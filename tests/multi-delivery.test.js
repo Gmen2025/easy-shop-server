@@ -501,6 +501,54 @@ test("same catalog product in different storefront cart lines retains its distin
   assert.equal(result[1].price, 12);
 });
 
+test("a common store with the full quantities is preferred over nearer partial stock", () => {
+  const stores = [{ _id: id(1), name: "Nearest partial store" }, { _id: id(2), name: "Complete store" }];
+  const other = { ...product, _id: id(11), name: "Other" };
+  const allocations = [{ ...line, quantity: 2, addressId: "home" },
+    { ...line, key: "other", product: other._id, quantity: 3, addressId: "home" }];
+  const stocks = [
+    { store: id(1), product: productId, countInStock: 10, reserved: 0 },
+    { store: id(1), product: other._id, countInStock: 3, reserved: 1 },
+    { store: id(2), product: productId, countInStock: 2, reserved: 0 },
+    { store: id(2), product: other._id, countInStock: 4, reserved: 1 },
+  ];
+  const groups = allocateStock(allocations, [stores, stores], stocks, [product, other], [address]);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].store._id, id(2));
+  assert.deepEqual(groups[0].lines.map((entry) => entry.quantity), [2, 3]);
+  assert.deepEqual(stocks.map((stock) => stock.reserved), [0, 1, 0, 1], "Quotes do not reserve stock");
+});
+
+test("common-store selection intersects every line's eligible price and storefront candidates", () => {
+  const stores = [1, 2, 3].map((number) => ({ _id: id(number), name: `Store ${number}` }));
+  const other = { ...product, _id: id(11) };
+  const allocations = [{ ...line, quantity: 1, addressId: "home" },
+    { ...line, key: "scoped", product: other._id, quantity: 1, addressId: "home", storefrontId: id(2) }];
+  const stocks = stores.flatMap((store) => [product, other].map((entry) =>
+    ({ store: store._id, product: entry._id, countInStock: 5, reserved: 0 })));
+  const groups = allocateStock(allocations, [stores, [stores[1], stores[2]]], stocks, [product, other], [address]);
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].store._id, id(2));
+  assert.equal(groups[0].storefrontId, id(2));
+  const separate = allocateStock(allocations, [[stores[0]], [stores[1]]], stocks, [product, other], [address]);
+  assert.equal(separate.length, 2, "Stock outside the eligible price/scope list cannot consolidate a cart");
+});
+
+test("common-store stock checks combine repeated products across cart lines and destinations", () => {
+  const stores = [{ _id: id(1), name: "Partial" }, { _id: id(2), name: "Complete" }];
+  const stocks = [{ store: id(1), product: productId, countInStock: 3, reserved: 1 },
+    { store: id(2), product: productId, countInStock: 5, reserved: 1 }];
+  const allocations = [{ ...line, quantity: 2, addressId: "home" },
+    { ...line, key: "repeat", quantity: 2, addressId: "work" }];
+  const groups = allocateStock(allocations, [stores, stores], stocks, [product], [address, { ...address, id: "work" }]);
+  assert.deepEqual(groups.map((group) => [group.store._id, group.address.id, group.lines[0].quantity]),
+    [[id(2), "home", 2], [id(2), "work", 2]]);
+  allocations[1].addressId = "home";
+  const combined = allocateStock(allocations, [stores, stores], stocks, [product], [address]);
+  assert.equal(combined.length, 1);
+  assert.equal(combined[0].lines[0].quantity, 4);
+});
+
 test("stock is split between pickups and shared across address allocations without overquoting", () => {
   const stores = [{ _id: id(1), name: "Nearest" }, { _id: id(2), name: "Next" }];
   const stocks = [{ store: id(1), product: productId, countInStock: 3, reserved: 1 },
@@ -511,6 +559,37 @@ test("stock is split between pickups and shared across address allocations witho
     [id(1), "home", 2], [id(2), "home", 1], [id(2), "work", 2],
   ]);
   assert.throws(() => allocateStock([{ ...line, quantity: 6, addressId: "home" }], [stores], stocks, [product], [address]), /Not enough stock/);
+});
+
+test("quote selects one complete store instead of splitting partial nearer stock, and charges only its route", async () => {
+  const { models, stocks, group, body, orders } = fixture();
+  const stores = [
+    { ...group.deliveries[0].store, location: { coordinates: [0, 0] } },
+    { ...group.deliveries[1].store, location: { coordinates: [0.01, 0] } },
+  ];
+  stocks[1].countInStock = 5;
+  stocks[1].reserved = 1;
+  models.Store.find = () => query(stores);
+  models.Store.findById = (storeId) => query(stores.find((store) => store._id === String(storeId)));
+  models.StoreInventory.find = () => query(stocks);
+  models.CheckoutGroup.create = async (fields) => { Object.assign(group, fields); return group; };
+  const origins = [];
+  const quote = await createQuote(models, userId, "E_ShopUSA", {
+    cart: [line], addresses: [address],
+    allocations: [{ key: line.key, addressId: "home", quantity: 4 }],
+  }, { geocode: async () => address.location, distance: async (origin) => { origins.push(origin); return 4; } });
+  assert.deepEqual(origins, ["0,0.01"]);
+  assert.equal(quote.deliveries.length, 1);
+  assert.equal(quote.deliveries[0].store._id, id(2));
+  assert.equal(quote.deliveryFee, vehicleFee(4, "motorcycle", config(), "E_ShopUSA"));
+  assert.equal(quote.totalPrice, 40 + quote.deliveryFee);
+  await prepare(models, group._id, userId, "E_ShopUSA", {
+    ...body, selections: quote.deliveries.map((delivery) => ({ key: delivery.key, vehicle: delivery.vehicle })),
+  });
+  assert.equal(orders.length, 1);
+  assert.equal(String(orders[0].store), id(2));
+  assert.equal(orders[0].deliveryFee, quote.deliveryFee);
+  assert.deepEqual(stocks.map((stock) => stock.reserved), [0, 5]);
 });
 
 test("constrained storefront units are protected, and one pickup/destination incurs only one delivery fee", () => {
