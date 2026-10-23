@@ -1,12 +1,23 @@
 const express = require("express");
 const router = require("express").Router();
 const bcrypt = require("bcryptjs");
-const jwt = require("jsonwebtoken");
+const authSecurity = require("../helpers/auth-security");
+const { router: authRouter, wrap: authWrap } = require("./auth");
 const crypto = require("crypto");
 const { getFrontendBaseUrl, sendMailSafe } = require("../helpers/mailer");
 const { sendPushToUser } = require("../helpers/push-notify");
 
 const getUserModel = (req) => req.dbModels.User;
+router.use("/auth", authRouter);
+router.use(["/login", "/driver-login", "/store-owner-login"], async (req, res, next) => {
+  try {
+    await authSecurity.rateLimit(req, `password-ip:${req.ip}`, 60);
+    await authSecurity.rateLimit(req, `password-email:${String(req.body?.email || "").trim().toLowerCase()}`, 20);
+    next();
+  } catch (error) {
+    res.status(error.status || 500).json({ message: error.status ? error.message : "Unable to sign in", code: error.code });
+  }
+});
 
 const getCompanyStoreRole = async (req, user) => {
   const store = await req.dbModels.Store.findOne({
@@ -112,9 +123,8 @@ router.post(`/`, async (req, res) => {
  *         description: Invalid credentials or email not verified
  */
 // Modified login to check email verification
-router.post("/login", async (req, res) => {
+router.post("/login", authWrap(async (req, res) => {
   const user = await getUserModel(req).findOne({ email: req.body.email });
-  const secret = process.env.secret;
 
   if (!user) {
     return res.status(400).send("The user not found");
@@ -124,40 +134,12 @@ router.post("/login", async (req, res) => {
     return res.status(400).send("Please verify your email before logging in");
   }
 
-  if (user && bcrypt.compareSync(req.body.password, user.passwordHash)) {
-    const token = jwt.sign(
-      {
-        userId: user.id,
-        isAdmin: user.isAdmin,
-      },
-      secret,
-      { expiresIn: "1d" }
-    );
-
-    let isCompanyOwnedDriver = false;
-    const companyStoreRole = await getCompanyStoreRole(req, user);
-    if (user.isDriver) {
-      const driver = await req.dbModels.Driver.findOne({ user: user._id }).select("isCompanyOwned");
-      isCompanyOwnedDriver = Boolean(driver?.isCompanyOwned);
-    }
-
-    return res.send({
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      isAdmin: user.isAdmin,
-      isDriver: user.isDriver,
-      ...companyStoreRole,
-      isCompanyOwnedDriver,
-      role: user.role,
-      isEmailVerified: user.isEmailVerified,
-      token: token,
-    });
+  if (typeof req.body.password === "string" && user.passwordHash && bcrypt.compareSync(req.body.password, user.passwordHash)) {
+    return res.json(await authSecurity.login(req, user));
   } else {
     return res.status(400).send("password is wrong");
   }
-});
+}));
 
 router.post("/driver-login", async (req, res) => {
   try {
@@ -166,7 +148,7 @@ router.post("/driver-login", async (req, res) => {
     const User = getUserModel(req);
     const user = await User.findOne({ email });
 
-    if (!user || !password || !bcrypt.compareSync(password, user.passwordHash)) {
+    if (!user || typeof password !== "string" || !user.passwordHash || !bcrypt.compareSync(password, user.passwordHash)) {
       return res.status(400).json({ success: false, message: "Invalid email or password" });
     }
 
@@ -184,27 +166,10 @@ router.post("/driver-login", async (req, res) => {
       return res.status(403).json({ success: false, message: driver.approvalStatus === "denied" ? "Driver access has been denied." : "Your driver application is pending admin approval." });
     }
 
-    const token = jwt.sign(
-      { userId: user.id, isAdmin: user.isAdmin, isDriver: true, role: "driver" },
-      process.env.secret,
-      { expiresIn: "1d" }
-    );
-
-    return res.status(200).json({
-      _id: user._id,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      isAdmin: user.isAdmin,
-      isDriver: true,
-      role: "driver",
-      driverId: driver._id,
-      isCompanyOwned: Boolean(driver.isCompanyOwned),
-      token,
-    });
+    return res.status(200).json(await authSecurity.login(req, user, "driver"));
   } catch (error) {
     console.error("Driver login error:", error);
-    return res.status(500).json({ success: false, message: "Unable to sign in to the driver app right now." });
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to sign in to the driver app right now.", code: error.code });
   }
 });
 
@@ -214,7 +179,7 @@ router.post("/store-owner-login", async (req, res) => {
     const password = req.body?.password;
     const User = getUserModel(req);
     const user = await User.findOne({ email });
-    if (!user || !password || !bcrypt.compareSync(password, user.passwordHash)) {
+    if (!user || typeof password !== "string" || !user.passwordHash || !bcrypt.compareSync(password, user.passwordHash)) {
       return res.status(400).json({ success: false, message: "Invalid email or password" });
     }
 
@@ -225,11 +190,10 @@ router.post("/store-owner-login", async (req, res) => {
       return res.status(403).json({ success: false, message: store.approvalStatus === "denied" ? "Store owner access has been denied." : "Your store application is pending admin approval." });
     }
 
-    const token = jwt.sign({ userId: user.id, isAdmin: user.isAdmin, role: "store_owner" }, process.env.secret, { expiresIn: "1d" });
-    return res.json({ _id: user._id, name: user.name, email: user.email, phone: user.phone, role: "store_owner", storeId: store._id, isCompanyOwned: Boolean(store.isCompanyOwned), token });
+    return res.json(await authSecurity.login(req, user, "store"));
   } catch (error) {
     console.error("Store owner login error:", error);
-    return res.status(500).json({ success: false, message: "Unable to sign in to the store app right now." });
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to sign in to the store app right now.", code: error.code });
   }
 });
 
@@ -1687,28 +1651,12 @@ router.post("/upgrade-role", async (req, res) => {
       { new: true, upsert: true, setDefaultsOnInsert: true }
     );
 
-    const token = jwt.sign(
-      { userId: user.id, isAdmin: user.isAdmin, isDriver: true, role: "driver" },
-      process.env.secret,
-      { expiresIn: "1d" }
-    );
-
-    return res.status(200).json({
+    return res.status(200).json(await authSecurity.login(req, user, "upgrade", {
       success: true,
       message: "Your driver application was submitted for admin approval.",
       needsSetup: true,
-      token,
-      user: {
-        _id: user._id,
-        name: user.name,
-        email: user.email,
-        phone: user.phone,
-        isAdmin: user.isAdmin,
-        isDriver: user.isDriver,
-        role: user.role,
-      },
       driverId: driver._id,
-    });
+    }));
   } catch (error) {
     console.error("Role upgrade error:", error);
     return res.status(500).json({

@@ -16,6 +16,7 @@ const { checkoutGroupSchema } = require('../models/checkout-group');
 const { deliveryAddressSchema } = require('../models/delivery-address');
 const { rideSchema } = require('../models/ride');
 const { rideTripSchema } = require('../models/ride-trip');
+const { authRecordSchema, authIdentitySchema } = require('../models/auth-record');
 
 const DEFAULT_DB_NAME = process.env.DEFAULT_DB_NAME || 'E_Shopping';
 const DEFAULT_ALLOWED_DBS = ['E_Shopping', 'E_Shopping_2', 'E_ShopUSA', 'E_ShoppingUSA'];
@@ -93,6 +94,8 @@ function getModelsForDb(dbName) {
   const db = getDbConnection(dbName);
 
   return {
+    AuthRecord: db.models.AuthRecord || db.model('AuthRecord', authRecordSchema),
+    AuthIdentity: db.models.AuthIdentity || db.model('AuthIdentity', authIdentitySchema),
     Category: db.models.Category || db.model('Category', categorySchema),
     Product: db.models.Product || db.model('Product', productSchema),
     Order: db.models.Order || db.model('Order', orderSchema),

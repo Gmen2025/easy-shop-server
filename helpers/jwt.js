@@ -7,6 +7,10 @@ function authJwt() {
     algorithms: ["HS256"],
   }).unless({
     path: [
+      { url: /^\/api\/v1\/users\/auth\/social\/start$/, methods: ["GET"] },
+      { url: /^\/api\/v1\/users\/auth\/social\/callback\/(?:google|apple|facebook)$/, methods: ["GET"] },
+      { url: /^\/api\/v1\/users\/auth\/social\/callback\/apple$/, methods: ["POST"] },
+      { url: /^\/api\/v1\/users\/auth\/(?:social\/exchange|2fa\/verify|2fa\/resend)$/, methods: ["POST"] },
       "/api/v1/users/login",
       "/api/v1/users/driver-login",
       "/api/v1/users/store-owner-login",

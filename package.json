@@ -19,6 +19,8 @@
     "express": "^4.21.2",
     "express-jwt": "^8.5.1",
     "jsonwebtoken": "^9.0.2",
+    "jose": "^5.10.0",
+    "otplib": "^12.0.1",
     "mongodb": "^6.13.0",
     "mongoose": "^8.10.0",
     "morgan": "^1.10.0",

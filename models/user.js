@@ -11,12 +11,14 @@ const userSchema = new mongoose.Schema({
   },
   passwordHash: {
     type: String,
-    required: true,
+    required: function () { return !this.socialAccount; },
   },
   phone: {
     type: String,
-    required: true,
+    required: function () { return !this.socialAccount; },
   },
+  socialAccount: { type: Boolean, default: false },
+  authSecurity: { type: mongoose.Schema.Types.Mixed, select: false },
   isAdmin: {
     type: Boolean,
     default: false,
@@ -94,7 +96,19 @@ userSchema.virtual("id").get(function () {
 
 userSchema.set("toJSON", {
   virtuals: true,
+  transform: sanitizeUser,
 });
+userSchema.set("toObject", { virtuals: true, transform: sanitizeUser });
+
+function sanitizeUser(doc, ret) {
+  for (const key of ["passwordHash", "authSecurity", "socialAccount", "passwordResetToken", "passwordResetTokenExpiry", "emailVerificationToken"]) {
+    delete ret[key];
+  }
+  return ret;
+}
+
+// Existing deployments must resolve duplicate emails before building this index.
+userSchema.index({ email: 1 }, { unique: true, collation: { locale: "en", strength: 2 } });
 
 exports.User = mongoose.model("User", userSchema);
 exports.userSchema = userSchema;

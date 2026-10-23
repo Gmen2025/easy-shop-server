@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const authSecurity = require('../helpers/auth-security');
 const { inventoryEnabled, updateManagedOrder } = require("../helpers/store-inventory");
 
 router.use(async (req, res, next) => {
@@ -186,7 +186,7 @@ router.post('/register-owner', async (req, res) => {
     }
 
     const existing = await User.findOne({ email });
-    if (existing && !bcrypt.compareSync(password, existing.passwordHash)) {
+    if (existing && (!existing.passwordHash || typeof password !== "string" || !bcrypt.compareSync(password, existing.passwordHash))) {
       return res.status(400).json({ success: false, message: 'An account with this email already exists. Enter its correct password to upgrade it.' });
     }
     if (existing && await Store.findOne({ owner: existing._id })) {
@@ -227,12 +227,8 @@ router.post('/register-owner', async (req, res) => {
     });
     const savedStore = await store.save();
 
-    const secret = process.env.secret;
-    const token = jwt.sign({ userId: savedUser.id, isAdmin: false }, secret, { expiresIn: '7d' });
-
-    return res.status(201).json({
+    return res.status(201).json(await authSecurity.login(req, savedUser, "register-store", {
       success: true,
-      token,
       owner: {
         id: savedUser.id,
         fullName: savedUser.name,
@@ -244,9 +240,9 @@ router.post('/register-owner', async (req, res) => {
         longitude: toNum(longitude),
         approvalStatus: savedStore.approvalStatus,
       },
-    });
+    }));
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.status || 500).json({ success: false, message: err.status ? err.message : "Unable to register store owner", code: err.code });
   }
 });
 

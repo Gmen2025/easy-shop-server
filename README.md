@@ -1212,3 +1212,8 @@ refreshes once per minute. Configure Google quotas/budget alerts for additional
 cost control, especially when running multiple server instances.
 
 Validate with `node --test tests/driver-route.test.js`.
+# Authentication
+
+See [social sign-in and optional two-factor authentication](docs/authentication.md)
+for API contracts, provider console setup, deployment secrets, required MongoDB
+indexes, recovery behavior, and focused tests.

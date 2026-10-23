@@ -61,6 +61,7 @@ test("login and profile recover stale store flags only from actual company-store
       for (const [method, route] of [["get", "/profile"], ["post", "/login"]]) {
         const res = {
           statusCode: 200,
+          set() { return this; },
           status(code) { this.statusCode = code; return this; },
           json(body) { this.body = body; return this; },
           send(body) { this.body = body; return this; },
