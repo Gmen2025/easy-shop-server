@@ -41,6 +41,106 @@ const queryParameter = (name, description) => ({
 });
 
 module.exports = {
+  '/api/v1/orders/admin/dashboard': {
+    get: {
+      ...operation('Read platform sales and operations dashboard', 'Orders'),
+      description: 'Admin only. Daily/weekly/monthly/quarterly/yearly periods cover trailing 1/7/30/90/365 days. Revenue is based on completed deliveries; order counts include placed orders.',
+      responses: {
+        200: { description: 'Platform dashboard', content: { 'application/json': { schema: {
+          type: 'object', properties: {
+            success: { type: 'boolean' }, periods: { $ref: '#/components/schemas/DashboardPeriods' },
+            operations: { type: 'object', properties: { outstandingOrders: { type: 'integer' }, activeDeliveries: { type: 'integer' } } },
+            inventory: { type: 'object', additionalProperties: { type: 'number' } },
+            payouts: { type: 'object', properties: { paid: { type: 'number' }, pending: { type: 'number' } } },
+            lifetime: { type: 'object', additionalProperties: { type: 'number' } },
+            recentSales: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          },
+        } } } },
+        401: response('Authentication required'), 403: response('Admin access required'), 500: response('Dashboard unavailable'),
+      },
+    },
+  },
+  '/api/v1/stores/me/dashboard': {
+    get: {
+      ...operation('Read the authenticated company-store dashboard', 'Store Owner'),
+      description: 'Requires a company-owned store profile. Returns trailing daily/weekly/monthly/quarterly/yearly sales, inventory across owned locations when managed, payout balances, recent and active orders.',
+      responses: {
+        200: { description: 'Company-store metrics', content: { 'application/json': { schema: {
+          type: 'object', properties: {
+            success: { type: 'boolean' }, store: { type: 'object', properties: { id: { type: 'string' }, name: { type: 'string' } } },
+            periods: { $ref: '#/components/schemas/DashboardPeriods' },
+            products: { type: 'object', additionalProperties: { type: 'number' } },
+            inventory: { type: 'object', additionalProperties: { type: 'number' } },
+            orders: { type: 'object', properties: { pending: { type: 'integer' } } },
+            payouts: { type: 'object', properties: { paidOut: { type: 'number' }, pending: { type: 'number' }, available: { type: 'number' } } },
+            recentOrders: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            activeOrders: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            recentCompletedOrders: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          },
+        } } } },
+        401: response('Authentication required'), 404: response('Company-store profile not found'), 500: response('Dashboard unavailable'),
+      },
+    },
+  },
+  '/api/v1/drivers/me/dashboard': {
+    get: {
+      ...operation('Read the authenticated driver earnings dashboard', 'Drivers'),
+      description: 'Uses delivered orders assigned to the current driver, with trailing 1/7/30/90/365-day periods and at most five recent deliveries.',
+      responses: {
+        200: { description: 'Driver metrics', content: { 'application/json': { schema: {
+          type: 'object', properties: {
+            success: { type: 'boolean' }, periods: { $ref: '#/components/schemas/DashboardPeriods' },
+            recentDeliveries: { type: 'array', maxItems: 5, items: { type: 'object', properties: {
+              _id: { type: 'string' }, storeName: { type: 'string' }, deliveryFee: { type: 'number' },
+              deliveredAt: { type: 'string', format: 'date-time' },
+              deliveryMode: { type: 'string' }, scheduledFor: { type: 'string', format: 'date-time', nullable: true },
+            } } },
+          },
+        } } } },
+        401: response('Authentication required'), 404: response('Driver profile not found'), 500: response('Dashboard unavailable'),
+      },
+    },
+  },
+  '/api/v1/drivers/me/orders/{id}/route': {
+    post: {
+      ...operation('Calculate a traffic-aware route for an assigned delivery', 'Drivers', {
+        parameters: [pathParameter('id')],
+        requestBody: { schema: { type: 'object', required: ['origin'], properties: {
+          origin: { type: 'object', required: ['latitude', 'longitude'], properties: {
+            latitude: { type: 'number', minimum: -90, maximum: 90 }, longitude: { type: 'number', minimum: -180, maximum: 180 },
+          } },
+        } } },
+      }),
+      description: 'Approved, non-suspended driver with an assigned active order only. Routes to pickup while Driver Assigned and to the customer after Picked Up. Requires server GOOGLE_ROUTES_API_KEY. Rate limited to one request per driver per database per ten seconds.',
+      responses: {
+        200: { description: 'Driving geometry, kilometres and minutes', content: { 'application/json': { schema: {
+          type: 'object', properties: {
+            success: { type: 'boolean' }, distance: { type: 'number', description: 'Kilometres' },
+            duration: { type: 'number', description: 'Traffic-aware duration in minutes' },
+            coordinates: { type: 'array', items: { type: 'object', properties: {
+              latitude: { type: 'number' }, longitude: { type: 'number' },
+            } } },
+          },
+        } } } },
+        400: response('Invalid order ID or GPS origin'), 401: response('Authentication required'),
+        403: response('Approved non-suspended driver required'), 404: response('Assigned active delivery not found'),
+        422: response('Missing destination or no driving route'),
+        429: { description: 'Driver route cooldown', headers: { 'Retry-After': { schema: { type: 'integer' }, description: 'Seconds to wait' } } },
+        502: response('Routes provider error'), 503: response('Routes API not configured'),
+      },
+    },
+  },
+  '/api/v1/orders/{id}/company-reroute': {
+    put: {
+      ...operation('Return a company-driver offer for rerouting', 'Orders', {
+        parameters: [pathParameter('id')],
+        errorResponses: { 400: response('Invalid ID'), 401: response('Authentication required'),
+          403: response('Company driver required'), 404: response('Order not found'),
+          409: response('Already responded, offer no longer available, or no alternate driver'), 500: response('Reroute failed') },
+      }),
+      description: 'Only the offered company driver can respond, once, before assignment. Requires another eligible company or nearby partner driver. Does not cancel/delete an order or issue a refund.',
+    },
+  },
   '/': {
     get: operation('Check API health', 'System', { security: false, successDescription: 'API is available' }),
   },

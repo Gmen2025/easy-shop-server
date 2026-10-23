@@ -1095,7 +1095,7 @@ router.get(`/:id`, async (req, res) => {
  *                     maxItems: 2
  *                     items:
  *                       type: number
- *                     description: [longitude, latitude]
+ *                     description: '[longitude, latitude]'
  *               longitude:
  *                 type: number
  *               latitude:

@@ -32,6 +32,31 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
   - Interactive Swagger UI
   - Comprehensive OpenAPI 3.0 specification
 
+### Swagger coverage and validation
+
+Open `/api-docs` for Swagger UI or `/api-docs/swagger.json` for the generated
+OpenAPI document. The spec includes the recent provider OAuth and optional 2FA
+flows, passenger/driver rides, store inventory, grouped delivery checkout,
+international shipping, exchange rates, dashboards and notification aliases.
+Authentication requests document token-free 2FA challenges separately from
+completed access-token responses, plus database selection, PKCE, email delivery
+failures, backup codes and fresh-factor management. Apple callbacks use a form
+body, not JSON. Browser redirects require provider credentials and registered
+callbacks; Swagger UI cannot substitute for the native app's PKCE/browser flow.
+
+Definitions are maintained in router annotations, `swagger-extra.js` and the
+focused `swagger-auth.js`, `swagger-commerce.js`, and `swagger-rides.js` modules,
+merged by `swagger.js`. Request/response schemas and permissions describe the
+actual handlers; no API behavior is changed by these documentation modules.
+The scanner resolves annotations relative to the backend, not the shell's
+working directory. Restart/redeploy the backend to publish documentation changes.
+
+Run `node --test tests/swagger.test.js` to validate the OpenAPI document and
+references, require response/path-parameter documentation, compare declared
+literal endpoints across all mounted routers (including nested routers and
+aliases), and guard authentication public/protected distinctions. Keep the
+mount list in that test in sync when introducing a new router.
+
 ### Scheduled delivery and store order dashboards
 
 #### USA products shipped to Ethiopia, payable in birr

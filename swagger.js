@@ -1,5 +1,9 @@
 const swaggerJsDoc = require('swagger-jsdoc');
 const extraSwaggerPaths = require('./swagger-extra');
+const authSwagger = require('./swagger-auth');
+const commerceSwagger = require('./swagger-commerce');
+const ridesSwagger = require('./swagger-rides');
+const path = require('node:path');
 
 const swaggerOptions = {
   definition: {
@@ -32,6 +36,23 @@ const swaggerOptions = {
         }
       },
       schemas: {
+        DashboardPeriods: {
+          type: 'object',
+          description: 'Trailing periods. Metrics vary by platform/store/driver dashboard; monetary amounts use the selected region.',
+          properties: Object.fromEntries(['daily', 'weekly', 'monthly', 'quarterly', 'yearly'].map((period) => [period, {
+            type: 'object', properties: {
+              start: { type: 'string', format: 'date-time' }, end: { type: 'string', format: 'date-time' },
+              totalSales: { type: 'number' }, productSales: { type: 'number' }, deliveryIncome: { type: 'number' },
+              sales: { type: 'number' }, earnings: { type: 'number' }, income: { type: 'number' },
+              orders: { type: 'integer' }, completedOrders: { type: 'integer' }, deliveries: { type: 'integer' },
+              cancelledOrders: { type: 'integer' }, paidOrders: { type: 'integer' }, pendingPaymentOrders: { type: 'integer' },
+              unitsSold: { type: 'integer' }, deliveryDistanceKm: { type: 'number' }, distanceKm: { type: 'number' },
+              averageOrder: { type: 'number' }, averageDeliveryFee: { type: 'number' }, averageFee: { type: 'number' },
+              reviews: { type: 'integer' }, averageRating: { type: 'number' },
+              paymentMethods: { type: 'object', additionalProperties: { type: 'number' } },
+            },
+          }])),
+        },
         GeoPoint: {
           type: 'object',
           properties: {
@@ -292,12 +313,22 @@ const swaggerOptions = {
         },
         LoginResponse: {
           type: 'object',
+          required: ['_id', 'token'],
           properties: {
-            user: { type: 'string', format: 'email' },
             _id: { type: 'string' },
             name: { type: 'string' },
+            email: { type: 'string', format: 'email' },
             phone: { type: 'string' },
             isAdmin: { type: 'boolean' },
+            isDriver: { type: 'boolean' },
+            isStoreOwner: { type: 'boolean' },
+            role: { type: 'string' },
+            driverId: { type: 'string' },
+            storeId: { type: 'string' },
+            isCompanyOwned: { type: 'boolean' },
+            isCompanyOwnedDriver: { type: 'boolean' },
+            isCompanyOwnedStore: { type: 'boolean' },
+            storeOwnerApprovalStatus: { type: 'string', nullable: true },
             isEmailVerified: { type: 'boolean' },
             token: { type: 'string', description: 'JWT authentication token' }
           }
@@ -442,6 +473,11 @@ const swaggerOptions = {
       { name: 'Cloudinary', description: 'Signed media upload helpers.' },
       { name: 'Products', description: 'Product catalog and moderation endpoints.' },
       { name: 'Users', description: 'User registration, authentication, and account management endpoints.' },
+      { name: 'Authentication', description: 'Provider OAuth and optional authenticator/email 2FA. Keep the selected database throughout the flow. Challenges are not access JWTs.' },
+      { name: 'Rides', description: 'Passenger quotes, shared/private ride lifecycle, driver workflows, routing and payments.' },
+      { name: 'Store inventory', description: 'Public storefront discovery and authenticated owner inventory/assignment management.' },
+      { name: 'Delivery checkout', description: 'Saved delivery addresses, regional configuration, grouped reservations, payments, cancellations and refunds.' },
+      { name: 'Exchange rates', description: 'Regional USD/ETB purchasing rates and admin enablement, apply and refresh controls.' },
       { name: 'Telebirr', description: 'Telebirr payment initiation and verification endpoints.' },
       { name: 'Service Requests', description: 'Customer service request and technician workflow endpoints.' },
       { name: 'System', description: 'API health and documentation endpoints.' },
@@ -452,7 +488,7 @@ const swaggerOptions = {
       bearerAuth: []
     }]
   },
-  apis: ['./routers/*.js', './app.js'] // Path to the API routes
+  apis: [path.join(__dirname, 'routers', '*.js').replace(/\\/g, '/'), path.join(__dirname, 'app.js').replace(/\\/g, '/')]
 };
 
 const swaggerDocs = swaggerJsDoc(swaggerOptions);
@@ -465,6 +501,95 @@ for (const [path, operations] of Object.entries(extraSwaggerPaths)) {
     ...(swaggerDocs.paths[path] || {}),
     ...operations,
   };
+}
+
+Object.assign(swaggerDocs.components.schemas, authSwagger.schemas, commerceSwagger.schemas, ridesSwagger.schemas);
+swaggerDocs.components.parameters = {
+  ...(swaggerDocs.components.parameters || {}), ...authSwagger.parameters,
+};
+Object.assign(swaggerDocs.paths, authSwagger.paths, commerceSwagger.paths, ridesSwagger.paths);
+for (const endpoint of ['login', 'driver-login', 'store-owner-login']) {
+  const operation = swaggerDocs.paths[`/api/v1/users/${endpoint}`].post;
+  operation.security = [];
+  operation.parameters = [
+    { $ref: '#/components/parameters/AuthDatabaseHeader' },
+    { $ref: '#/components/parameters/AuthDatabaseQuery' },
+  ];
+  operation.responses = authSwagger.loginResponses;
+  operation.description = `${operation.description || ''} Returns either the original access-token response or a token-free 2FA challenge. If requiresTwoFactor is true, complete /users/auth/2fa/verify before authenticating. An email deliveryError still permits backup-code verification.`;
+}
+const upgrade = swaggerDocs.paths['/api/v1/users/upgrade-role'].post;
+upgrade.responses['200'] = {
+  description: 'Role-upgrade token response, or a second-factor challenge without an access token',
+  content: { 'application/json': { schema: { oneOf: [
+    { $ref: '#/components/schemas/RoleUpgradeLoginResponse' },
+    { $ref: '#/components/schemas/TwoFactorChallenge' },
+  ] } } },
+};
+swaggerDocs.paths['/api/v1/stores/register-owner'].post.responses['201'] = {
+  description: 'Registration response or an existing account second-factor challenge; no token until factor verification',
+  content: { 'application/json': { schema: { oneOf: [
+    { $ref: '#/components/schemas/StoreRegistrationLoginResponse' },
+    { $ref: '#/components/schemas/TwoFactorChallenge' },
+  ] } } },
+};
+
+for (const method of ['put', 'delete']) {
+  swaggerDocs.paths['/api/v1/notifications/{userId}/push-token'] = {
+    ...(swaggerDocs.paths['/api/v1/notifications/{userId}/push-token'] || {}),
+    [method]: JSON.parse(JSON.stringify(swaggerDocs.paths['/api/v1/users/{userId}/push-token'][method])),
+  };
+}
+for (const [endpoint, operations] of Object.entries(swaggerDocs.paths)) {
+  if (endpoint.startsWith('/api/v1/notifications/')) {
+    const alias = endpoint.replace('/api/v1/notifications/', '/api/v1/users/');
+    const aliased = JSON.parse(JSON.stringify(operations));
+    for (const operation of Object.values(aliased)) {
+      if (operation && typeof operation === 'object' && operation.responses) {
+        operation.security = [{ bearerAuth: [] }];
+      }
+    }
+    swaggerDocs.paths[alias] = { ...aliased, ...(swaggerDocs.paths[alias] || {}) };
+  }
+}
+
+const companyOperations = {
+  '/api/v1/drivers/admin/company-drivers': ['get', 'post'],
+  '/api/v1/drivers/admin/company-drivers/{id}': ['put'],
+  '/api/v1/drivers/me/completed-today': ['get'],
+  '/api/v1/orders/admin/company-fulfillable': ['get'],
+  '/api/v1/orders/company/my-deliveries': ['get'],
+  '/api/v1/orders/{id}/company-claim': ['put'],
+  '/api/v1/orders/{id}/company-reject': ['put'],
+  '/api/v1/orders/admin/company-rejections': ['get'],
+  '/api/v1/orders/{id}/company-responses/{responseId}': ['delete'],
+  '/api/v1/products/admin/company-fulfillable': ['get'],
+  '/api/v1/products/company/my-products': ['get'],
+  '/api/v1/products/{id}/company-ready': ['put'],
+  '/api/v1/products/{id}/company-reject': ['put'],
+  '/api/v1/products/admin/company-rejections': ['get'],
+  '/api/v1/products/{id}/company-responses/{responseId}': ['delete'],
+  '/api/v1/stores/admin/company-stores': ['get', 'post'],
+  '/api/v1/stores/admin/company-stores/{id}': ['put'],
+  '/api/v1/users/admin/assign-role': ['post'],
+};
+for (const [endpoint, methods] of Object.entries(companyOperations)) {
+  for (const method of methods) {
+    const operation = swaggerDocs.paths[endpoint][method];
+    operation.parameters = [...endpoint.matchAll(/\{([^}]+)\}/g)].map((match) => ({
+      in: 'path', name: match[1], required: true, schema: { type: 'string' },
+    }));
+    const success = method === 'post' && /\/company-(stores|drivers)$/.test(endpoint) ? '201' : '200';
+    operation.responses = {
+      [success]: { description: operation.summary },
+      400: { description: 'Invalid request' },
+      401: { description: 'Authentication required' },
+      403: { description: 'Required admin, company-driver or company-store access is missing' },
+      404: { description: 'Requested account, order, product or response not found' },
+      409: { description: 'Assignment or availability changed; reload before retrying' },
+      500: { description: 'Unable to complete the operation' },
+    };
+  }
 }
 
 module.exports = swaggerDocs;
