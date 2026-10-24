@@ -6,6 +6,37 @@ also accepts the existing `databaseName` selector. OAuth callbacks recover the
 original database from a one-use server-side state record; they do not trust a
 callback database parameter.
 
+## Admin-controlled social sign-in
+
+Google, Apple, and Facebook share one global switch stored in the
+`social-login` SiteSetting document in `DEFAULT_DB_NAME`. It defaults to **OFF**
+when absent. Region selectors do not change this setting: one admin action
+controls all regions and all development/production clients connected to the
+same backend. Independent backend/default-database deployments remain separate.
+
+* `GET /settings/social-login` is public and returns
+  `{ "success": true, "enabled": false, "updatedAt": null }` before configuration.
+  Responses use `Cache-Control: no-store`.
+* `PUT /settings/social-login` requires a valid admin bearer token and a strict
+  boolean JSON body, for example `{ "enabled": true }`. Missing or nonboolean
+  values return 400; non-admins return 403. A successful response contains the
+  saved `enabled` value and timestamp. The existing unique SiteSetting key
+  index supports the single-document upsert; no provider credentials are exposed.
+* Mobile control: **Admin > Maintenance & Login > Social sign-in**.
+  Website control: **Admin Dashboard > Social sign-in**. Deploy this backend
+  before the updated clients. No restart/rebuild is required for later toggles.
+* Mobile login refreshes on focus/foreground and every 30 seconds while focused.
+  Read failures hide the buttons and display an error; email login still works.
+  The prior `EXPO_PUBLIC_ENABLE_SOCIAL_LOGIN` build flag is no longer used.
+* Backend checks occur at OAuth start, callback, exchange, and before issuing
+  tokens or completing a social-origin 2FA challenge. A disabled setting yields
+  `social_login_disabled` (403 for JSON exchange; allowlisted redirects carry
+  that error for browser flows). Settings database failures fail closed.
+  Existing access tokens and password sign-in/2FA are not revoked or disabled.
+
+The switch controls availability, not provider configuration. Configure and
+test provider credentials/callbacks before enabling it for real users.
+
 ## Deployment
 
 Requires Node.js 18+ (built-in `fetch`) and MongoDB. No provider credentials are

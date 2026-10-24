@@ -5,6 +5,7 @@ const {
 } = require('../helpers/delivery');
 const { isGoogleDistanceApiConfigured, getDrivingDistanceKm } = require('../helpers/google-distance');
 const { getCoordinates, resolvePickupStore } = require('../helpers/fulfillment-routing');
+const { readSocialLoginSetting, updateSocialLoginSetting } = require('../helpers/social-login-settings');
 
 const MAINTENANCE_SETTING_KEY = 'maintenance-mode';
 const BANK_ACCOUNT_SETTING_KEY = 'bank-account-info';
@@ -22,6 +23,84 @@ function requireAdmin(req, res) {
   return true;
 }
 
+/**
+ * @swagger
+ * /api/v1/settings/social-login:
+ *   get:
+ *     summary: Get the global social sign-in switch
+ *     description: Public, uncached status shared across databases. Defaults to disabled.
+ *     tags: [Settings]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: Current switch
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [success, enabled]
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 enabled:
+ *                   type: boolean
+ *                 updatedAt:
+ *                   type: string
+ *                   format: date-time
+ *                   nullable: true
+ *       503:
+ *         description: Unable to read the switch; clients must disable social sign-in
+ *   put:
+ *     summary: Update the global Google, Apple and Facebook sign-in switch
+ *     description: Admin only. Does not revoke existing sessions. Disabling also blocks in-progress social flows at subsequent checkpoints.
+ *     tags: [Settings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [enabled]
+ *             properties:
+ *               enabled:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Persisted switch with success, enabled and updatedAt fields
+ *       400:
+ *         description: enabled must be a boolean
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Admin access required
+ *       503:
+ *         description: Unable to save the switch
+ */
+router.get('/social-login', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    return res.json(await readSocialLoginSetting());
+  } catch (error) {
+    console.error('Failed to read social sign-in setting:', error);
+    return res.status(503).json({ success: false, message: 'Unable to load social sign-in settings.' });
+  }
+});
+
+router.put('/social-login', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!requireAdmin(req, res)) return;
+  if (typeof req.body?.enabled !== 'boolean') {
+    return res.status(400).json({ success: false, message: 'enabled must be a boolean.' });
+  }
+  try {
+    return res.json(await updateSocialLoginSetting(req.body.enabled, req.auth.userId || null));
+  } catch (error) {
+    console.error('Failed to update social sign-in setting:', error);
+    return res.status(503).json({ success: false, message: 'Unable to save social sign-in settings.' });
+  }
+});
 
 /**
  * @swagger

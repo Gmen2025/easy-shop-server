@@ -15,7 +15,7 @@ const databaseParameters = [
 const failures = {
   400: response('Invalid, expired, exhausted, already-used code, or security settings changed', ref('AuthError')),
   401: response('A valid access JWT is required for protected operations', ref('AuthError')),
-  403: response('Email is not verified or requested account role is not approved', ref('AuthError')),
+  403: response('Email is not verified, requested account role is not approved, or social sign-in is disabled (social_login_disabled)', ref('AuthError')),
   409: response('Enrollment/account conflict', ref('AuthError')),
   429: response('Attempt budget or email cooldown exceeded', ref('AuthError')),
   500: response('Authentication failed unexpectedly', ref('AuthError')),
@@ -55,14 +55,14 @@ const paths = {
       ],
       responses: {
         302: { description: 'Continue to provider authorization', headers: { Location: { schema: string, description: 'Provider HTTPS authorization URL' } } },
-        303: { description: 'Return provider_unavailable, rate_limited or social_auth_failed in app redirect query', headers: { Location: { schema: string } } },
+        303: { description: 'Return social_login_disabled, provider_unavailable, rate_limited or social_auth_failed in app redirect query', headers: { Location: { schema: string } } },
         400: failures[400], 500: failures[500],
       },
     },
   },
   '/api/v1/users/auth/social/exchange': {
     post: operation('Exchange a PKCE-bound social login handoff',
-      'Use the same selected database and verifier as start. Handoff expires after 60 seconds and can be consumed once. Provider/access tokens never appear in the app callback URL.',
+      'Use the same selected database and verifier as start. Handoff expires after 60 seconds and can be consumed once. Provider/access tokens never appear in the app callback URL. The global social-login setting must still be enabled, including when completing a resulting 2FA challenge.',
       object({ code: opaque, codeVerifier: { type: 'string', minLength: 43, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' },
         databaseName: { type: 'string', description: 'Existing body alias for database selection.' } }, ['code', 'codeVerifier']), finalOrChallenge, true),
   },

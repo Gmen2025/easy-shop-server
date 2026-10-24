@@ -1,6 +1,7 @@
 const crypto = require("crypto");
 const { createRemoteJWKSet, jwtVerify, SignJWT, importPKCS8 } = require("jose");
 const auth = require("./auth-security");
+const { requireSocialLoginEnabled } = require("./social-login-settings");
 const { getModelsForDb, DEFAULT_DB_NAME } = require("./db-manager");
 
 const jwks = {
@@ -44,6 +45,7 @@ async function requestJson(url, options = {}) {
 }
 
 async function start(req) {
+  await requireSocialLoginEnabled();
   const provider = req.query.provider;
   const cfg = config(provider);
   const redirectUri = allowRedirect(req.query.redirectUri);
@@ -164,6 +166,7 @@ async function callback(req, res) {
     if (payload.provider !== req.params.provider || values.error) throw auth.fail("Provider authorization was cancelled");
     req.dbName = payload.dbName;
     req.dbModels = getModelsForDb(payload.dbName);
+    await requireSocialLoginEnabled();
     const identity = await providerIdentity(payload.provider, values.code, payload);
     const user = await resolveIdentity(req, payload.provider, identity);
     const { id } = await auth.createRecord(req, "oauth-handoff", user._id, {
@@ -175,20 +178,22 @@ async function callback(req, res) {
   } catch (error) {
     if (!payload) return res.status(400).json({ message: "Invalid or expired OAuth state", code: "invalid_state" });
     const redirect = new URL(payload.redirectUri);
-    redirect.searchParams.set("error", error.code === "account_conflict" ? "account_conflict" :
+    redirect.searchParams.set("error", error.code === "social_login_disabled" ? "social_login_disabled" :
+      error.code === "account_conflict" ? "account_conflict" :
       error.code === "email_required" ? "email_required" : "social_auth_failed");
     return res.redirect(303, redirect.toString());
   }
 }
 
 async function exchange(req) {
+  await requireSocialLoginEnabled();
   await auth.rateLimit(req, `exchange:${req.ip}`, 60);
   const record = await auth.attempt(req, req.body.code, "oauth-handoff");
   if (!validPkce(req.body.codeVerifier, record.payload.codeChallenge)) throw auth.fail("Invalid PKCE verifier");
   await auth.consume(req, record);
   const user = await req.dbModels.User.findById(record.userId);
   if (!user) throw auth.fail("Account is unavailable");
-  return auth.login(req, user);
+  return auth.login(req, user, "normal", { socialLogin: true });
 }
 
 module.exports = { start, callback, exchange, pkce, validPkce, config, allowRedirect, providerIdentity, resolveIdentity };

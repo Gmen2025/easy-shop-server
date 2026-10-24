@@ -26,7 +26,8 @@ router.get("/social/start", wrap(async (req, res) => {
     res.redirect(302, await social.start(req));
   } catch (error) {
     const redirect = new URL(redirectUri);
-    redirect.searchParams.set("error", error.code === "provider_unavailable" ? "provider_unavailable" :
+    redirect.searchParams.set("error", error.code === "social_login_disabled" ? "social_login_disabled" :
+      error.code === "provider_unavailable" ? "provider_unavailable" :
       error.code === "rate_limited" ? "rate_limited" : "social_auth_failed");
     res.redirect(303, redirect.toString());
   }

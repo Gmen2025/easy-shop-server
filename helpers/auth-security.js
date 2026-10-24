@@ -2,6 +2,7 @@ const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const { authenticator } = require("otplib");
 const mailer = require("./mailer");
+const { requireSocialLoginEnabled } = require("./social-login-settings");
 
 const TTL = 5 * 60 * 1000;
 const MAX_ATTEMPTS = 5;
@@ -210,6 +211,7 @@ async function buildLoginResponse(req, user, kind, extra) {
 
 // This is the only access-token issuance entry point, including role upgrades.
 async function login(req, user, kind = "normal", extra = {}, verifiedVersion) {
+  if (extra.socialLogin === true) await requireSocialLoginEnabled();
   const current = await securityUser(req, user._id);
   if (!current) throw fail("User no longer exists", 401);
   const security = securityOf(current);
@@ -220,6 +222,7 @@ async function login(req, user, kind = "normal", extra = {}, verifiedVersion) {
 async function verifyLogin(req, body) {
   await rateLimit(req, `verify-ip:${req.ip}`, 100);
   const record = await attempt(req, body.challengeId, "login");
+  if (record.payload.extra?.socialLogin === true) await requireSocialLoginEnabled();
   const user = await securityUser(req, record.userId);
   if (!user) throw fail("Invalid challenge");
   await rateLimit(req, `verify-user:${user.id}`, 30);

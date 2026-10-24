@@ -235,7 +235,11 @@ test("management never trusts an old JWT instead of a fresh current factor", asy
   await assert.rejects(auth.verifyFactor(req, user, { code: "123456" }, old.record, old.id), /changed/);
 });
 
-test("PKCE uses S256, validates RFC verifier format, and handoffs are one-use", async () => {
+test("PKCE uses S256, validates RFC verifier format, and handoffs are one-use", async (t) => {
+  let socialEnabled = true;
+  t.mock.method(require("../helpers/db-manager"), "getModelsForDb", () => ({
+    SiteSetting: { findOne: () => ({ select: () => ({ lean: async () => ({ socialLoginEnabled: socialEnabled }) }) }) },
+  }));
   const verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
   assert.equal(social.pkce(verifier), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
   assert.equal(social.validPkce(verifier, social.pkce(verifier)), true);
@@ -246,6 +250,16 @@ test("PKCE uses S256, validates RFC verifier format, and handoffs are one-use", 
   const response = await social.exchange(req);
   assert.ok(response.token);
   await assert.rejects(social.exchange(req), /Invalid/);
+  const withFactor = fixture(enrolled().security).req;
+  const handoff = await auth.createRecord(withFactor, "oauth-handoff", "user1", { codeChallenge: social.pkce(verifier) });
+  withFactor.body = { code: handoff.id, codeVerifier: verifier };
+  const challenge = await social.exchange(withFactor);
+  assert.equal(challenge.requiresTwoFactor, true);
+  const loginRecord = withFactor.dbModels.AuthRecord.rows.find((row) => row.type === "login");
+  assert.equal(loginRecord.payload.extra.socialLogin, true);
+  socialEnabled = false;
+  await assert.rejects(auth.verifyLogin(withFactor, { challengeId: challenge.challengeId, code: "123456" }),
+    { code: "social_login_disabled" });
 });
 
 test("OAuth state cannot be reused or substituted for a handoff", async () => {
@@ -395,6 +409,9 @@ test("HTTP setup verifies before enabling, rejects enrollment overwrite, and pro
 });
 
 test("unconfigured providers redirect only to allowlisted application destinations", async (t) => {
+  t.mock.method(require("../helpers/db-manager"), "getModelsForDb", () => ({
+    SiteSetting: { findOne: () => ({ select: () => ({ lean: async () => ({ socialLoginEnabled: true }) }) }) },
+  }));
   const { req } = fixture();
   const base = await serve(t, req);
   const old = process.env.GOOGLE_CLIENT_ID;
