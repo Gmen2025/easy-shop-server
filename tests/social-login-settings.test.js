@@ -26,7 +26,14 @@ function fixture(t) {
       assert.equal(filter.key, "social-login");
       assert.equal(options.upsert, true);
       state.writes++;
-      state.setting = { ...update.$set, updatedAt: new Date().toISOString() };
+      state.setting ||= {};
+      for (const [key, value] of Object.entries(update.$set)) {
+        if (key.startsWith("socialLoginProviders.")) {
+          state.setting.socialLoginProviders ||= {};
+          state.setting.socialLoginProviders[key.split(".")[1]] = value;
+        } else state.setting[key] = value;
+      }
+      state.setting.updatedAt = new Date().toISOString();
       return state.setting;
     },
   };
@@ -84,6 +91,8 @@ test("global switch defaults OFF; public read is uncached; writes are admin-only
 
 test("disabled switch blocks all social starts and handoff exchanges, including old clients", async (t) => {
   fixture(t);
+  t.mock.method(auth, "rateLimit", async () => {});
+  t.mock.method(auth, "attempt", async () => ({ payload: { provider: "google" } }));
   const base = await serve(t);
   for (const provider of ["google", "apple", "facebook"]) {
     const res = await fetch(`${base}/users/auth/social/start?${new URLSearchParams({
@@ -99,8 +108,68 @@ test("disabled switch blocks all social starts and handoff exchanges, including 
   assert.equal((await exchange.json()).code, "social_login_disabled");
 });
 
-test("callback restores its tenant then refuses provider work when the global switch is off", async (t) => {
-  fixture(t);
+test("legacy values migrate lazily; each partial provider update preserves the others", async (t) => {
+  const state = fixture(t);
+  const { SiteSetting } = require("../models/site-setting");
+  const oldDocument = new SiteSetting({ key: "social-login", socialLoginEnabled: true });
+  assert.equal(oldDocument.socialLoginProviders.google, undefined);
+  for (const legacy of [true, false]) {
+    state.setting = { socialLoginEnabled: legacy };
+    assert.deepEqual((await settings.readSocialLoginSetting()).providers,
+      { google: legacy, apple: legacy, facebook: legacy });
+    await settings.updateSocialLoginSetting({ google: !legacy }, "admin");
+    assert.deepEqual((await settings.readSocialLoginSetting()).providers,
+      { google: !legacy, apple: legacy, facebook: legacy });
+  }
+  state.setting = null;
+  await Promise.all([
+    settings.updateSocialLoginSetting({ google: true }, "admin"),
+    settings.updateSocialLoginSetting({ facebook: true }, "admin"),
+  ]);
+  assert.deepEqual((await settings.readSocialLoginSetting()).providers,
+    { google: true, apple: false, facebook: true });
+});
+
+test("provider updates reject invalid shapes and never overwrite omitted providers", async (t) => {
+  const state = fixture(t);
+  state.setting = { socialLoginEnabled: true };
+  const base = await serve(t);
+  const write = (body) => fetch(`${base}/settings/social-login`, {
+    method: "PUT", headers: { "Content-Type": "application/json",
+      Authorization: `Bearer ${jwt.sign({ userId: "admin", isAdmin: true }, process.env.secret)}` },
+    body: JSON.stringify(body),
+  });
+  for (const body of [{ providers: {} }, { providers: [] }, { providers: null },
+    { providers: { twitter: true } }, { providers: { google: "false" } },
+    { enabled: true, providers: { apple: false } }]) {
+    assert.equal((await write(body)).status, 400);
+  }
+  assert.equal(state.writes, 0);
+  const response = await write({ providers: { apple: false } });
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).providers, { google: true, apple: false, facebook: true });
+});
+
+test("mixed settings gate only the chosen provider; legacy provider-less flows fail closed", async (t) => {
+  const state = fixture(t);
+  state.setting = { socialLoginEnabled: true, socialLoginProviders: { apple: false } };
+  await settings.requireSocialLoginEnabled("google");
+  await settings.requireSocialLoginEnabled("facebook");
+  await assert.rejects(settings.requireSocialLoginEnabled("apple"), { code: "social_login_disabled" });
+  await assert.rejects(settings.requireSocialLoginEnabled(), { code: "social_login_disabled" });
+  await assert.rejects(settings.requireSocialLoginEnabled("constructor"), { code: "social_login_disabled" });
+  const base = await serve(t);
+  t.mock.method(auth, "rateLimit", async () => {});
+  t.mock.method(auth, "attempt", async () => ({ payload: { provider: "apple" } }));
+  const exchange = await fetch(`${base}/users/auth/social/exchange`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+  });
+  assert.equal(exchange.status, 403);
+});
+
+test("callback restores its tenant then refuses only the disabled provider", async (t) => {
+  const state = fixture(t);
+  state.setting = { socialLoginEnabled: true, socialLoginProviders: { apple: false } };
   t.mock.method(auth, "attempt", async () => ({
     payload: { dbName: "E_ShopUSA", provider: "apple", redirectUri: "addugeneteshop://auth" },
   }));
@@ -115,15 +184,18 @@ test("callback restores its tenant then refuses provider work when the global sw
 
 test("disabling blocks social-origin 2FA before factor use, while password login remains unchanged", async (t) => {
   const state = fixture(t);
+  state.setting = { socialLoginEnabled: true, socialLoginProviders: { google: false } };
   const user = { _id: "user", id: "user", name: "Test", email: "test@example.com", authSecurity: { enabled: false } };
   const req = { dbModels: {
     User: { findById: () => ({ select: async () => user }) },
     Store: { findOne: () => ({ select: async () => null }) },
     AuthRecord: {
-      findOneAndUpdate: async () => ({ payload: { extra: { socialLogin: true } }, userId: "user" }),
+      findOneAndUpdate: async () => ({ payload: { extra: { socialLogin: true, socialProvider: "google" } }, userId: "user" }),
     },
   } };
-  await assert.rejects(auth.login(req, user, "normal", { socialLogin: true }), { code: "social_login_disabled" });
+  await assert.rejects(auth.login(req, user, "normal", { socialLogin: true, socialProvider: "google" }), { code: "social_login_disabled" });
+  const apple = await auth.login(req, user, "normal", { socialLogin: true, socialProvider: "apple" });
+  assert.ok(apple.token, "Disabling Google must not disable Apple");
   const password = await auth.login(req, user);
   assert.ok(password.token);
   const originalRateLimit = req.dbModels.AuthRecord.findOneAndUpdate;
@@ -131,7 +203,7 @@ test("disabling blocks social-origin 2FA before factor use, while password login
     update.$inc?.attempts ? originalRateLimit() : {};
   await assert.rejects(auth.verifyLogin(req, { challengeId: "challenge" }), { code: "social_login_disabled" });
   state.setting = { socialLoginEnabled: true };
-  const socialLogin = await auth.login(req, user, "normal", { socialLogin: true });
+  const socialLogin = await auth.login(req, user, "normal", { socialLogin: true, socialProvider: "google" });
   assert.ok(socialLogin.token);
 });
 

@@ -62,7 +62,7 @@ const paths = {
   },
   '/api/v1/users/auth/social/exchange': {
     post: operation('Exchange a PKCE-bound social login handoff',
-      'Use the same selected database and verifier as start. Handoff expires after 60 seconds and can be consumed once. Provider/access tokens never appear in the app callback URL. The global social-login setting must still be enabled, including when completing a resulting 2FA challenge.',
+      'Use the same selected database and verifier as start. Handoff expires after 60 seconds and can be consumed once. Provider/access tokens never appear in the app callback URL. The provider recorded in server state must still be enabled, including when completing a resulting 2FA challenge. Legacy handoffs without a provider require all providers enabled.',
       object({ code: opaque, codeVerifier: { type: 'string', minLength: 43, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' },
         databaseName: { type: 'string', description: 'Existing body alias for database selection.' } }, ['code', 'codeVerifier']), finalOrChallenge, true),
   },

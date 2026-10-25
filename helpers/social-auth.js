@@ -45,8 +45,8 @@ async function requestJson(url, options = {}) {
 }
 
 async function start(req) {
-  await requireSocialLoginEnabled();
   const provider = req.query.provider;
+  await requireSocialLoginEnabled(provider);
   const cfg = config(provider);
   const redirectUri = allowRedirect(req.query.redirectUri);
   const codeChallenge = req.query.codeChallenge;
@@ -166,11 +166,12 @@ async function callback(req, res) {
     if (payload.provider !== req.params.provider || values.error) throw auth.fail("Provider authorization was cancelled");
     req.dbName = payload.dbName;
     req.dbModels = getModelsForDb(payload.dbName);
-    await requireSocialLoginEnabled();
+    await requireSocialLoginEnabled(payload.provider);
     const identity = await providerIdentity(payload.provider, values.code, payload);
     const user = await resolveIdentity(req, payload.provider, identity);
     const { id } = await auth.createRecord(req, "oauth-handoff", user._id, {
       codeChallenge: payload.codeChallenge,
+      provider: payload.provider,
     }, 60 * 1000);
     const redirect = new URL(payload.redirectUri);
     redirect.searchParams.set("code", id);
@@ -186,14 +187,14 @@ async function callback(req, res) {
 }
 
 async function exchange(req) {
-  await requireSocialLoginEnabled();
   await auth.rateLimit(req, `exchange:${req.ip}`, 60);
   const record = await auth.attempt(req, req.body.code, "oauth-handoff");
+  await requireSocialLoginEnabled(record.payload.provider);
   if (!validPkce(req.body.codeVerifier, record.payload.codeChallenge)) throw auth.fail("Invalid PKCE verifier");
   await auth.consume(req, record);
   const user = await req.dbModels.User.findById(record.userId);
   if (!user) throw auth.fail("Account is unavailable");
-  return auth.login(req, user, "normal", { socialLogin: true });
+  return auth.login(req, user, "normal", { socialLogin: true, socialProvider: record.payload.provider });
 }
 
 module.exports = { start, callback, exchange, pkce, validPkce, config, allowRedirect, providerIdentity, resolveIdentity };

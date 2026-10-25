@@ -14,6 +14,11 @@ const siteSettingSchema = new mongoose.Schema(
       default: false,
     },
     socialLoginEnabled: { type: Boolean, default: false },
+    socialLoginProviders: {
+      google: { type: Boolean, default: undefined },
+      apple: { type: Boolean, default: undefined },
+      facebook: { type: Boolean, default: undefined },
+    },
     bankAccounts: [
       {
         _id: {

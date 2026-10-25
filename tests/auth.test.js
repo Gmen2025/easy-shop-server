@@ -245,18 +245,19 @@ test("PKCE uses S256, validates RFC verifier format, and handoffs are one-use", 
   assert.equal(social.validPkce(verifier, social.pkce(verifier)), true);
   assert.equal(social.validPkce("wrong", social.pkce(verifier)), false);
   const { req } = fixture();
-  const record = await auth.createRecord(req, "oauth-handoff", "user1", { codeChallenge: social.pkce(verifier) });
+  const record = await auth.createRecord(req, "oauth-handoff", "user1", { codeChallenge: social.pkce(verifier), provider: "google" });
   req.body = { code: record.id, codeVerifier: verifier };
   const response = await social.exchange(req);
   assert.ok(response.token);
   await assert.rejects(social.exchange(req), /Invalid/);
   const withFactor = fixture(enrolled().security).req;
-  const handoff = await auth.createRecord(withFactor, "oauth-handoff", "user1", { codeChallenge: social.pkce(verifier) });
+  const handoff = await auth.createRecord(withFactor, "oauth-handoff", "user1", { codeChallenge: social.pkce(verifier), provider: "google" });
   withFactor.body = { code: handoff.id, codeVerifier: verifier };
   const challenge = await social.exchange(withFactor);
   assert.equal(challenge.requiresTwoFactor, true);
   const loginRecord = withFactor.dbModels.AuthRecord.rows.find((row) => row.type === "login");
   assert.equal(loginRecord.payload.extra.socialLogin, true);
+  assert.equal(loginRecord.payload.extra.socialProvider, "google");
   socialEnabled = false;
   await assert.rejects(auth.verifyLogin(withFactor, { challengeId: challenge.challengeId, code: "123456" }),
     { code: "social_login_disabled" });

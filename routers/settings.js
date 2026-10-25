@@ -5,7 +5,7 @@ const {
 } = require('../helpers/delivery');
 const { isGoogleDistanceApiConfigured, getDrivingDistanceKm } = require('../helpers/google-distance');
 const { getCoordinates, resolvePickupStore } = require('../helpers/fulfillment-routing');
-const { readSocialLoginSetting, updateSocialLoginSetting } = require('../helpers/social-login-settings');
+const { PROVIDERS, readSocialLoginSetting, updateSocialLoginSetting } = require('../helpers/social-login-settings');
 
 const MAINTENANCE_SETTING_KEY = 'maintenance-mode';
 const BANK_ACCOUNT_SETTING_KEY = 'bank-account-info';
@@ -27,8 +27,8 @@ function requireAdmin(req, res) {
  * @swagger
  * /api/v1/settings/social-login:
  *   get:
- *     summary: Get the global social sign-in switch
- *     description: Public, uncached status shared across databases. Defaults to disabled.
+ *     summary: Get per-provider social sign-in settings
+ *     description: Public, uncached settings shared across databases. Legacy shared values are inherited until a provider is explicitly saved. enabled means at least one provider is enabled.
  *     tags: [Settings]
  *     security: []
  *     responses:
@@ -38,12 +38,22 @@ function requireAdmin(req, res) {
  *           application/json:
  *             schema:
  *               type: object
- *               required: [success, enabled]
+ *               required: [success, enabled, providers]
  *               properties:
  *                 success:
  *                   type: boolean
  *                 enabled:
  *                   type: boolean
+ *                 providers:
+ *                   type: object
+ *                   required: [google, apple, facebook]
+ *                   properties:
+ *                     google:
+ *                       type: boolean
+ *                     apple:
+ *                       type: boolean
+ *                     facebook:
+ *                       type: boolean
  *                 updatedAt:
  *                   type: string
  *                   format: date-time
@@ -51,8 +61,8 @@ function requireAdmin(req, res) {
  *       503:
  *         description: Unable to read the switch; clients must disable social sign-in
  *   put:
- *     summary: Update the global Google, Apple and Facebook sign-in switch
- *     description: Admin only. Does not revoke existing sessions. Disabling also blocks in-progress social flows at subsequent checkpoints.
+ *     summary: Update Google, Apple and Facebook independently
+ *     description: Admin only. Send a partial providers object; omitted providers are unchanged. Legacy enabled boolean bodies still set all three. Disabling blocks that provider's in-progress flows, not existing sessions.
  *     tags: [Settings]
  *     security:
  *       - bearerAuth: []
@@ -62,15 +72,29 @@ function requireAdmin(req, res) {
  *         application/json:
  *           schema:
  *             type: object
- *             required: [enabled]
  *             properties:
+ *               providers:
+ *                 type: object
+ *                 minProperties: 1
+ *                 additionalProperties: false
+ *                 properties:
+ *                   google:
+ *                     type: boolean
+ *                   apple:
+ *                     type: boolean
+ *                   facebook:
+ *                     type: boolean
  *               enabled:
  *                 type: boolean
+ *                 description: Legacy all-provider update; do not combine with providers
+ *             oneOf:
+ *               - required: [providers]
+ *               - required: [enabled]
  *     responses:
  *       200:
- *         description: Persisted switch with success, enabled and updatedAt fields
+ *         description: Persisted settings with success, enabled, providers and updatedAt fields
  *       400:
- *         description: enabled must be a boolean
+ *         description: Invalid providers or legacy enabled input
  *       401:
  *         description: Authentication required
  *       403:
@@ -91,11 +115,17 @@ router.get('/social-login', async (req, res) => {
 router.put('/social-login', async (req, res) => {
   res.set('Cache-Control', 'no-store');
   if (!requireAdmin(req, res)) return;
-  if (typeof req.body?.enabled !== 'boolean') {
-    return res.status(400).json({ success: false, message: 'enabled must be a boolean.' });
+  const body = req.body;
+  const legacy = typeof body?.enabled === 'boolean' && body.providers === undefined;
+  const providers = legacy ? Object.fromEntries(PROVIDERS.map((name) => [name, body.enabled])) : body?.providers;
+  if (!providers || typeof providers !== 'object' || Array.isArray(providers) ||
+      Object.keys(providers).length === 0 ||
+      Object.entries(providers).some(([name, value]) => !PROVIDERS.includes(name) || typeof value !== 'boolean') ||
+      (!legacy && body.enabled !== undefined)) {
+    return res.status(400).json({ success: false, message: 'providers must contain one or more boolean google, apple, or facebook settings.' });
   }
   try {
-    return res.json(await updateSocialLoginSetting(req.body.enabled, req.auth.userId || null));
+    return res.json(await updateSocialLoginSetting(providers, req.auth.userId || null));
   } catch (error) {
     console.error('Failed to update social sign-in setting:', error);
     return res.status(503).json({ success: false, message: 'Unable to save social sign-in settings.' });
