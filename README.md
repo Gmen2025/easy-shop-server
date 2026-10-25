@@ -2,6 +2,24 @@
 
 A comprehensive REST API for an e-commerce platform built with Node.js, Express, and MongoDB. Features include JWT authentication, payment gateway integrations (Stripe & Telebirr), order management, and email notifications.
 
+## Optional store logos (shared mobile and website)
+
+Stores use the existing `Store.logo` field; no database migration is needed.
+Company-store creation/editing, generic store creation/editing, owner registration,
+owner profile updates and branch creation accept an optional `logo` HTTPS URL
+(maximum 500 characters). Omit it on edits to retain the saved image; send `""`
+to remove it and let clients display initials derived from the registered name.
+Invalid URLs, non-string values and non-HTTPS URLs return HTTP 400 before saving.
+Directory/storefront and owner-profile responses include the saved logo.
+
+Mobile and website forms can select JPEG, PNG or WebP files up to 5 MB,
+uploaded through the existing Cloudinary signing integration into `eshop/stores`.
+The resulting secure URL is persisted only when the store form is saved.
+Cloudinary must already be configured on the backend; upload failures are shown
+to the user and never replaced with a fake saved image. Replacing/removing a
+logo changes the store reference, not the shared Cloudinary asset itself.
+Deploy this backend before the matching clients so company-store logo edits persist.
+
 ## 🚀 Features
 
 - **User Authentication & Authorization**

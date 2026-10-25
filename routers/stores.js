@@ -1,6 +1,7 @@
 const router = require("express").Router();
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
+const { normalizeStoreLogo } = require("../helpers/store-logo");
 const { normalizeDatabaseName, getAllowedDatabaseNames, getModelsForDb } = require("../helpers/db-manager");
 const { getDeliverySchedule } = require("../helpers/delivery");
 const { summarizeStoreOrder, buildStoreOrderSummary } = require("../helpers/store-order-view");
@@ -124,6 +125,7 @@ router.get("/admin/company-stores", requireAdmin, async (req, res) => {
  */
 router.post("/admin/company-stores", requireAdmin, async (req, res) => {
   try {
+    const logo = normalizeStoreLogo(req.body?.logo);
     const { name, address, email, phone, password } = req.body || {};
 
     if (!name || !address || !email || !phone || !password) {
@@ -164,6 +166,7 @@ router.post("/admin/company-stores", requireAdmin, async (req, res) => {
     const store = new Store({
       name,
       address,
+      logo: logo ?? "",
       owner: user._id,
       phone,
       email: normalizedEmail,
@@ -179,7 +182,7 @@ router.post("/admin/company-stores", requireAdmin, async (req, res) => {
     return res.status(201).json({ success: true, message: "Company store created.", store: saved });
   } catch (error) {
     console.error("Company store creation error:", error);
-    return res.status(500).json({ success: false, message: "Unable to create the company store." });
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to create the company store." });
   }
 });
 
@@ -194,6 +197,7 @@ router.post("/admin/company-stores", requireAdmin, async (req, res) => {
  */
 router.put("/admin/company-stores/:id", requireAdmin, async (req, res) => {
   try {
+    const logo = normalizeStoreLogo(req.body?.logo);
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ success: false, message: "Invalid store id." });
     }
@@ -212,6 +216,7 @@ router.put("/admin/company-stores/:id", requireAdmin, async (req, res) => {
     const { name, address, email, phone, password } = req.body || {};
 
     if (name !== undefined) store.name = name;
+    if (logo !== undefined) store.logo = logo;
     if (address !== undefined) store.address = address;
     if (phone !== undefined) store.phone = phone;
     if (parsedPoint.value) store.location = parsedPoint.value;
@@ -238,7 +243,7 @@ router.put("/admin/company-stores/:id", requireAdmin, async (req, res) => {
     return res.status(200).json({ success: true, message: "Company store updated.", store: saved });
   } catch (error) {
     console.error("Company store update error:", error);
-    return res.status(500).json({ success: false, message: "Unable to update the company store." });
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to update the company store." });
   }
 });
 
@@ -920,6 +925,9 @@ router.get(`/:id`, async (req, res) => {
 
 router.post(`/`, async (req, res) => {
   const { Store } = req.dbModels;
+  let logo;
+  try { logo = normalizeStoreLogo(req.body.logo); }
+  catch (error) { return res.status(error.status).json({ success: false, message: error.message }); }
 
   if (!req.body.name || !req.body.address) {
     return res.status(400).json({ success: false, message: "name and address are required." });
@@ -932,6 +940,7 @@ router.post(`/`, async (req, res) => {
 
   const store = new Store({
     name: req.body.name,
+    logo: logo ?? "",
     address: req.body.address,
     location: parsedPoint.value || undefined,
   });
@@ -997,6 +1006,9 @@ router.post(`/`, async (req, res) => {
 
 router.put(`/:id`, async (req, res) => {
   const { Store } = req.dbModels;
+  let logo;
+  try { logo = normalizeStoreLogo(req.body.logo); }
+  catch (error) { return res.status(error.status).json({ success: false, message: error.message }); }
   if (!mongoose.isValidObjectId(req.params.id)) {
     return res.status(400).json({ success: false, message: "Invalid Store Id" });
   }
@@ -1007,6 +1019,7 @@ router.put(`/:id`, async (req, res) => {
   }
 
   const updateFields = {};
+  if (logo !== undefined) updateFields.logo = logo;
   if (req.body.name !== undefined) updateFields.name = req.body.name;
   if (req.body.address !== undefined) updateFields.address = req.body.address;
   if (parsedPoint.value) updateFields.location = parsedPoint.value;

@@ -1,5 +1,6 @@
 const router = require("express").Router();
 const mongoose = require("mongoose");
+const { normalizeStoreLogo } = require("../helpers/store-logo");
 router.use(require("./multi-delivery"));
 const {
   CONFIG_KEY, inventoryEnabled, publicStore, conflict, normalizeLines,
@@ -28,7 +29,7 @@ async function ownedStore(req, id) {
 
 function profile(body, creating = false) {
   const result = {};
-  for (const field of ["name", "address", "logo", "description"]) {
+  for (const field of ["name", "address", "description"]) {
     if (body[field] === undefined && !creating) continue;
     if (typeof body[field] !== "string" || body[field].trim().length > (field === "description" ? 2000 : 500)) {
       throw conflict(`Invalid ${field}.`);
@@ -37,7 +38,8 @@ function profile(body, creating = false) {
   }
   if ((creating || body.name !== undefined) && !result.name) throw conflict("Store name is required.");
   if ((creating || body.address !== undefined) && !result.address) throw conflict("Store address is required.");
-  if (result.logo && !/^https:\/\/[^\s]+$/i.test(result.logo)) throw conflict("Logo must be an HTTPS image URL.");
+  const logo = normalizeStoreLogo(body.logo);
+  if (logo !== undefined || creating) result.logo = logo ?? "";
   if (creating || body.latitude !== undefined || body.longitude !== undefined) {
     const latitude = Number(body.latitude);
     const longitude = Number(body.longitude);

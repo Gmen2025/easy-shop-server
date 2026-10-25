@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const { normalizeStoreLogo } = require('../helpers/store-logo');
 const authSecurity = require('../helpers/auth-security');
 const { inventoryEnabled, updateManagedOrder } = require("../helpers/store-inventory");
 
@@ -171,6 +172,7 @@ async function getStoreOrderStats(req, storeId, sinceDate = null) {
  */
 router.post('/register-owner', async (req, res) => {
   try {
+    const logo = normalizeStoreLogo(req.body?.logo);
     const { User, Store } = req.dbModels;
     const {
       fullName, storeName, phone, email, password, category,
@@ -210,6 +212,7 @@ router.post('/register-owner', async (req, res) => {
 
     const store = new Store({
       name: storeName,
+      logo: logo ?? '',
       address: address || '',
       owner: savedUser._id,
       phone: phone || '',
@@ -304,6 +307,7 @@ router.get('/mine/by-owner', async (req, res) => {
       store: {
         id: store.id,
         name: store.name,
+        logo: store.logo || '',
         address: store.address,
         phone: store.phone,
         email: store.email,
@@ -392,6 +396,7 @@ router.get('/mine/by-owner', async (req, res) => {
  */
 router.put('/mine/update', async (req, res) => {
   try {
+    const logo = normalizeStoreLogo(req.body?.logo);
     const { Store } = req.dbModels;
     const userId = req.auth?.userId;
     if (!userId) return res.status(401).json({ success: false, message: 'Not authenticated.' });
@@ -405,6 +410,7 @@ router.put('/mine/update', async (req, res) => {
     } = req.body || {};
 
     if (storeName || name) store.name = storeName || name;
+    if (logo !== undefined) store.logo = logo;
     if (phone !== undefined) store.phone = phone;
     if (category !== undefined) store.category = category;
     if (address !== undefined) store.address = address;
@@ -426,6 +432,7 @@ router.put('/mine/update', async (req, res) => {
       store: {
         id: store.id,
         name: store.name,
+        logo: store.logo || '',
         address: store.address,
         phone: store.phone,
         email: store.email,
@@ -443,7 +450,7 @@ router.put('/mine/update', async (req, res) => {
       },
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.status || 500).json({ success: false, message: err.message });
   }
 });
 

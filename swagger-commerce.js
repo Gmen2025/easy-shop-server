@@ -73,8 +73,8 @@ const schemas = {
     description: "Partial owner profile update. All provided strings are trimmed. If either coordinate is supplied, both are required; empty coordinates are invalid.",
   },
   CommerceBranchInput: {
-    ...object(profileProperties, Object.keys(profileProperties)),
-    description: "All six fields are required by the creation handler, including logo and description (which may be empty strings).",
+    ...object(profileProperties, Object.keys(profileProperties).filter((key) => key !== "logo")),
+    description: "Name, address, description (which may be empty), latitude and longitude are required. Logo is optional; omit or send an empty string to display store initials.",
   },
   CommercePackageSize: {
     ...object(sizeProperties),
