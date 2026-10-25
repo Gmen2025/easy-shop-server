@@ -59,15 +59,11 @@ async function eligibleStores(models, lines, { customerLocation, storefrontId, e
   const byKey = new Map(stocks.map((stock) => [`${stock.store}:${stock.product}`, stock]));
   const coordinates = getCoordinates(customerLocation);
   if (!coordinates) throw conflict("A verified customer delivery location is required to select the nearest store.");
-  const settings = !storefrontId
-    ? await models.SiteSetting.findOne({ key: CONFIG_KEY }).session(session || null).lean() : null;
-  const defaultStoreId = settings?.inventoryConfig?.defaultStoreId;
   return stores.filter((store) => lines.every((line) => {
     const stock = byKey.get(`${store._id}:${line.product}`);
     return stock && stock.countInStock - stock.reserved >= line.quantity &&
       Math.round(stock.price * 100) === Math.round(line.price * 100);
-  })).sort((a, b) => Number(String(a._id) === String(defaultStoreId)) - Number(String(b._id) === String(defaultStoreId)) ||
-    distanceMeters(coordinates, getCoordinates(a.location)) -
+  })).sort((a, b) => distanceMeters(coordinates, getCoordinates(a.location)) -
     distanceMeters(coordinates, getCoordinates(b.location)) ||
     String(a._id).localeCompare(String(b._id)));
 }

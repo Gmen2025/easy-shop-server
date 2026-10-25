@@ -286,8 +286,8 @@ New API surfaces:
   `POST stores/me/assignments/:id/accept` or `/reject`.
 
 Legacy main-page purchases require exact quoted prices and a single store with enough
-unreserved stock for every item. Non-default stores are ranked by customer
-distance; the configured default is tried last and must also meet stock/price
+unreserved stock for every item. All eligible stores, including the configured
+default, are ranked by customer delivery distance and must meet stock/price
 requirements. Storefront purchases stay within the selected root/branch family.
 Branches with different prices do not contribute to that storefront's quoted
 availability. Main-catalog availability sums open, approved stores' unreserved

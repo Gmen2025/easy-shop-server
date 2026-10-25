@@ -86,14 +86,25 @@ test("cart normalization combines duplicates and rejects invalid quantities, pri
   assert.throws(() => normalizeLines([line, { ...line, price: 11 }]));
 });
 
-test("whole-cart selection requires stock and matching prices; default is last, not simply closest", async () => {
+test("whole-cart selection requires stock and matching prices; default competes by destination distance", async () => {
   const { models, stocks } = fixture();
-  assert.deepEqual((await eligibleStores(models, [line], { customerLocation: location })).map((store) => store._id), [id(1), id(2), id(3)]);
+  assert.deepEqual((await eligibleStores(models, [line], { customerLocation: location })).map((store) => store._id), [id(1), id(3), id(2)]);
   stocks[0].price = 11;
   stocks[1].reserved = 4;
   assert.deepEqual((await eligibleStores(models, [line], { customerLocation: location })).map((store) => store._id), [id(3)]);
   assert.deepEqual(await eligibleStores(models, [line, { product: otherProduct, quantity: 1, price: 5 }], { customerLocation: location }), []);
   await assert.rejects(eligibleStores(models, [line]), /verified customer/);
+});
+
+test("nearest default store wins over a farther regular store; exclusions, stock and price remain authoritative", async () => {
+  const { models, stores, stocks } = fixture();
+  stores[0].location = { coordinates: [0.1, 0] };
+  assert.equal((await eligibleStores(models, [line], { customerLocation: location }))[0]._id, id(3));
+  assert.equal((await eligibleStores(models, [line], { customerLocation: location, excluded: [id(3)] }))[0]._id, id(2));
+  stocks[2].reserved = 5;
+  assert.equal((await eligibleStores(models, [line], { customerLocation: location }))[0]._id, id(2));
+  stocks[2].reserved = 0; stocks[2].price = 11;
+  assert.equal((await eligibleStores(models, [line], { customerLocation: location }))[0]._id, id(2));
 });
 
 test("storefront orders use only that store family and select the nearest matching-price branch", async () => {
@@ -132,9 +143,9 @@ test("rejection and timeout release old stock, reserve the next store, and prese
     stocks[0].reserved = 2;
     const now = new Date(order.fulfillmentDeadline.getTime() + 1);
     await reroute(models, order._id, { decision, now });
-    assert.equal(order.store, id(2));
+    assert.equal(order.store, id(3));
     assert.equal(stocks[0].reserved, 0);
-    assert.equal(stocks[1].reserved, 2);
+    assert.equal(stocks[2].reserved, 2);
     assert.equal(order.reservedItems[0].price, 10);
     assert.equal(order.fulfillmentDeadline.getTime(), now.getTime() + ACCEPTANCE_MS);
     assert.deepEqual(order.fulfillmentAttempts, [id(1)]);
