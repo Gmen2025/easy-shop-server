@@ -2,6 +2,43 @@
 
 A comprehensive REST API for an e-commerce platform built with Node.js, Express, and MongoDB. Features include JWT authentication, payment gateway integrations (Stripe & Telebirr), order management, and email notifications.
 
+## Cart-route delivery pricing and assignments
+
+New grouped product quotes use one fixed customer-cart route in both USA and
+Ethio, shared by mobile and website. Unique pickup stores and allocated drop-off
+addresses form a dependency-constrained route. A destination becomes eligible
+after its supplying stores have been visited; unrelated pickups need not finish.
+The deterministic multi-start nearest-next planner uses geographic distances to
+choose an ordering, then prices Google's road distances along that ordering.
+This is a heuristic, not a guaranteed shortest-road-route optimizer.
+
+Charge one vehicle base fee, the complete route distance rate (miles in USA,
+kilometers in Ethio), and one delivery-speed surcharge. Exclude driver travel to
+the first pickup and all other customers' pickups, drop-offs and detours.
+The fee stays fixed after reservation, independent of dispatch or batching.
+Child store orders retain exact-cent allocated shares for receipts, commissions
+and refunds; allocated billable-distance shares avoid double-counting analytics.
+Unassigned cancellations refund their saved shares without repricing the route.
+International shipping applies this only to the US store-to-hub route;
+overseas/final-delivery tariffs remain separate.
+
+All live store orders must be accepted before the complete cart can be offered.
+Transactional group/driver writes assign all its pickup orders to one driver,
+prevent split claims, and reject individual reassignment or premature delivery.
+Each destination requires all its noncancelled products picked up before delivery
+or drop-off navigation. Drivers can accept several carts within the configured
+cart-count limit and conservative combined vehicle capacity. Missing package
+measurements allow one manually selected cart, but prohibit multi-cart batching.
+Legacy order dispatch cannot add unverified cargo to a driver carrying a cart.
+Shared stores appear once in the company driver's combined operational plan;
+live GPS can affect that plan but never the customer's price. Partner drivers
+retain existing pre-pickup exact-address privacy.
+
+Deploy backend first, then website and mobile together. No backfill is required:
+saved quotes/orders without cart-route metadata retain legacy pricing/dispatch.
+Vehicle delivery pricing and per-store inventory must already be enabled.
+Focused tests: `node --test tests\cart-route.test.js tests\cart-dispatch.test.js tests\multi-delivery.test.js tests\driver-route.test.js`.
+
 ## Regional payment availability
 
 Deploy this backend before the matching website/mobile payment controls.

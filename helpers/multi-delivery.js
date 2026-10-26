@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 const { conflict, inventoryEnabled, normalizeLines, eligibleStores, reserve, release, assignStore, ACCEPTANCE_MS } = require("./store-inventory");
 const { getCoordinates, distanceMeters } = require("./fulfillment-routing");
 const { getDrivingDistanceKm } = require("./google-distance");
-const { VEHICLE_CONFIG_KEY, cargoFor, suitableVehicles, vehicleFee, cents } = require("./vehicle-delivery");
+const { VEHICLE_CONFIG_KEY, cargoFor, suitableVehicles, cents } = require("./vehicle-delivery");
 const {
   resolveDeliveryPlan, normalizeDeliveryConfig, speedSurchargeFor, getBusinessDeliveryPolicy, BUSINESS_DELIVERY_MODES, LEGACY_DELIVERY_MODES,
 } = require("./delivery");
@@ -192,8 +192,10 @@ function allocateDeliveryFees(deliveries) {
       ? delivery.vehicleOptions.find((entry) => entry.type === delivery.vehicle)
       : [...delivery.vehicleOptions].sort((a, b) => a.fee - b.fee)[0];
     if (!option) throw conflict("Choose one of the suitable vehicles offered for this delivery.");
-    const key = JSON.stringify([delivery.pricingGroup?.key || delivery.key, option.type]);
+    const route = delivery.pricingGroup?.kind === "cart-route";
+    const key = JSON.stringify([delivery.pricingGroup?.key || delivery.key, route ? "cart" : option.type]);
     if (!groups.has(key)) groups.set(key, []);
+    if (route && groups.get(key).some((member) => member.option.type !== option.type)) throw conflict("Choose one vehicle for the entire cart route.");
     groups.get(key).push({ delivery, option });
   }
   for (const members of groups.values()) {
@@ -208,6 +210,10 @@ function allocateDeliveryFees(deliveries) {
         storeId: anchor.delivery.store._id, storeName: anchor.delivery.store.name,
         distanceKm: anchor.delivery.distanceKm, storeCount: members.length, vehicle: anchor.option.type,
         deliveryFee: fee / 100,
+        ...(delivery.pricingGroup.kind === "cart-route" ? {
+          billableDistanceKm: (Math.floor(Math.round(anchor.delivery.distanceKm * 1000) / members.length) +
+            (index < Math.round(anchor.delivery.distanceKm * 1000) % members.length ? 1 : 0)) / 1000,
+        } : {}),
       });
     });
   }
@@ -249,20 +255,11 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
     const dropoff = getCoordinates(delivery.address.location);
     if (!pickup || !dropoff) throw conflict(`Store ${delivery.store.name} needs a valid pickup pin.`);
     delivery.cargo = cargoFor(delivery.lines, products);
-    const types = suitableVehicles(delivery.cargo, config);
-    if (!types.length) throw conflict(`No configured vehicle can carry the delivery from ${delivery.store.name}. Contact Admin.`);
-    try { delivery.distanceKm = await distance(`${pickup[1]},${pickup[0]}`, `${dropoff[1]},${dropoff[0]}`, { throwOnError: true }); }
-    catch (error) { throw conflict(error.message); }
     delivery.speedSurcharge = deliveryPlan.deliverySnapshot.speedSurcharge;
-    delivery.vehicleOptions = types.map((type) => {
-      const base = vehicleFee(delivery.distanceKm, type, config, databaseName);
-      return { type, fee: (cents(base) + cents(delivery.speedSurcharge)) / 100, vehicleFee: base, speedSurcharge: delivery.speedSurcharge };
-    });
-    delivery.requiresVehicleSelection = delivery.cargo.measurementsAvailable === false;
-    delivery.vehicle = delivery.requiresVehicleSelection ? "" : types[0];
     delivery.itemsSubtotal = delivery.lines.reduce((sum, line) => sum + cents(line.price) * line.quantity, 0) / 100;
   }));
-  groupNearbyStores(deliveries);
+  const cartRoute = await require("./cart-route").quoteCartRoute(deliveries, products, config, databaseName,
+    deliveryPlan.deliverySnapshot.speedSurcharge, distance);
   allocateDeliveryFees(deliveries);
   const totals = quoteTotals(deliveries);
   if (exchangeRate && (await fx.requireCurrent(models, databaseName)).revision !== exchangeRate.revision) {
@@ -270,7 +267,7 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
   }
   const fields = { user, deliveries, cart: body.cart.map((entry) => ({
     ...normalizeLines([entry])[0], key: entry.key, storefrontId: entry.storefrontId || null,
-  })), ...deliveryPlan, ...totals,
+  })), ...deliveryPlan, ...totals, cartRoute,
     currency, ...(exchangeRate ? { exchangeRate, paymentAmount: fx.allocateDollars(deliveries, exchangeRate) } : {}),
     expiresAt: new Date(Date.now() + QUOTE_MS) };
   return transient ? new models.CheckoutGroup(fields) : models.CheckoutGroup.create(fields);
@@ -314,6 +311,10 @@ function selectVehicles(group, selections) {
     delivery.vehicle = option.type;
   }
   allocateDeliveryFees(group.deliveries);
+  if (group.cartRoute) {
+    group.cartRoute.vehicle = group.deliveries[0].vehicle;
+    group.markModified("cartRoute");
+  }
   Object.assign(group, quoteTotals(group.deliveries));
   if (group.international) require("./international-shipping").recalculate(group);
   else if (group.exchangeRate) group.paymentAmount = fx.allocateDollars(group.deliveries, group.exchangeRate);
@@ -365,6 +366,15 @@ async function prepare(models, groupId, user, databaseName, body) {
       { checkoutGroup: group._id, paymentCurrency: group.currency, paymentAmount: group.paymentAmount, exchangeRate: group.exchangeRate }, { new: true, session });
       if (!request) throw conflict("The service quote changed or another payment started. Reload the service request.");
     } else selectVehicles(group, body.selections);
+    if (group.cartRoute) {
+      const config = (await models.SiteSetting.findOne({ key: VEHICLE_CONFIG_KEY }).session(session).lean())?.vehicleDeliveryConfig;
+      const products = await models.Product.find({ _id: { $in: group.deliveries.flatMap((delivery) => delivery.lines.map((line) => line.product)) } }).session(session).lean();
+      const cargo = cargoFor(group.deliveries.flatMap((delivery) => delivery.lines), products);
+      if (!config?.enabled || !suitableVehicles(cargo, config).includes(group.cartRoute.vehicle)) throw conflict("Complete cart vehicle capacity changed. Request a new quote.");
+      if (cargo.measurementsAvailable === false && group.cartRoute.cargo.measurementsAvailable !== false) throw conflict("Cart measurements changed. Request a new quote and choose a vehicle manually.");
+      group.cartRoute.cargo = cargo;
+      group.markModified("cartRoute");
+    }
     if (body.method === "bank") {
       const setting = await models.SiteSetting.findOne({ key: "bank-account-info" }).session(session).lean();
       const account = setting?.bankAccounts?.find((entry) => id(entry) === body.bankAccountId && entry.isActive !== false &&
@@ -449,9 +459,11 @@ async function prepare(models, groupId, user, databaseName, body) {
         shippingAddress1: address.address1, shippingAddress2: address.address2, city: address.city,
         zip: address.zip, country: address.country, phone: address.phone, customerLocation: address.location,
         inventoryManaged: true, checkoutGroup: group._id, storefrontId: delivery.storefrontId,
+        ...(group.cartRoute ? { cartRouteVersion: 1, cartDeliveryKey: delivery.key, cartDeliveryAddressId: delivery.address.id } : {}),
         requiredVehicle: delivery.vehicle, cargo: delivery.cargo,
         deliveryFee: delivery.deliveryFee, deliveryPricingGroup: delivery.pricingGroup,
-        deliveryDistanceKm: delivery.distanceKm, quotedDeliveryDistanceKm: delivery.distanceKm,
+        deliveryDistanceKm: delivery.pricingGroup?.billableDistanceKm ?? delivery.distanceKm,
+        quotedDeliveryDistanceKm: delivery.pricingGroup?.billableDistanceKm ?? delivery.distanceKm,
         deliveryMode: deliveryPlan.value.deliveryMode,
         scheduledFor: deliveryPlan.value.scheduledFor,
         deliveryWindowStart: deliveryPlan.value.deliveryWindowStart,
@@ -651,6 +663,11 @@ async function cancelDelivery(models, groupId, orderId, user, isAdmin) {
     if (!group || group.status !== "placed" || !group.orders.some((value) => id(value) === orderId)) throw conflict("Delivery not found in a placed checkout.");
     const order = await models.Order.findById(orderId).session(session);
     if (order.fulfillmentStatus === "cancelled") return order;
+    if (group.cartRoute) {
+      if (group.routeDriver) throw conflict("This cart is assigned to a driver. Contact support before cancellation.");
+      group.fulfillmentRevision += 1;
+      await group.save({ session });
+    }
     if (group.international && group.international.shipments.find((entry) => entry.id === order.internationalShipping?.shipmentId)?.status !== "awaiting_hub") {
       throw conflict("International shipment handling has started. Contact support before cancellation or refund.");
     }

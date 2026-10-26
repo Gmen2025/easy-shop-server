@@ -623,7 +623,29 @@ router.get("/company/my-deliveries", async (req, res) => {
       .limit(100);
 
     const results = [];
+    const seenCarts = new Set();
     for (const order of orders) {
+      if (order.cartRouteVersion === 1) {
+        const key = String(order.checkoutGroup);
+        if (seenCarts.has(key)) continue;
+        seenCarts.add(key);
+        const cart = await require("../service/cartDispatch").loadCart(req.dbModels, order);
+        if (!require("../service/cartDispatch").ready(cart.orders) || cart.group.routeDriver) continue;
+        const live = require("../service/cartDispatch").liveOrders(cart.orders);
+        if (!live.every((entry) => String(entry.companyOfferDriver) === String(driver._id))) continue;
+        results.push({ _id: order._id, store: order.store, checkoutGroup: order.checkoutGroup,
+          cartRoute: require("../service/cartDispatch").assignmentRoute(cart.group, live),
+          cartOrderIds: live.map((entry) => String(entry._id)),
+          deliveryFee: cart.group.deliveryFee, requiredVehicle: cart.group.cartRoute.vehicle,
+          ...getDeliverySchedule(order), dateOrdered: order.dateOrdered,
+          dropoffAddress: { address1: order.shippingAddress1, city: order.city, country: order.country },
+          itemCount: cart.group.cart.reduce((sum, line) => sum + line.quantity, 0),
+          items: cart.group.deliveries.flatMap((delivery) => delivery.lines.map((line) => ({
+            name: line.name || "Item", quantity: line.quantity,
+          }))),
+        });
+        continue;
+      }
       let orderStore = order.store;
       if (!orderStore) {
         const preferredStoreId = (order.orderItems || []).find((item) => item?.product?.store)?.product.store;
@@ -680,9 +702,14 @@ router.get("/company/my-deliveries", async (req, res) => {
       }
     }
 
-    const activeOrders = await Order.countDocuments({
+    let activeOrders = await Order.countDocuments({
       driver: driver._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] },
     });
+    if (driver.activeCartRoutes?.length) {
+      const active = await Order.find({ driver: driver._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] } })
+        .select("_id checkoutGroup cartRouteVersion").lean();
+      activeOrders = new Set(active.map(require("../service/cartDispatch").unit)).size;
+    }
     return res.status(200).json({
       success: true, radiusKm, orders: results,
       driverEligibility: getCompanyDriverEligibility(driver, activeOrders, MAX_ACTIVE_ORDERS_PER_DRIVER),
@@ -721,6 +748,16 @@ router.put("/:id/company-claim", async (req, res) => {
     if (order.driver) {
       return res.status(409).json({ success: false, message: "This delivery has already been claimed." });
     }
+    if (order.cartRouteVersion === 1) {
+      const result = await assignDriverToOrder(String(order._id), req.app.get("io"), {
+        dbName: req.dbName, models: req.dbModels, companyDriverId: String(driver._id),
+      });
+      if (!result.success || String(result.driverId) !== String(driver._id)) return res.status(409).json({
+        success: false, message: "The complete cart is not ready or exceeds your remaining vehicle capacity.",
+      });
+      return res.json({ success: true, message: "Complete cart route claimed.", cartOrderIds: result.cartOrderIds,
+        order: await Order.findById(order._id) });
+    }
     if (order.deliveryStatus !== "Pending" ||
       order.adminReviewRequired || order.fallbackStore ||
       (order.inventoryManaged && order.fulfillmentStatus !== "accepted") ||
@@ -758,7 +795,7 @@ router.put("/:id/company-claim", async (req, res) => {
     return res.status(200).json({ success: true, message: "Delivery claimed.", order: assigned });
   } catch (error) {
     console.error("Company driver claim error:", error);
-    return res.status(500).json({ success: false, message: "Unable to claim this delivery." });
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to claim this delivery." });
   }
 });
 
@@ -786,6 +823,11 @@ const respondToCompanyOffer = async (req, res) => {
     const order = await Order.findById(req.params.id);
     if (!order) {
       return res.status(404).json({ success: false, message: "Order not found." });
+    }
+    if (order.cartRouteVersion === 1) {
+      await require("../service/cartDispatch").respond(req.dbModels, order, driver,
+        req.path.endsWith("/company-reject"), MAX_ACTIVE_ORDERS_PER_DRIVER);
+      return res.json({ success: true, message: "Complete cart response saved. No payment has been cancelled or refunded." });
     }
 
     const alreadyResponded = (order.companyDriverResponses || []).some((entry) => String(entry.driver) === String(driver._id));
@@ -830,7 +872,7 @@ const respondToCompanyOffer = async (req, res) => {
       : "Delivery returned for rerouting." });
   } catch (error) {
     console.error("Company driver reject error:", error);
-    return res.status(500).json({ success: false, message: "Unable to reject this delivery." });
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to reject this delivery." });
   }
 };
 router.put("/:id/company-reject", respondToCompanyOffer);

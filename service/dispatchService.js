@@ -240,6 +240,15 @@ async function syncDriverAvailability(Driver, Order, driverId) {
   const driver = await Driver.findById(driverId);
   if (!driver || driver.isSuspended) return;
   if (driver.activeRideTrip || driver.pendingRideOffer || driver.serviceModes?.delivery === false) return;
+  if (driver.activeCartRoutes?.length) {
+    const active = await Order.find({ driver: driverId, deliveryStatus: { $in: ACTIVE_DELIVERY_STATUSES } })
+      .select("_id checkoutGroup cartRouteVersion").lean();
+    const routes = [...new Set(active.filter((order) => order.cartRouteVersion === 1).map((order) => String(order.checkoutGroup)))];
+    const count = new Set(active.map(require("./cartDispatch").unit)).size;
+    await Driver.findByIdAndUpdate(driverId, { activeCartRoutes: routes,
+      isAvailable: count < MAX_ACTIVE_ORDERS_PER_DRIVER, availabilityStatus: count < MAX_ACTIVE_ORDERS_PER_DRIVER });
+    return;
+  }
 
   const activeCount = await countActiveOrders(Order, driverId);
   if (driver.exclusiveDelivery) {
@@ -314,6 +323,9 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
 
     if (!order) {
       throw new Error("Order not found.");
+    }
+    if (order.cartRouteVersion === 1) {
+      return { cartOrder: order };
     }
     if (order.adminReviewRequired || order.fallbackStore) {
       return { success: false, reason: "manual_assignment_review_required" };
@@ -453,6 +465,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
           exclusiveDelivery: null,
           activeRideTrip: null,
           pendingRideOffer: null,
+          "activeCartRoutes.0": { $exists: false },
           "serviceModes.delivery": { $ne: false },
         },
         { $inc: { dispatchVersion: 1 }, ...(order.requiredVehicle ? { exclusiveDelivery: order._id, isAvailable: false, availabilityStatus: false } : {}) },
@@ -539,6 +552,12 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
     // Serialize capacity checks and persistence, not push delivery or partner decisions.
     const assignment = await serializeDriverAssignment(dbName, prepareAssignment);
     if (assignment.retry) continue;
+    if (assignment.cartOrder) {
+      return require("./cartDispatch").dispatch(options.models || getModelsForDb(dbName), assignment.cartOrder, ioInstance, {
+        companyDriverId: options.companyDriverId, maxCarts: MAX_ACTIVE_ORDERS_PER_DRIVER,
+        socketFor: resolveDriverSocketId, decision: waitForDriverDecision,
+      });
+    }
     if (!assignment.updatedOrder) return assignment;
     const { updatedOrder, lockDriver, socketId, queueSequence } = assignment;
 

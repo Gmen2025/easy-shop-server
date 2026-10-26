@@ -10,7 +10,7 @@ function vehicleName(driver) {
   return aliases[value] || value;
 }
 function vehicleMatches(driver, vehicle) {
-  return !driver.exclusiveDelivery && !driver.activeRideTrip && !driver.pendingRideOffer &&
+  return !driver.exclusiveDelivery && !driver.activeCartRoutes?.length && !driver.activeRideTrip && !driver.pendingRideOffer &&
     driver.serviceModes?.delivery !== false && (!vehicle || vehicleName(driver) === vehicle);
 }
 

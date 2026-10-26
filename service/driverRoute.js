@@ -19,6 +19,15 @@ function createDriverRouteHandler({ compute = computeDrivingRoute, now = Date.no
         deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] },
       }).populate("store", "location");
       if (!order) return res.status(404).json({ message: "Active delivery assigned to you was not found." });
+      if (order.cartRouteVersion === 1 && order.deliveryStatus === "Picked Up") {
+        const siblings = await req.dbModels.Order.find({ checkoutGroup: order.checkoutGroup,
+          cartDeliveryAddressId: order.cartDeliveryAddressId }).lean();
+        if (siblings.some((entry) => entry.fulfillmentStatus !== "cancelled" &&
+          !["4", "Cancelled"].includes(String(entry.status)) &&
+          !["Picked Up", "Delivered"].includes(entry.deliveryStatus))) {
+          return res.status(409).json({ message: "Collect all products for this destination before starting its drop-off route." });
+        }
+      }
       const destination = getCoordinates(order.deliveryStatus === "Picked Up"
         ? order.customerLocation : order.store?.location);
       if (!destination) return res.status(422).json({ message: "This delivery has no valid destination coordinates. Update its pickup or customer location." });

@@ -111,6 +111,12 @@ async function reroute(models, orderId, { storeId, decision, now = new Date() } 
       throw conflict("This assignment is no longer awaiting a store response.");
     }
     if (storeId && String(order.store) !== String(storeId)) throw conflict("This assignment belongs to another store.");
+    if (order.cartRouteVersion === 1) {
+      const group = await models.CheckoutGroup.findById(order.checkoutGroup).session(session);
+      if (!group || group.routeDriver) throw conflict("This cart is already assigned to its driver.");
+      group.fulfillmentRevision += 1;
+      await group.save({ session });
+    }
     if (!decision && order.fulfillmentStatus === "pending" && order.fulfillmentDeadline > now) return order;
     if (decision === "accept") {
       if (!order.fulfillmentDeadline || order.fulfillmentDeadline <= now) {
@@ -200,6 +206,29 @@ async function updateManagedOrder(models, orderId, fields, { deleting = false } 
       throw conflict("Inventory-managed assignments cannot be reassigned manually.");
     }
     const completed = fields.deliveryStatus === "Delivered" || ["3", "Delivered"].includes(String(fields.status));
+    if (order.cartRouteVersion === 1 && !deleting) {
+      const group = await models.CheckoutGroup.findById(order.checkoutGroup).session(session);
+      if (!group) throw conflict("The cart route record is missing.");
+      group.fulfillmentRevision += 1;
+      await group.save({ session });
+      if (fields.deliveryStatus === "Picked Up" && order.deliveryStatus !== "Driver Assigned" &&
+          order.deliveryStatus !== "Picked Up") throw conflict("The cart must be assigned before pickup can be confirmed.");
+      if ((completed || fields.deliveryStatus === "Picked Up") &&
+          (!order.driver || String(order.driver) !== String(group.routeDriver))) throw conflict("Only the assigned cart driver can collect and deliver this cart.");
+      if (completed && order.deliveryStatus !== "Delivered") {
+        if (order.deliveryStatus !== "Picked Up") throw conflict("Collect this store's products before confirming delivery.");
+        const siblings = await models.Order.find({ checkoutGroup: group._id,
+          cartDeliveryAddressId: order.cartDeliveryAddressId }).session(session);
+        if (siblings.some((entry) => entry.fulfillmentStatus !== "cancelled" &&
+          !["4", "Cancelled"].includes(String(entry.status)) &&
+          !["Picked Up", "Delivered"].includes(entry.deliveryStatus))) {
+          throw conflict("Collect all products for this drop-off address before completing its delivery.");
+        }
+      }
+      if (fields.deliveryStatus && !["Picked Up", "Delivered"].includes(fields.deliveryStatus)) {
+        throw conflict("Cart route progress cannot be reset through an individual order.");
+      }
+    }
     const cancelled = deleting || ["4", "Cancelled"].includes(String(fields.status));
     if (completed && cancelled && !deleting) throw conflict("An order cannot be completed and cancelled in the same update.");
     if (completed && !["accepted", "completed"].includes(order.fulfillmentStatus)) {

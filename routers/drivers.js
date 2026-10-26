@@ -16,6 +16,7 @@ const { buildDriverOrderSummary } = require("../helpers/driver-view");
 const { getDeliverySchedule } = require("../helpers/delivery");
 const { createDriverRouteHandler } = require("../service/driverRoute");
 const { MAX_ACTIVE_ORDERS_PER_DRIVER } = require("../service/dispatchService");
+const { getCoordinates } = require("../helpers/fulfillment-routing");
 
 router.post("/me/orders/:id/route", createDriverRouteHandler());
 
@@ -237,9 +238,14 @@ router.put("/admin/company-drivers/:id", requireAdmin, async (req, res) => {
         return res.status(409).json({ success: false, message: "Only approved, non-suspended drivers can be made available." });
       }
       if (req.body.isAvailable) {
-        const activeOrders = await req.dbModels.Order.countDocuments({
+        let activeOrders = await req.dbModels.Order.countDocuments({
           driver: driver._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] },
         });
+        if (driver.activeCartRoutes?.length) {
+          const active = await req.dbModels.Order.find({ driver: driver._id,
+            deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] } }).select("_id checkoutGroup cartRouteVersion").lean();
+          activeOrders = new Set(active.map(require("../service/cartDispatch").unit)).size;
+        }
         if (activeOrders >= MAX_ACTIVE_ORDERS_PER_DRIVER) {
           return res.status(409).json({ success: false, message: "This driver is already at delivery capacity." });
         }
@@ -581,7 +587,7 @@ router.get("/me/queue", async (req, res) => {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
-    const driver = await Driver.findOne({ user: userId }).select("_id isCompanyOwned");
+    const driver = await Driver.findOne({ user: userId }).select("_id isCompanyOwned location");
     if (!driver) {
       return res.status(404).json({ success: false, message: "Driver profile not found." });
     }
@@ -607,7 +613,21 @@ router.get("/me/queue", async (req, res) => {
     return res.status(200).json({
       success: true,
       count: orders.length,
-      queue: orders.map((order) => buildDriverOrderSummary(order, { forceReveal })),
+      ...(orders.some((order) => order.cartRouteVersion === 1) && forceReveal ? {
+        routeStops: require("../service/cartDispatch").queueRoute(orders, getCoordinates(driver.location)),
+      } : {}),
+      queue: orders.map((order) => ({
+        ...buildDriverOrderSummary(order, { forceReveal }),
+        ...(order.cartRouteVersion === 1 ? {
+          cartRouteVersion: 1, cartDeliveryAddressId: order.cartDeliveryAddressId,
+          dropoffReady: order.deliveryStatus === "Picked Up" && !orders.some((entry) =>
+            String(entry.checkoutGroup) === String(order.checkoutGroup) &&
+            entry.cartDeliveryAddressId === order.cartDeliveryAddressId && entry.deliveryStatus !== "Picked Up"),
+          pendingPickupOrderIds: orders.filter((entry) => String(entry.checkoutGroup) === String(order.checkoutGroup) &&
+            entry.cartDeliveryAddressId === order.cartDeliveryAddressId && entry.deliveryStatus !== "Picked Up")
+            .map((entry) => String(entry._id)),
+        } : {}),
+      })),
     });
   } catch (error) {
     console.error("Driver queue fetch error:", error);
