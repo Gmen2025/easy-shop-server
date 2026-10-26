@@ -246,6 +246,119 @@ test("automatic dispatch offers out-of-radius delivery without assigning it befo
   assert.equal(fixture.counts().assignments, assignments, "retry must not repeatedly notify an unchanged offer");
 });
 
+test("shared legacy delivery claims accept company and partner drivers without a designated offer or socket", async () => {
+  for (const partner of [false, true]) {
+    const f = dispatchFixture({ partner });
+    f.candidate.location = { coordinates: [0, 0] };
+    f.candidate.socketId = null;
+    f.order.companyOfferDriver = new mongoose.Types.ObjectId();
+    f.io.on = () => assert.fail("An explicit claim must not wait for a socket acceptance");
+    const result = await assignDriverToOrder(String(f.order._id), f.io, {
+      models: f.models, sharedDriverId: String(f.candidate._id),
+    });
+    assert.equal(result.success, true);
+    assert.equal(String(f.order.driver), String(f.candidate._id));
+    assert.equal(f.order.companyOfferDriver, null);
+    const second = await assignDriverToOrder(String(f.order._id), f.io, {
+      models: f.models, sharedDriverId: String(new mongoose.Types.ObjectId()),
+    });
+    assert.equal(second.success, false, "A claimed delivery cannot be claimed a second time");
+  }
+});
+
+test("shared legacy claims enforce driver readiness and do not modify queued orders on failed eligibility", async () => {
+  for (const change of [
+    (f) => { f.candidate.isAvailable = false; },
+    (f) => { f.candidate.approvalStatus = "pending"; },
+    (f) => { f.candidate.isSuspended = true; },
+    (f) => { f.candidate.serviceModes = { delivery: false }; },
+    (f) => { f.candidate.activeRideTrip = "ride"; },
+    (f) => { f.candidate.activeCartRoutes = ["cart"]; },
+    (f) => { f.order.inventoryManaged = true; f.order.fulfillmentStatus = "pending"; },
+    (f) => { f.order.adminReviewRequired = "driver"; },
+    (f) => { f.order.fallbackStore = "store"; },
+    (f) => { f.order.dispatchStatus = "scheduled"; },
+    (f) => { f.order.companyDriverResponses = [{ driver: f.candidate._id, status: "rejected" }]; },
+    (f) => { f.order.requiredVehicle = "van"; f.candidate.vehicleType = "car"; },
+  ]) {
+    const f = dispatchFixture();
+    change(f);
+    const result = await assignDriverToOrder(String(f.order._id), f.io, {
+      models: f.models, sharedDriverId: String(f.candidate._id),
+    });
+    assert.equal(result.success, false);
+    assert.equal(f.order.driver, null);
+    assert.equal(f.counts().assignments, 0);
+  }
+  const full = dispatchFixture({ full: true });
+  assert.equal((await assignDriverToOrder(String(full.order._id), full.io, {
+    models: full.models, sharedDriverId: String(full.candidate._id),
+  })).success, false);
+  const distant = dispatchFixture({ partner: true });
+  assert.equal((await assignDriverToOrder(String(distant.order._id), distant.io, {
+    models: distant.models, sharedDriverId: String(distant.candidate._id),
+  })).success, false);
+});
+
+test("a shared vehicle-sized legacy claim reserves the complete vehicle after eligibility is rechecked", async () => {
+  const f = dispatchFixture({ partner: true });
+  f.candidate.location = { coordinates: [0, 0] };
+  f.candidate.vehicleType = "van";
+  f.order.requiredVehicle = "van";
+  f.models.Driver.updateOne = async (filter, update, options) => {
+    assert.equal(String(filter._id), String(f.candidate._id));
+    assert.ok(options.session);
+    assert.equal(String(update.$set.exclusiveDelivery), String(f.order._id));
+    Object.assign(f.candidate, update.$set);
+  };
+  const result = await assignDriverToOrder(String(f.order._id), f.io, {
+    models: f.models, sharedDriverId: String(f.candidate._id),
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(String(f.candidate.exclusiveDelivery), String(f.order._id));
+  assert.equal(f.candidate.isAvailable, false);
+});
+
+test("shared legacy claims recheck eligibility inside the driver transaction", async () => {
+  const f = dispatchFixture();
+  const lock = f.models.Driver.findOneAndUpdate;
+  f.models.Driver.findOneAndUpdate = async (...args) => {
+    await lock(...args);
+    return { ...f.candidate, serviceModes: { delivery: false } };
+  };
+  await assert.rejects(assignDriverToOrder(String(f.order._id), f.io, {
+    models: f.models, sharedDriverId: String(f.candidate._id),
+  }), (error) => error.status === 409);
+  assert.equal(f.counts().assignments, 0);
+  assert.equal(f.order.driver, null);
+});
+
+test("shared assignment APIs authenticate drivers and claim using the profile linked to the session", async () => {
+  const driverRouter = require("../routers/drivers");
+  const handler = (path) => driverRouter.stack.find((entry) => entry.route?.path === path).route.stack[0].handle;
+  const response = () => ({ code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; } });
+  const list = handler("/me/available-deliveries");
+  const claim = handler("/me/available-deliveries/:id/claim");
+  for (const endpoint of [list, claim]) {
+    const unauthenticated = response();
+    await endpoint({ auth: null }, unauthenticated);
+    assert.equal(unauthenticated.code, 401);
+    const customer = response();
+    await endpoint({ auth: { userId: "customer" }, params: { id: String(new mongoose.Types.ObjectId()) },
+      dbModels: { Driver: { findOne: () => query(null) } } }, customer);
+    assert.equal(customer.code, 403);
+  }
+  const f = dispatchFixture({ partner: true });
+  f.candidate.location = { coordinates: [0, 0] };
+  const result = response();
+  await claim({ auth: { userId: f.candidate.user }, params: { id: String(f.order._id) },
+    body: { driverId: "another-driver" }, dbModels: f.models, app: { get: () => f.io } }, result);
+  assert.equal(result.code, 200);
+  assert.equal(result.body.success, true);
+  assert.equal(String(f.order.driver), String(f.candidate._id));
+});
+
 test("a default offer remains visible for a mismatched vehicle but cannot be claimed", async () => {
   const fixture = dispatchFixture();
   fixture.order.requiredVehicle = "van";
@@ -498,7 +611,7 @@ test("the offered delivery is listed with claim/reject data and rejection passes
   fixture.models.Order.findOneAndUpdate = (filter, changes) => {
     if (changes.$push) {
       assert.equal(filter.driver, null);
-      assert.equal(String(filter.companyOfferDriver), String(fixture.candidate._id));
+      assert.equal(filter.companyOfferDriver, undefined, "Shared backlog responses do not need a designated offer");
       Object.assign(fixture.order, changes.$set);
       fixture.order.companyDriverResponses.push(changes.$push.companyDriverResponses);
       return query(fixture.order);
@@ -693,34 +806,122 @@ test("offline default driver offers stay listed and cannot claim until the drive
   })).success, true);
 });
 
-test("final driver rejection preserves payment and stops dispatch while reroute with no alternative keeps the offer", async () => {
-  const f = dispatchFixture();
-  f.order.companyOfferDriver = f.candidate._id;
-  f.order.companyDriverResponses = [];
-  f.order.paymentStatus = "completed";
-  const update = f.models.Order.findOneAndUpdate;
-  f.models.Order.findOneAndUpdate = (filter, changes) => {
-    if (!changes.$push) return update(filter, changes);
-    assert.equal(filter.adminReviewRequired.$exists, false);
-    Object.assign(f.order, changes.$set);
-    f.order.companyDriverResponses.push(changes.$push.companyDriverResponses);
-    return query(f.order);
-  };
-  const handler = (path) => orderRouter.stack.find((entry) => entry.route?.path === path).route.stack.at(-1).handle;
-  const req = { auth: { userId: f.candidate.user }, params: { id: String(f.order._id) }, dbModels: f.models, path: "/order/company-reroute" };
+test("company rejection and reroute preserve payment and leave requests queued for other drivers even without an alternative", async () => {
+  for (const action of ["reject", "reroute"]) {
+    const f = dispatchFixture();
+    f.candidate.isAvailable = false;
+    f.order.companyOfferDriver = null;
+    f.order.companyDriverResponses = [];
+    f.order.paymentStatus = "completed";
+    const update = f.models.Order.findOneAndUpdate;
+    f.models.Order.findOneAndUpdate = (filter, changes) => {
+      if (!changes.$push) return update(filter, changes);
+      assert.equal(filter.adminReviewRequired.$exists, false);
+      assert.equal(filter.companyOfferDriver, undefined);
+      assert.equal(filter.fallbackStore, null);
+      assert.equal(filter.$and.length, 2);
+      assert.equal(String(filter.companyDriverResponses.$not.$elemMatch.driver), String(f.candidate._id));
+      Object.assign(f.order, changes.$set);
+      f.order.companyDriverResponses.push(changes.$push.companyDriverResponses);
+      return query(f.order);
+    };
+    const handler = (path) => orderRouter.stack.find((entry) => entry.route?.path === path).route.stack.at(-1).handle;
+    const req = { auth: { userId: f.candidate.user }, params: { id: String(f.order._id) }, dbModels: f.models, path: `/order/company-${action}` };
+    const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+    await handler(`/:id/company-${action}`)(req, res);
+    assert.equal(res.code, 200);
+    assert.equal(f.order.adminReviewRequired, undefined);
+    assert.equal(f.order.companyOfferDriver, null);
+    assert.equal(f.order.dispatchStatus, "pending_assignment");
+    assert.equal(f.order.paymentStatus, "completed");
+    assert.equal(f.order.status, "1");
+    await handler(`/:id/company-${action}`)(req, res);
+    assert.equal(res.code, 409, "A second response must not be appended");
+    assert.equal(f.order.companyDriverResponses.length, 1);
+    assert.equal(f.order.companyDriverResponses[0].action, action);
+    const retry = await assignDriverToOrder(String(f.order._id), f.io, { models: f.models });
+    assert.equal(retry.reason, "no_available_partner_or_company_driver");
+    assert.equal(f.order.driver, null);
+    f.candidate._id = new mongoose.Types.ObjectId();
+    f.candidate.isAvailable = true;
+    f.candidate.isCompanyOwned = false;
+    f.candidate.location = { coordinates: [0, 0] };
+    const claimed = await assignDriverToOrder(String(f.order._id), f.io, {
+      models: f.models, sharedDriverId: String(f.candidate._id),
+    });
+    assert.equal(claimed.success, true, "A later eligible partner can claim the released request");
+    assert.equal(String(f.order.driver), String(f.candidate._id));
+  }
+});
+
+test("Admin delivery review flags reject responses without blocking dispatch and excludes reroute-only responses", async () => {
+  const handler = orderRouter.stack.find((entry) => entry.route?.path === "/admin/company-rejections").route.stack.at(-1).handle;
+  const orders = [
+    { _id: "reject", companyDriverResponses: [{ status: "rejected", action: "reject" }] },
+    { _id: "reroute", companyDriverResponses: [{ status: "rejected", action: "reroute" }] },
+    { _id: "historical", companyDriverResponses: [{ status: "rejected" }] },
+    { _id: "accepted", companyDriverResponses: [{ status: "accepted", action: "reject" }] },
+    { _id: "mixed", companyDriverResponses: [{ status: "accepted", action: "reject" }, { status: "rejected", action: "reroute" }] },
+  ];
+  const models = { Order: { find: (filter) => {
+    assert.deepEqual(filter, {
+      companyDriverResponses: { $elemMatch: { status: "rejected", action: { $ne: "reroute" } } },
+    });
+    const match = filter.companyDriverResponses.$elemMatch;
+    return query(orders.filter((order) => order.companyDriverResponses.some((entry) =>
+      entry.status === match.status && entry.action !== match.action.$ne)));
+  } } };
   const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
-  await handler("/:id/company-reroute")(req, res);
-  assert.equal(res.code, 409);
-  assert.equal(String(f.order.companyOfferDriver), String(f.candidate._id));
-  req.path = "/order/company-reject";
-  await handler("/:id/company-reject")(req, res);
+  await handler({ dbModels: models }, res);
   assert.equal(res.code, 200);
-  assert.equal(f.order.adminReviewRequired, "driver");
-  assert.equal(f.order.paymentStatus, "completed");
-  assert.equal(f.order.status, "1");
-  const retry = await assignDriverToOrder(String(f.order._id), f.io, { models: f.models });
-  assert.equal(retry.reason, "manual_assignment_review_required");
-  assert.equal(f.order.driver, null);
+  assert.deepEqual(res.body.orders.map((order) => order._id), ["reject", "historical"]);
+  assert.ok(res.body.orders.every((order) => !order.adminReviewRequired));
+  const { Order } = require("../models/order");
+  const order = new Order({
+    companyDriverResponses: [
+      { driver: new mongoose.Types.ObjectId(), status: "rejected", action: "reject" },
+      { driver: new mongoose.Types.ObjectId(), status: "rejected", action: "reroute" },
+    ],
+  });
+  assert.deepEqual(order.toObject().companyDriverResponses.map((entry) => entry.action), ["reject", "reroute"]);
+  assert.equal(order.adminReviewRequired, undefined);
+});
+
+test("company responses reject stale or ineligible legacy requests and cannot overwrite concurrent claims", async () => {
+  const handler = orderRouter.stack.find((entry) => entry.route?.path === "/:id/company-reject").route.stack.at(-1).handle;
+  const unauthorized = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+  await handler({ auth: null }, unauthorized);
+  assert.equal(unauthorized.code, 401);
+  for (const changes of [
+    { driver: "claimed" }, { adminReviewRequired: "store" }, { fallbackStore: "store" },
+    { status: "4" }, { deliveryStatus: "Delivered" },
+    { dispatchStatus: "scheduled" }, { inventoryManaged: true, fulfillmentStatus: "pending" },
+    {},
+  ]) {
+    const f = dispatchFixture();
+    Object.assign(f.order, changes);
+    let updates = 0;
+    f.models.Order.findOneAndUpdate = (filter) => {
+      updates += 1;
+      assert.equal(filter.driver, null);
+      assert.equal(filter.deliveryStatus, "Pending");
+      return query(null);
+    };
+    const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+    await handler({ auth: { userId: f.candidate.user }, path: "/order/company-reject",
+      params: { id: String(f.order._id) }, dbModels: f.models }, res);
+    assert.equal(res.code, 409);
+    assert.equal(updates, Object.keys(changes).length ? 0 : 1);
+    assert.equal(f.order.companyDriverResponses, undefined);
+  }
+  const f = dispatchFixture({ partner: true });
+  f.models.Driver.findOne = (filter) => {
+    assert.equal(filter.isCompanyOwned, true);
+    return query(null);
+  };
+  const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+  await handler({ auth: { userId: f.candidate.user }, params: { id: String(f.order._id) }, dbModels: f.models }, res);
+  assert.equal(res.code, 403);
 });
 
 test("already assigned and future scheduled orders are not dispatched", async () => {

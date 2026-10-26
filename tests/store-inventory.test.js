@@ -202,6 +202,29 @@ test("catalog stock sums store availability and store sales retain historical pu
   assert.equal(summary.sales, 20);
 });
 
+test("cart delivery cannot complete while a different address still has pickups; stock is consumed only after all pickups", async () => {
+  const f = fixture();
+  const group = { _id: id(30), routeDriver: id(40), fulfillmentRevision: 0, async save() {} };
+  Object.assign(f.order, { checkoutGroup: group._id, cartRouteVersion: 1, cartDeliveryAddressId: "home",
+    driver: group.routeDriver, deliveryStatus: "Picked Up", fulfillmentStatus: "accepted" });
+  const sibling = { _id: id(21), checkoutGroup: group._id, cartDeliveryAddressId: "work", deliveryStatus: "Driver Assigned" };
+  f.models.CheckoutGroup = { findById: () => query(group) };
+  f.models.Order.find = (filter) => {
+    assert.deepEqual(filter, { checkoutGroup: group._id });
+    return query([f.order, sibling, { checkoutGroup: group._id, deliveryStatus: "Pending", fulfillmentStatus: "cancelled" }]);
+  };
+  f.stocks[0].reserved = 2;
+  await assert.rejects(updateManagedOrder(f.models, f.order._id, { deliveryStatus: "Delivered" }), /all pickups.*cart/);
+  assert.equal(f.order.deliveryStatus, "Picked Up");
+  assert.equal(f.stocks[0].countInStock, 5);
+  assert.equal(f.stocks[0].reserved, 2);
+  sibling.deliveryStatus = "Picked Up";
+  await updateManagedOrder(f.models, f.order._id, { deliveryStatus: "Delivered" });
+  assert.equal(f.order.deliveryStatus, "Delivered");
+  assert.equal(f.stocks[0].countInStock, 3);
+  assert.equal(f.stocks[0].reserved, 0);
+});
+
 test("inventory edits require ownership, and non-admins cannot migrate inventory", async () => {
   const route = (path, method) => router.stack.find((entry) => entry.route?.path === path && entry.route.methods[method]).route.stack.at(-1).handle;
   const response = () => ({ status(code) { this.code = code; return this; }, json(body) { this.body = body; } });
@@ -345,17 +368,50 @@ test("reroute tries another eligible store, but keeps the queue intact when none
   assert.deepEqual(sole.order.fallbackStoreAttempts, []);
 });
 
-test("fallbacks preserve storefront family scope and exclude cancelled orders and other owners", async () => {
+test("configured default receives unrelated storefront fallbacks, excluding cancelled orders and other owners", async () => {
   const f = fallbackFixture();
   f.order.storefrontId = id(1);
-  await reconcileFallbackStores(f.models);
-  assert.equal(f.order.fallbackStore, null, "An unrelated default cannot fulfill a selected storefront");
-  f.stores[2].parentStore = id(1);
   await reconcileFallbackStores(f.models);
   assert.equal(f.order.fallbackStore, id(3));
   await assert.rejects(respondToFallbackStore(f.models, f.order._id, id(2), "accept"), /no longer available/);
   f.order.status = "4";
   await assert.rejects(respondToFallbackStore(f.models, f.order._id, id(3), "accept"), /no longer available/);
+});
+
+test("configured default can claim an unrelated storefront cart with matching stock before driver assignment", async () => {
+  const f = fallbackFixture();
+  Object.assign(f.order, { storefrontId: id(1), cartRouteVersion: 1, checkoutGroup: id(30) });
+  const group = { routeDriver: null, fulfillmentRevision: 0, async save() {} };
+  f.models.CheckoutGroup = { findById: () => query(group) };
+  await reconcileFallbackStores(f.models);
+  f.stores[2].isOpen = true;
+  // The distance check applies to grouped orders; inject a deterministic road distance.
+  const distance = require("../helpers/google-distance");
+  const original = distance.getDrivingDistanceKm;
+  distance.getDrivingDistanceKm = async () => 1;
+  try {
+    group.routeDriver = id(40);
+    await assert.rejects(respondToFallbackStore(f.models, f.order._id, id(3), "accept"), /already assigned/);
+    assert.equal(f.stocks[2].reserved, 0);
+    group.routeDriver = null;
+    await respondToFallbackStore(f.models, f.order._id, id(3), "accept");
+    assert.equal(f.order.store, id(3));
+    assert.equal(f.order.fulfillmentStatus, "accepted");
+    assert.equal(f.stocks[2].reserved, 2);
+    assert.equal(group.fulfillmentRevision, 1);
+  } finally { distance.getDrivingDistanceKm = original; }
+});
+
+test("non-default company stores still respect storefront family scope during fallback", async () => {
+  const f = fallbackFixture();
+  f.order.storefrontId = id(1);
+  f.order.fallbackStoreAttempts = [id(3)];
+  f.stores[1].isCompanyOwned = true;
+  await reconcileFallbackStores(f.models);
+  assert.equal(f.order.fallbackStore, null);
+  f.stores[1].parentStore = id(1);
+  await reconcileFallbackStores(f.models);
+  assert.equal(f.order.fallbackStore, id(2));
 });
 
 test("legacy fallback claim does not create a second inventory reservation", async () => {

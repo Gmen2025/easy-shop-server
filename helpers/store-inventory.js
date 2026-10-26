@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const { getCoordinates, distanceMeters } = require("./fulfillment-routing");
 const { sendPushToUser } = require("./push-notify");
+const { pendingCartPickups } = require("./cart-route");
 
 const ACCEPTANCE_MS = 5 * 60 * 1000;
 const CONFIG_KEY = "store-inventory-config";
@@ -217,12 +218,9 @@ async function updateManagedOrder(models, orderId, fields, { deleting = false } 
           (!order.driver || String(order.driver) !== String(group.routeDriver))) throw conflict("Only the assigned cart driver can collect and deliver this cart.");
       if (completed && order.deliveryStatus !== "Delivered") {
         if (order.deliveryStatus !== "Picked Up") throw conflict("Collect this store's products before confirming delivery.");
-        const siblings = await models.Order.find({ checkoutGroup: group._id,
-          cartDeliveryAddressId: order.cartDeliveryAddressId }).session(session);
-        if (siblings.some((entry) => entry.fulfillmentStatus !== "cancelled" &&
-          !["4", "Cancelled"].includes(String(entry.status)) &&
-          !["Picked Up", "Delivered"].includes(entry.deliveryStatus))) {
-          throw conflict("Collect all products for this drop-off address before completing its delivery.");
+        const siblings = await models.Order.find({ checkoutGroup: group._id }).session(session);
+        if (pendingCartPickups(siblings, group._id).length) {
+          throw conflict("Complete all pickups for this customer cart before confirming any delivery.");
         }
       }
       if (fields.deliveryStatus && !["Picked Up", "Delivered"].includes(fields.deliveryStatus)) {

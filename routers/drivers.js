@@ -11,14 +11,62 @@ const {
   getSuspendThreshold,
   checkBalanceThresholds,
   reinstateDriverIfEligible,
+  restoreCompanyDriversSuspendedForBalance,
 } = require("../helpers/driver-wallet");
 const { buildDriverOrderSummary } = require("../helpers/driver-view");
 const { getDeliverySchedule } = require("../helpers/delivery");
 const { createDriverRouteHandler } = require("../service/driverRoute");
 const { MAX_ACTIVE_ORDERS_PER_DRIVER } = require("../service/dispatchService");
 const { getCoordinates } = require("../helpers/fulfillment-routing");
+const { pendingCartPickups } = require("../helpers/cart-route");
+const { listAvailableDeliveries } = require("../service/availableDeliveries");
+const { driverAvailable } = require("../helpers/delivery-availability");
+const { assignDriverToOrder } = require("../service/dispatchService");
 
 router.post("/me/orders/:id/route", createDriverRouteHandler());
+
+router.get("/me/available-deliveries", async (req, res) => {
+  try {
+    if (!req.auth?.userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+    let driver = await req.dbModels.Driver.findOne({ user: req.auth.userId });
+    if (!driver) return res.status(403).json({ success: false, message: "A driver profile is required." });
+    if (driver.isCompanyOwned) {
+      await restoreCompanyDriversSuspendedForBalance(req.dbModels.Driver);
+      driver = await req.dbModels.Driver.findOne({ user: req.auth.userId });
+      if (!driver) return res.status(403).json({ success: false, message: "A driver profile is required." });
+    }
+    const orders = await listAvailableDeliveries(req.dbModels, driver, MAX_ACTIVE_ORDERS_PER_DRIVER);
+    return res.json({ success: true, orders, driverEligibility: {
+      eligible: driverAvailable(driver),
+      message: driverAvailable(driver) ? "Shared assignments are filtered by pickup proximity, vehicle and remaining capacity." :
+        "Go online with an approved, non-suspended driver profile and enable delivery service to claim assignments.",
+    } });
+  } catch (error) {
+    console.error("Available driver deliveries failed:", error.message);
+    return res.status(error.status || 500).json({ success: false,
+      message: error.status ? error.message : "Unable to load available delivery assignments." });
+  }
+});
+
+router.put("/me/available-deliveries/:id/claim", async (req, res) => {
+  try {
+    if (!req.auth?.userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: "Invalid order id." });
+    const driver = await req.dbModels.Driver.findOne({ user: req.auth.userId });
+    if (!driver) return res.status(403).json({ success: false, message: "A driver profile is required." });
+    const result = await assignDriverToOrder(req.params.id, req.app.get("io"), {
+      dbName: req.dbName, models: req.dbModels, sharedDriverId: String(driver._id),
+    });
+    if (!result.success || String(result.driverId) !== String(driver._id)) {
+      return res.status(409).json({ success: false, message: "This assignment is no longer available or exceeds your driver capacity. Refresh assignments." });
+    }
+    return res.json({ success: true, message: "Delivery claimed.", cartOrderIds: result.cartOrderIds });
+  } catch (error) {
+    console.error("Available delivery claim failed:", error.message);
+    return res.status(error.status || 500).json({ success: false,
+      message: error.status ? error.message : "Unable to claim this delivery assignment." });
+  }
+});
 
 const requireAdmin = (req, res, next) => {
   if (!req.auth?.isAdmin) {
@@ -616,18 +664,17 @@ router.get("/me/queue", async (req, res) => {
       ...(orders.some((order) => order.cartRouteVersion === 1) && forceReveal ? {
         routeStops: require("../service/cartDispatch").queueRoute(orders, getCoordinates(driver.location)),
       } : {}),
-      queue: orders.map((order) => ({
-        ...buildDriverOrderSummary(order, { forceReveal }),
-        ...(order.cartRouteVersion === 1 ? {
-          cartRouteVersion: 1, cartDeliveryAddressId: order.cartDeliveryAddressId,
-          dropoffReady: order.deliveryStatus === "Picked Up" && !orders.some((entry) =>
-            String(entry.checkoutGroup) === String(order.checkoutGroup) &&
-            entry.cartDeliveryAddressId === order.cartDeliveryAddressId && entry.deliveryStatus !== "Picked Up"),
-          pendingPickupOrderIds: orders.filter((entry) => String(entry.checkoutGroup) === String(order.checkoutGroup) &&
-            entry.cartDeliveryAddressId === order.cartDeliveryAddressId && entry.deliveryStatus !== "Picked Up")
-            .map((entry) => String(entry._id)),
-        } : {}),
-      })),
+      queue: orders.map((order) => {
+        const pending = order.cartRouteVersion === 1 ? pendingCartPickups(orders, order.checkoutGroup) : [];
+        return {
+          ...buildDriverOrderSummary(order, { forceReveal }),
+          ...(order.cartRouteVersion === 1 ? {
+            cartRouteVersion: 1, cartDeliveryAddressId: order.cartDeliveryAddressId,
+            dropoffReady: order.deliveryStatus === "Picked Up" && !pending.length,
+            pendingPickupOrderIds: pending.map((entry) => String(entry._id)),
+          } : {}),
+        };
+      }),
     });
   } catch (error) {
     console.error("Driver queue fetch error:", error);

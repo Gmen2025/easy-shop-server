@@ -1,6 +1,7 @@
 const mongoose = require("mongoose");
 const { getCoordinates } = require("../helpers/fulfillment-routing");
 const { computeDrivingRoute } = require("../helpers/google-route");
+const { pendingCartPickups } = require("../helpers/cart-route");
 
 function createDriverRouteHandler({ compute = computeDrivingRoute, now = Date.now } = {}) {
   const requests = new Map();
@@ -20,12 +21,9 @@ function createDriverRouteHandler({ compute = computeDrivingRoute, now = Date.no
       }).populate("store", "location");
       if (!order) return res.status(404).json({ message: "Active delivery assigned to you was not found." });
       if (order.cartRouteVersion === 1 && order.deliveryStatus === "Picked Up") {
-        const siblings = await req.dbModels.Order.find({ checkoutGroup: order.checkoutGroup,
-          cartDeliveryAddressId: order.cartDeliveryAddressId }).lean();
-        if (siblings.some((entry) => entry.fulfillmentStatus !== "cancelled" &&
-          !["4", "Cancelled"].includes(String(entry.status)) &&
-          !["Picked Up", "Delivered"].includes(entry.deliveryStatus))) {
-          return res.status(409).json({ message: "Collect all products for this destination before starting its drop-off route." });
+        const siblings = await req.dbModels.Order.find({ checkoutGroup: order.checkoutGroup }).lean();
+        if (pendingCartPickups(siblings, order.checkoutGroup).length) {
+          return res.status(409).json({ message: "Complete all pickups for this customer cart before starting any drop-off route." });
         }
       }
       const destination = getCoordinates(order.deliveryStatus === "Picked Up"

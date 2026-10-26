@@ -6,8 +6,9 @@ A comprehensive REST API for an e-commerce platform built with Node.js, Express,
 
 New grouped product quotes use one fixed customer-cart route in both USA and
 Ethio, shared by mobile and website. Unique pickup stores and allocated drop-off
-addresses form a dependency-constrained route. A destination becomes eligible
-after its supplying stores have been visited; unrelated pickups need not finish.
+addresses form a dependency-constrained route. Every pickup for that customer
+cart must finish before any of its drop-offs become eligible, even if an earlier
+drop-off is closer or already has all of its own products collected.
 The deterministic multi-start nearest-next planner uses geographic distances to
 choose an ordering, then prices Google's road distances along that ordering.
 This is a heuristic, not a guaranteed shortest-road-route optimizer.
@@ -25,7 +26,7 @@ overseas/final-delivery tariffs remain separate.
 All live store orders must be accepted before the complete cart can be offered.
 Transactional group/driver writes assign all its pickup orders to one driver,
 prevent split claims, and reject individual reassignment or premature delivery.
-Each destination requires all its noncancelled products picked up before delivery
+Every noncancelled pickup in the cart must be collected before any delivery
 or drop-off navigation. Drivers can accept several carts within the configured
 cart-count limit and conservative combined vehicle capacity. Missing package
 measurements allow one manually selected cart, but prohibit multi-cart batching.
@@ -34,10 +35,55 @@ Shared stores appear once in the company driver's combined operational plan;
 live GPS can affect that plan but never the customer's price. Partner drivers
 retain existing pre-pickup exact-address privacy.
 
+When stores exhaust acceptance/rerouting attempts, the configured default store
+receives a durable fallback request even for an unrelated storefront. It can
+claim with matching stock/prices, reroute, or reject for Admin review. Other
+fallback stores still respect storefront-family scope. Fallback decisions
+serialize against cart driver assignment; they do not reprice reserved delivery.
+A fully collected cart can deliver while a different accepted cart still has
+pickups; the pickup gate applies per customer cart, not to the entire driver batch.
+
 Deploy backend first, then website and mobile together. No backfill is required:
 saved quotes/orders without cart-route metadata retain legacy pricing/dispatch.
+Existing cart-route prices stay fixed, but operational pickup gating also applies
+to existing cart-route orders.
 Vehicle delivery pricing and per-store inventory must already be enabled.
 Focused tests: `node --test tests\cart-route.test.js tests\cart-dispatch.test.js tests\multi-delivery.test.js tests\driver-route.test.js`.
+
+### Shared unclaimed delivery assignments
+
+Website and mobile driver dashboards use authenticated
+`GET /api/v1/drivers/me/available-deliveries` and
+`PUT /api/v1/drivers/me/available-deliveries/:id/claim`. Unassigned, dispatch-ready
+carts and legacy deliveries are not restricted to the driver selected for an
+automatic company offer. Eligible available company and partner drivers can
+claim them; the first successful transactional claim wins. A claim accepts the
+whole cart immediately and does not require a live socket or a second acceptance.
+Both reads and claims enforce approval, suspension, availability, delivery mode,
+vehicle, remaining capacity and ride exclusions. Partner drivers must be within
+the existing 5 km first-pickup radius; company drivers retain their no-radius
+fallback. Partner responses expose pickup stops and approximate drop zones only,
+preserving exact recipient address/phone privacy before pickup.
+
+Unclaimed requests remain in the database when nobody is available. Company
+drivers see this durable backlog on reopening, focus and periodic refresh even
+while offline or full, with `canClaim: false`; going online does not assign an
+order automatically through the list. Company drivers have `canRespond: true`
+on unclaimed ready requests, even without a designated offer or available
+alternative. `PUT orders/:id/company-reject` and `/company-reroute` both record
+that driver's refusal for the whole cart, clear the company offer and leave the
+request queued for other eligible company or partner drivers. These actions
+remove it only from the responding driver's list. Reject also flags it for
+non-blocking Admin review through `orders/admin/company-rejections`; Reroute
+does not. The saved response's `action` distinguishes the two while both use
+`status: "rejected"` to exclude the responding driver. Historical rejected
+responses without an action remain visible to Admin. Neither action sets
+the dispatch-blocking `adminReviewRequired` field, cancels the order, changes
+its price or refunds payment. Partner drivers cannot use these company response
+actions. Assigned, blocking-Admin-review, cancelled,
+future-scheduled and not-store-accepted requests cannot be released this way.
+Previous refusals exclude only the responding driver from subsequent claims
+and offers. Existing automatic dispatch and company offer APIs remain supported.
 
 ## Regional payment availability
 
@@ -799,9 +845,9 @@ Validate with `node --test tests/company-driver-availability.test.js`.
   still applies to claiming. If none is currently eligible, an approved default
   company driver receives the offer even when offline, full or suspended.
   Saved offers are not reassigned just because eligibility/proximity changes.
-  `PUT orders/:id/company-reroute` excludes that driver and retries routing;
-  `PUT orders/:id/company-reject` is now a final rejection for Admin review.
-  With no alternative driver, rerouting returns 409 and leaves the offer queued.
+  `PUT orders/:id/company-reroute` and `PUT orders/:id/company-reject` both
+  exclude that driver and release the whole unclaimed request to other eligible
+  drivers. With no alternative driver, the request stays queued for later.
 - Company-store fallback uses the nearest eligible store when coordinates allow
   ranking. Otherwise it retains an eligible preferred company store, or chooses
   an available company store by stable ID order. Missing coordinates are never
@@ -827,11 +873,12 @@ Validate with `node --test tests/company-driver-availability.test.js`.
   opening status and whole-order inventory/prices, then atomically reserves and
   accepts. `/reroute` retries another store; no alternative returns 409 without
   losing the request. `/reject` marks `adminReviewRequired:"store"`.
-- Final store/driver rejection sets `adminReviewRequired` and stops scheduler
+- Final store rejection sets `adminReviewRequired` and stops scheduler
   recovery, offers and claims. The order/payment remains intact for Admin to
   cancel/delete using existing safeguards. Grouped cancellations/refunds must
-  use checkout endpoints. Removing a final driver rejection through the existing
-  admin response-deletion endpoint clears driver review and permits routing.
+  use checkout endpoints. Driver rejection instead leaves requests available to
+  others. Removing a historical final driver rejection through the existing
+  admin response-deletion endpoint still clears driver review and permits routing.
   No live orders are migrated or production deployment performed automatically.
   Validate with `node --test tests/store-inventory.test.js tests/fulfillment-routing.test.js tests/company-offer-response.test.js`.
 - Dashboard offer recovery uses the shared conditional offer write directly,

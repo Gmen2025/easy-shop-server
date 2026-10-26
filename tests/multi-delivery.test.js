@@ -1134,7 +1134,7 @@ test("disabled regional methods block new reservations and card starts but prese
   assert.equal((await ensureIntent(card.models, card.group, "E_ShopUSA")).clientSecret, "saved-secret");
   assert.equal(recovered, 1);
 });
-test("cart routes require all destination products picked up but do not wait for unrelated addresses", async () => {
+test("cart routes require every pickup before any address can be delivered", async () => {
   const f = fixture();
   f.group.cartRoute = { version: 1, vehicle: "car", cargo: cargoFor([line], [product]) };
   f.group.fulfillmentRevision = 0;
@@ -1145,14 +1145,13 @@ test("cart routes require all destination products picked up but do not wait for
   const keys = f.orders.map((order) => order._id);
   await assert.rejects(updateManagedOrder(f.models, keys[0], { deliveryStatus: "Delivered" }), /Collect this store/);
   await updateManagedOrder(f.models, keys[0], { deliveryStatus: "Picked Up" });
-  await assert.rejects(updateManagedOrder(f.models, keys[0], { deliveryStatus: "Delivered" }), /all products for this drop-off/);
+  await assert.rejects(updateManagedOrder(f.models, keys[0], { deliveryStatus: "Delivered" }), /all pickups.*cart/);
   f.orders.find((order) => order._id === keys[1]).cartDeliveryAddressId = "unrelated";
-  const originalFind = f.models.Order.find;
-  f.models.Order.find = (filter) => filter.cartDeliveryAddressId ?
-    query(f.orders.filter((order) => order.cartDeliveryAddressId === filter.cartDeliveryAddressId)) : originalFind(filter);
+  await assert.rejects(updateManagedOrder(f.models, keys[0], { deliveryStatus: "Delivered" }), /all pickups.*cart/);
+  await updateManagedOrder(f.models, keys[1], { deliveryStatus: "Picked Up" });
   await updateManagedOrder(f.models, keys[0], { deliveryStatus: "Delivered" });
   assert.equal(f.orders.find((order) => order._id === keys[0]).deliveryStatus, "Delivered");
-  assert.equal(f.orders.find((order) => order._id === keys[1]).deliveryStatus, "Driver Assigned");
+  assert.equal(f.orders.find((order) => order._id === keys[1]).deliveryStatus, "Picked Up");
 });
 
 test("intent creation retries use server total and the same key; expired succeeded payments are recovered, never released", async (t) => {

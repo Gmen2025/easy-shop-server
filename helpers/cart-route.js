@@ -19,14 +19,14 @@ function routeStops(deliveries) {
     });
     const drop = drops.get(dropId);
     drop.deliveryKeys.push(delivery.key);
-    if (!drop.requires.includes(pickupId)) drop.requires.push(pickupId);
   }
+  for (const drop of drops.values()) drop.requires = [...pickups.keys()];
   const stops = [...pickups.values(), ...drops.values()];
   if (stops.some((stop) => !getCoordinates(stop.location))) throw conflict("Every cart pickup and drop-off needs valid map coordinates.");
   return stops;
 }
 
-// Multi-start nearest-next planning, constrained by each destination's pickup dependencies.
+// Multi-start nearest-next planning, constrained by the cart's pickup dependencies.
 // Road distances price the chosen route; live driver GPS and other carts never enter it.
 function planStops(stops, origin) {
   if (!stops.length) return [];
@@ -96,4 +96,10 @@ function combinedCargo(cargos) {
     packages: cargos.flatMap((cargo) => cargo.packages) };
 }
 
-module.exports = { routeStops, planStops, quoteCartRoute, combinedCargo };
+function pendingCartPickups(orders, checkoutGroup) {
+  return orders.filter((order) => String(order.checkoutGroup) === String(checkoutGroup) &&
+    order.fulfillmentStatus !== "cancelled" && !["4", "Cancelled"].includes(String(order.status)) &&
+    !["Picked Up", "Delivered"].includes(order.deliveryStatus));
+}
+
+module.exports = { routeStops, planStops, quoteCartRoute, combinedCargo, pendingCartPickups };

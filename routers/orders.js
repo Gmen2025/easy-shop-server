@@ -17,6 +17,7 @@ const { getCommissionRate, debitCommission } = require("../helpers/driver-wallet
 const { buildDriverOrderSummary, isDropoffRevealed } = require("../helpers/driver-view");
 const { inventoryEnabled, normalizeLines, eligibleStores, reserve, assignStore, updateManagedOrder } = require("../helpers/store-inventory");
 const { vehicleMatches } = require("../helpers/vehicle-delivery");
+const { orderReady, driverRejected } = require("../helpers/delivery-availability");
 
 const ALLOWED_DELIVERY_STATUSES = ["Pending", "Driver Assigned", "Picked Up", "Delivered"];
 
@@ -803,14 +804,15 @@ router.put("/:id/company-claim", async (req, res) => {
  * @swagger
  * /api/v1/orders/{id}/company-reject:
  *   put:
- *     summary: Authenticated company driver rejects a delivery (does not delete it)
+ *     summary: Company driver flags a delivery for non-blocking Admin review, leaving it available to other drivers
  *     tags: [Orders]
  *     security:
  *       - bearerAuth: []
  */
 const respondToCompanyOffer = async (req, res) => {
   try {
-    const { Order, Driver, Store } = req.dbModels;
+    if (!req.auth?.userId) return res.status(401).json({ success: false, message: "Unauthorized" });
+    const { Order, Driver } = req.dbModels;
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ success: false, message: "Invalid order id." });
     }
@@ -825,51 +827,41 @@ const respondToCompanyOffer = async (req, res) => {
       return res.status(404).json({ success: false, message: "Order not found." });
     }
     if (order.cartRouteVersion === 1) {
-      await require("../service/cartDispatch").respond(req.dbModels, order, driver,
-        req.path.endsWith("/company-reject"), MAX_ACTIVE_ORDERS_PER_DRIVER);
-      return res.json({ success: true, message: "Complete cart response saved. No payment has been cancelled or refunded." });
+      const action = req.path.endsWith("/company-reroute") ? "reroute" : "reject";
+      await require("../service/cartDispatch").respond(req.dbModels, order, driver, action);
+      return res.json({ success: true, message: `Complete cart returned to available drivers.${action === "reject" ? " Flagged for Admin review without pausing delivery." : ""} It stays queued if nobody is available. No payment has been cancelled or refunded.` });
     }
 
-    const alreadyResponded = (order.companyDriverResponses || []).some((entry) => String(entry.driver) === String(driver._id));
-    if (alreadyResponded) {
-      return res.status(409).json({ success: false, message: "You have already responded to this delivery." });
-    }
-    if (req.path.endsWith("/company-reroute")) {
-      const excludedDriverIds = [
-        driver._id, ...(order.companyDriverResponses || []).map((entry) => entry.driver),
-      ];
-      const next = await findCompanyDriver(Driver, Order, getCoordinates(order.customerLocation), {
-        excludedDriverIds, maxActiveOrders: MAX_ACTIVE_ORDERS_PER_DRIVER,
-        requiredVehicle: order.requiredVehicle, allowUnavailable: true,
-      });
-      const pickup = order.store ? await Store.findById(order.store).lean() : null;
-      const coordinates = getCoordinates(pickup?.location) || getCoordinates(order.customerLocation);
-      if (!next && (!coordinates || !(await hasNearbyPartnerDriver(Driver, Order, coordinates, order.requiredVehicle)))) {
-        return res.status(409).json({ success: false, message: "No other driver can receive this request. Keep it queued to claim later, or reject it for Admin review." });
-      }
+    if (!orderReady(order) || driverRejected(order, driver)) {
+      return res.status(409).json({ success: false, message: "This delivery is no longer available or you have already responded." });
     }
 
     const rejected = await Order.findOneAndUpdate({
-      _id: order._id, driver: null, companyOfferDriver: driver._id,
+      _id: order._id, driver: null, fallbackStore: null,
       adminReviewRequired: { $exists: false },
       status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
       deliveryStatus: "Pending",
-      dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] },
-      "companyDriverResponses.driver": { $ne: driver._id },
+      $and: [
+        { $or: [{ inventoryManaged: { $ne: true } }, { fulfillmentStatus: "accepted" }] },
+        { $or: [
+          { dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] } },
+          { dispatchStatus: "scheduled", deliveryWindowStart: { $lte: new Date() } },
+        ] },
+      ],
+      companyDriverResponses: { $not: { $elemMatch: { driver: driver._id, status: "rejected" } } },
     }, {
       $set: {
         companyOfferDriver: null,
-        ...(req.path.endsWith("/company-reject") ? { adminReviewRequired: "driver", dispatchStatus: "assignment_failed" } : {}),
+        dispatchStatus: "pending_assignment",
       },
-      $push: { companyDriverResponses: { driver: driver._id, status: "rejected" } },
+      $push: { companyDriverResponses: { driver: driver._id, status: "rejected",
+        action: req.path.endsWith("/company-reroute") ? "reroute" : "reject" } },
     }, { new: true });
     if (!rejected) {
-      return res.status(409).json({ success: false, message: "This delivery is no longer offered to you." });
+      return res.status(409).json({ success: false, message: "This delivery is no longer available or you have already responded." });
     }
 
-    return res.status(200).json({ success: true, message: req.path.endsWith("/company-reject")
-      ? "Delivery rejected for Admin review. The order has not been cancelled."
-      : "Delivery returned for rerouting." });
+    return res.status(200).json({ success: true, message: `Delivery returned to available drivers.${req.path.endsWith("/company-reroute") ? "" : " Flagged for Admin review without pausing delivery."} It stays queued if nobody is available. The order and payment have not been cancelled.` });
   } catch (error) {
     console.error("Company driver reject error:", error);
     return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to reject this delivery." });
@@ -890,7 +882,9 @@ router.put("/:id/company-reroute", respondToCompanyOffer);
 router.get("/admin/company-rejections", requireAdmin, async (req, res) => {
   try {
     const { Order } = req.dbModels;
-    const orders = await Order.find({ "companyDriverResponses.status": "rejected" })
+    const orders = await Order.find({
+      companyDriverResponses: { $elemMatch: { status: "rejected", action: { $ne: "reroute" } } },
+    })
       .populate("store", "name address")
       .populate("companyDriverResponses.driver", "name email")
       .sort({ dateOrdered: -1 })

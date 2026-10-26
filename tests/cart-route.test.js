@@ -37,14 +37,15 @@ test("cart fee is pickup1 -> pickup2 -> destination, with one base fee and surch
   assert.equal(group.cartRoute.vehicle, "van");
   assert.equal(group.totalPrice, 63);
 });
-test("destinations may be visited before unrelated pickups, never before their own pickups; stores are visited only once", () => {
+test("every cart pickup precedes every destination, even when an early drop-off is closer; stores are visited only once", () => {
   const deliveries = [delivery("a", "shared", "near", 0, 0.1), delivery("b", "shared", "far", 0, 10),
     delivery("c", "other", "far", 9, 10)];
   const route = planStops(routeStops(deliveries));
   assert.equal(route.filter((stop) => stop.key === "pickup:shared").length, 1);
   assert.deepEqual(route.find((stop) => stop.key === "pickup:shared").deliveryKeys, ["a", "b"]);
   const index = (key) => route.findIndex((stop) => stop.key === key);
-  assert.ok(index("dropoff:near") < index("pickup:other"));
+  assert.ok(index("dropoff:near") > index("pickup:other"));
+  assert.deepEqual(route.find((stop) => stop.key === "dropoff:near").requires, ["pickup:shared", "pickup:other"]);
   for (const stop of route) for (const requirement of stop.requires) assert.ok(index(requirement) < index(stop.key));
 });
 test("USA bills route miles once; rounding and internal shares conserve every cent", async () => {
@@ -55,6 +56,18 @@ test("USA bills route miles once; rounding and internal shares conserve every ce
   assert.equal(deliveries.reduce((sum, row) => sum + Math.round(row.deliveryFee * 100), 0), 901);
   assert.deepEqual(deliveries.map((row) => row.deliveryFee), [3.01, 3, 3]);
   assert.equal(deliveries.reduce((sum, row) => sum + Math.round(row.pricingGroup.billableDistanceKm * 1000), 0), 3218);
+});
+test("multi-pickup multi-dropoff cart pricing includes every road leg after collecting the entire cart", async () => {
+  const deliveries = [delivery("a", "shared", "near", 0, 0.1), delivery("b", "shared", "far", 0, 10),
+    delivery("c", "other", "far", 9, 10)];
+  let legs = 0;
+  const route = await quoteCartRoute(deliveries, products, config, "E_Shopping", 3, async () => ++legs + 1);
+  assert.deepEqual(route.stops.map((stop) => stop.type), ["pickup", "pickup", "dropoff", "dropoff"]);
+  assert.equal(legs, 3);
+  assert.equal(route.distanceKm, 9);
+  assert.equal(route.vehicleOptions[0].fee, 26, "5 base + 9 road km * 2 + 3 speed surcharge");
+  allocateDeliveryFees(deliveries);
+  assert.equal(deliveries.reduce((sum, entry) => sum + Math.round(entry.deliveryFee * 100), 0), 2600);
 });
 test("missing routes fail explicitly; incomplete measurements allow a single manually selected cart, not speculative batching", async () => {
   for (const value of [null, NaN, -1]) {
@@ -69,7 +82,7 @@ test("missing routes fail explicitly; incomplete measurements allow a single man
   assert.equal(combinedCargo([route.cargo]), null);
   assert.throws(() => routeStops([{ ...deliveries[0], store: { _id: "s", location: null } }]), /map coordinates/);
 });
-test("combined driver route collects several customers at a shared store and enforces destination-specific dependencies", () => {
+test("combined driver route collects several customers at a shared store and enforces cart-wide dependencies", () => {
   const orders = [
     { _id: "a", cartRouteVersion: 1, checkoutGroup: "customer1", cartDeliveryAddressId: "home",
       store: { _id: "s1", location: point(0), name: "Shared store" }, customerLocation: point(2), deliveryStatus: "Driver Assigned" },
@@ -85,4 +98,23 @@ test("combined driver route collects several customers at a shared store and enf
   assert.ok(stops.indexOf(drop) > stops.findIndex((stop) => stop.key === "pickup:s2"));
   orders[0].deliveryStatus = orders[1].deliveryStatus = orders[2].deliveryStatus = "Picked Up";
   assert.ok(queueRoute(orders, [1, 0]).every((stop) => stop.type === "dropoff" && !stop.requires.length));
+});
+
+test("all addresses in a cart wait for its remaining pickups, but a fully collected different cart can deliver", () => {
+  const orders = [
+    { _id: "a", cartRouteVersion: 1, checkoutGroup: "customer1", cartDeliveryAddressId: "near",
+      store: { _id: "s1", location: point(0) }, customerLocation: point(0.1), deliveryStatus: "Picked Up" },
+    { _id: "b", cartRouteVersion: 1, checkoutGroup: "customer1", cartDeliveryAddressId: "far",
+      store: { _id: "s2", location: point(9) }, customerLocation: point(10), deliveryStatus: "Driver Assigned" },
+    { _id: "c", cartRouteVersion: 1, checkoutGroup: "customer2", cartDeliveryAddressId: "home",
+      store: { _id: "s1", location: point(0) }, customerLocation: point(0.2), deliveryStatus: "Picked Up" },
+  ];
+  const stops = queueRoute(orders, [0, 0]);
+  for (const drop of stops.filter((stop) => stop.checkoutGroup === "customer1")) {
+    assert.deepEqual(drop.requires, ["pickup:s2"]);
+    assert.ok(stops.indexOf(drop) > stops.findIndex((stop) => stop.key === "pickup:s2"));
+  }
+  const ready = stops.find((stop) => stop.checkoutGroup === "customer2");
+  assert.deepEqual(ready.requires, []);
+  assert.equal(stops[0], ready, "Another customer's remaining pickups do not block a complete cart");
 });

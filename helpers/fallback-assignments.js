@@ -15,7 +15,8 @@ function selectFallbackStore(stores, order, defaultStoreId) {
   if (order.storefrontId) {
     const selected = stores.find((store) => String(store._id) === String(order.storefrontId));
     const root = selected?.parentStore || order.storefrontId;
-    candidates = candidates.filter((store) => String(store._id) === String(root) || String(store.parentStore) === String(root));
+    candidates = candidates.filter((store) => String(store._id) === String(defaultStoreId) ||
+      String(store._id) === String(root) || String(store.parentStore) === String(root));
   }
   const ranked = rankByDistance(candidates, getCoordinates(order.customerLocation));
   return ranked.find((store) => String(store._id) === String(defaultStoreId)) || ranked[0];
@@ -47,6 +48,12 @@ async function respondToFallbackStore(models, orderId, storeId, decision) {
       $or: [{ inventoryManaged: { $ne: true } }, { fulfillmentStatus: "unassigned" }],
     }).session(session);
     if (!order) throw conflict("This fallback assignment is no longer available to your store.");
+    if (order.cartRouteVersion === 1) {
+      const group = await models.CheckoutGroup.findById(order.checkoutGroup).session(session);
+      if (!group || group.routeDriver) throw conflict("This cart is already assigned to its driver.");
+      group.fulfillmentRevision += 1;
+      await group.save({ session });
+    }
     if (decision === "accept") {
       const store = await models.Store.findById(storeId).session(session).lean();
       if (!store || store.approvalStatus !== "approved" || store.isOpen === false) {

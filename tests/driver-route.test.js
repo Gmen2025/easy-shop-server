@@ -95,7 +95,7 @@ test("route destination is server-selected for pickup and delivery; rapid reques
   }
 });
 
-test("cart drop-off navigation waits only for its own destination pickups", async () => {
+test("cart drop-off navigation waits for every address's pickups and ignores cancelled orders", async () => {
   for (const pending of [true, false]) {
     const { req, res } = fixture({ status: "Picked Up" });
     req.dbModels.Order.findOne = () => ({ populate: async () => ({
@@ -103,15 +103,17 @@ test("cart drop-off navigation waits only for its own destination pickups", asyn
       deliveryStatus: "Picked Up", customerLocation: { coordinates: [38.2, 9.2] },
     }) });
     req.dbModels.Order.find = (filter) => {
-      assert.equal(filter.cartDeliveryAddressId, "home");
+      assert.deepEqual(filter, { checkoutGroup: "cart" });
       return { lean: async () => [
-        { deliveryStatus: "Picked Up" }, { deliveryStatus: pending ? "Driver Assigned" : "Picked Up" },
-        { deliveryStatus: "Pending", fulfillmentStatus: "cancelled" },
+        { checkoutGroup: "cart", cartDeliveryAddressId: "home", deliveryStatus: "Picked Up" },
+        { checkoutGroup: "cart", cartDeliveryAddressId: "work", deliveryStatus: pending ? "Driver Assigned" : "Picked Up" },
+        { checkoutGroup: "cart", deliveryStatus: "Pending", fulfillmentStatus: "cancelled" },
       ] };
     };
     let calls = 0;
     await createDriverRouteHandler({ compute: async () => { calls++; return { coordinates: [], distance: 1, duration: 2 }; } })(req, res);
     assert.equal(res.statusCode, pending ? 409 : 200);
+    if (pending) assert.match(res.body.message, /all pickups.*cart/);
     assert.equal(calls, pending ? 0 : 1);
   }
 });
