@@ -701,12 +701,34 @@ test("post-ride payment enforces ownership, completion, region and a stable meth
   await assert.rejects(service.prepareRidePayment(f.models, ride._id, userId, { method: "bank" }), /after.*completed/);
   await f.models.Ride.findByIdAndUpdate(ride._id, { status: "completed", finalFare: 8, completedAt: new Date() });
   await assert.rejects(service.prepareRidePayment(f.models, ride._id, id(999), { method: "bank" }), /after.*completed/);
-  await assert.rejects(service.prepareRidePayment(f.models, ride._id, userId, { method: "cash" }), /USA/);
   const prepared = await service.prepareRidePayment(f.models, ride._id, userId, { method: "bank", bankAccountId: id(12) }, "E_ShopUSA");
   await assert.rejects(service.prepareRidePayment(f.models, ride._id, userId, { method: "card" }), /existing payment/);
   const submitted = await service.confirmRidePayment(f.models, prepared, "E_ShopUSA", { sender: "Payer", reference: "Transfer" });
   assert.equal(submitted.paymentStatus, "pending");
   assert.equal(submitted.bankReference, "Transfer");
+});
+test("USA rides support cash to the driver in production", async () => {
+  const f = fixture(), ride = await f.booking({ status: "completed", finalFare: 8, completedAt: new Date() });
+  const prepared = await service.prepareRidePayment(f.models, ride._id, userId, { method: "cash" }, "E_ShopUSA");
+  assert.equal(prepared.paymentMethod, "cash");
+  assert.equal(prepared.paymentStatus, "pending");
+});
+test("disabled ride methods block new payment selection while saved methods remain recoverable", async () => {
+  const f = fixture(), ride = await f.booking({ status: "completed", finalFare: 8, completedAt: new Date() });
+  const original = f.models.SiteSetting.findOne;
+  const methods = { cash: false, bank: false, card: false, telebirr: false };
+  f.models.SiteSetting.findOne = (filter) => filter.key === "payment-methods" ?
+    { lean: async () => ({ paymentMethods: methods }) } : original(filter);
+  for (const method of ["cash", "bank", "card"]) {
+    await assert.rejects(service.prepareRidePayment(f.models, ride._id, userId, { method }, "E_ShopUSA"),
+      /Payment is temporarily unavailable/);
+    assert.equal(f.tables.Ride.find((entry) => entry._id === ride._id).paymentMethod, undefined);
+  }
+  methods.cash = true;
+  await service.prepareRidePayment(f.models, ride._id, userId, { method: "cash" }, "E_ShopUSA");
+  methods.cash = false;
+  const resumed = await service.prepareRidePayment(f.models, ride._id, userId, { method: "cash" }, "E_ShopUSA");
+  assert.equal(resumed.paymentMethod, "cash");
 });
 test("Ethiopia rides retain ETB and cannot use newly configured USD transfer accounts", async () => {
   const f = fixture(), ride = await f.booking({ currency: "etb", status: "completed", finalFare: 150, completedAt: new Date() });

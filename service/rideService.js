@@ -502,11 +502,11 @@ async function prepareRidePayment(models, rideId, user, body, databaseName) {
       if (ride.paymentMethod !== body.method) throw conflict("Resume the existing payment method. Contact support to change it.");
       return ride;
     }
+    await require("../helpers/payment-settings").requirePaymentMethod(models, body.method);
     if (body.method === "card") {
       if (ride.currency !== "usd") throw conflict("Card payments are available only in USA.");
       stripeClient(databaseName);
     }
-    if (body.method === "cash" && ride.currency === "usd") throw conflict("Cash is not available in USA.");
     if (body.method === "bank") {
       const setting = await models.SiteSetting.findOne({ key: "bank-account-info" }).session(session).lean();
       const bank = setting?.bankAccounts?.find((entry) => id(entry) === body.bankAccountId && entry.isActive !== false &&
@@ -523,6 +523,7 @@ async function prepareRidePayment(models, rideId, user, body, databaseName) {
 async function ridePaymentIntent(models, ride, databaseName) {
   if (!payableRide(ride) || ride.paymentMethod !== "card") throw conflict("Complete the ride or obtain Admin termination review and choose card payment first.");
   if (ride.paymentStatus === "completed") return { ride };
+  if (!ride.paymentIntentId) await require("../helpers/payment-settings").requirePaymentMethod(models, "card");
   const stripe = stripeClient(databaseName);
   let intent;
   if (ride.paymentIntentId) intent = await stripe.paymentIntents.retrieve(ride.paymentIntentId);

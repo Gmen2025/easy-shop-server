@@ -14,6 +14,12 @@ const siteSettingSchema = new mongoose.Schema(
       default: false,
     },
     socialLoginEnabled: { type: Boolean, default: false },
+    paymentMethods: {
+      cash: { type: Boolean, default: undefined },
+      bank: { type: Boolean, default: undefined },
+      card: { type: Boolean, default: undefined },
+      telebirr: { type: Boolean, default: undefined },
+    },
     socialLoginProviders: {
       google: { type: Boolean, default: undefined },
       apple: { type: Boolean, default: undefined },

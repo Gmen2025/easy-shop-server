@@ -6,10 +6,36 @@ const {
 const { isGoogleDistanceApiConfigured, getDrivingDistanceKm } = require('../helpers/google-distance');
 const { getCoordinates, resolvePickupStore } = require('../helpers/fulfillment-routing');
 const { PROVIDERS, readSocialLoginSetting, updateSocialLoginSetting } = require('../helpers/social-login-settings');
+const { METHODS, readPaymentSettings, updatePaymentSettings } = require('../helpers/payment-settings');
 
 const MAINTENANCE_SETTING_KEY = 'maintenance-mode';
 const BANK_ACCOUNT_SETTING_KEY = 'bank-account-info';
 const DELIVERY_SETTING_KEY = 'delivery-config';
+
+router.get('/payment-methods', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try { res.json(await readPaymentSettings(req.dbModels)); }
+  catch (error) {
+    console.error('Failed to read payment methods:', error);
+    res.status(503).json({ success: false, message: 'Unable to load payment availability. Please try again.' });
+  }
+});
+
+router.put('/payment-methods', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!requireAdmin(req, res)) return;
+  const methods = req.body?.methods;
+  if (!methods || typeof methods !== 'object' || Array.isArray(methods) || !Object.keys(methods).length ||
+    Object.keys(req.body).some((key) => key !== 'methods') ||
+    Object.entries(methods).some(([key, value]) => !METHODS.includes(key) || typeof value !== 'boolean')) {
+    return res.status(400).json({ success: false, message: 'methods must contain boolean cash, bank, card or telebirr switches.' });
+  }
+  try { res.json(await updatePaymentSettings(req.dbModels, methods, req.auth.userId)); }
+  catch (error) {
+    console.error('Failed to save payment methods:', error);
+    res.status(503).json({ success: false, message: 'Unable to save payment method settings.' });
+  }
+});
 
 function requireAdmin(req, res) {
   if (!req.auth?.isAdmin) {

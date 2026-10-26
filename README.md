@@ -2,6 +2,33 @@
 
 A comprehensive REST API for an e-commerce platform built with Node.js, Express, and MongoDB. Features include JWT authentication, payment gateway integrations (Stripe & Telebirr), order management, and email notifications.
 
+## Regional payment availability
+
+Deploy this backend before the matching website/mobile payment controls.
+`GET /api/v1/settings/payment-methods` is public and uncached; authenticated
+Admin `PUT` accepts only partial boolean switches, for example
+`{"methods":{"cash":false,"card":true}}`. Both requests use
+`x-database-name` to select USA or Ethio. Each region persists its own
+`SiteSetting` with key `payment-methods`; omitted methods default ON.
+Updates to one method do not overwrite the others.
+
+Cash, bank, card and Telebirr switches apply identically in development and
+production. USA cash no longer requires `developmentCashOnDelivery`.
+New grouped reservations, ride payment-method selection, new card intents,
+legacy order submissions and legacy Stripe/Telebirr starts enforce the
+regional setting. Disabled methods return 503; if all switches are OFF the
+message is "Payment is temporarily unavailable. Please try again later."
+Settings database failures also return 503, never an enabled fallback.
+
+Existing grouped reservations and saved ride methods can be recovered;
+existing card intents, confirmation/status endpoints, gateway callbacks and
+refunds remain accessible. Legacy order creation remains a new submission:
+coordinate disabling around already-paid legacy orders, which need their
+method re-enabled before submission. Switches do not replace actual provider
+configuration or currency support: grouped checkout/rides do not support
+Telebirr, international shipping remains ETB bank-only, and converted/service
+payments exclude cash.
+
 ## Optional store logos (shared mobile and website)
 
 Stores use the existing `Store.logo` field; no database migration is needed.

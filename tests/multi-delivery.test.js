@@ -200,18 +200,10 @@ function exportFixture() {
   return { ...data, shippingConfig, exchangeConfig };
 }
 
-test("USA development cash checkout reserves Car deliveries and leaves payment pending until collection", async () => {
+test("USA cash checkout reserves Car deliveries without a development flag and leaves payment pending until collection", async () => {
   const { models, group, body, orders, stocks } = fixture();
-  for (const flag of [undefined, false, "true", 1]) {
-    await assert.rejects(prepare(models, group._id, userId, "E_ShopUSA", {
-      ...body, method: "cash", developmentCashOnDelivery: flag,
-    }), /development\/debug build/);
-    assert.equal(group.status, "quote");
-    assert.equal(orders.length, 0);
-    assert.ok(stocks.every((stock) => stock.reserved === 0));
-  }
   await prepare(models, group._id, userId, "E_ShopUSA", {
-    ...body, method: "cash", developmentCashOnDelivery: true,
+    ...body, method: "cash",
   });
   assert.equal(group.status, "awaiting_payment");
   assert.equal(group.paymentMethod, "cash");
@@ -1106,10 +1098,40 @@ test("bank receipt is submitted after reserving and only Admin can later mark pa
   assert.equal(group.paymentStatus, "pending");
   assert.equal(orders[0].transferReference, "TRANSFER");
   const cash = fixture();
-  await assert.rejects(prepare(cash.models, cash.group._id, userId, "E_ShopUSA", { ...cash.body, method: "cash" }), /development\/debug build/);
-  await prepare(cash.models, cash.group._id, userId, "E_Shopping", { ...cash.body, method: "cash" });
+  await prepare(cash.models, cash.group._id, userId, "E_ShopUSA", { ...cash.body, method: "cash" });
   await activate(cash.models, cash.group._id);
   assert.equal(cash.group.status, "placed");
+});
+test("disabled regional methods block new reservations and card starts but preserve saved checkout recovery", async () => {
+  const f = fixture();
+  const original = f.models.SiteSetting.findOne;
+  let methods = { cash: false, bank: false, card: false, telebirr: false };
+  f.models.SiteSetting.findOne = (filter) => filter.key === "payment-methods" ? query({ paymentMethods: methods }) : original(filter);
+  for (const method of ["cash", "bank", "card"]) {
+    await assert.rejects(prepare(f.models, f.group._id, userId, "E_ShopUSA", { ...f.body, method }),
+      /Payment is temporarily unavailable/);
+    assert.equal(f.group.status, "quote");
+    assert.equal(f.orders.length, 0);
+    assert.ok(f.stocks.every((stock) => stock.reserved === 0));
+  }
+  methods = { ...methods, cash: true };
+  await prepare(f.models, f.group._id, userId, "E_ShopUSA", { ...f.body, method: "cash" });
+  methods.cash = false;
+  assert.equal((await prepare(f.models, f.group._id, userId, "E_ShopUSA", { ...f.body, method: "cash" }))._id, f.group._id);
+  await activate(f.models, f.group._id);
+  assert.equal(f.group.status, "placed");
+  const card = fixture();
+  await prepare(card.models, card.group._id, userId, "E_ShopUSA", card.body);
+  card.models.SiteSetting.findOne = () => query({ paymentMethods: methods });
+  await assert.rejects(ensureIntent(card.models, card.group, "E_ShopUSA"), /Payment is temporarily unavailable/);
+  card.group.paymentIntentId = "saved-intent";
+  let recovered = 0;
+  stripeRouter.getStripe = () => ({ stripe: { paymentIntents: {
+    retrieve: async (value) => { assert.equal(value, "saved-intent"); recovered++; return { id: value, status: "requires_payment_method", client_secret: "saved-secret" }; },
+    create: () => assert.fail("Disabled card must never start a second payment"),
+  } } });
+  assert.equal((await ensureIntent(card.models, card.group, "E_ShopUSA")).clientSecret, "saved-secret");
+  assert.equal(recovered, 1);
 });
 
 test("intent creation retries use server total and the same key; expired succeeded payments are recovered, never released", async (t) => {

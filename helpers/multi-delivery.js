@@ -323,10 +323,6 @@ function selectVehicles(group, selections) {
 async function prepare(models, groupId, user, databaseName, body) {
   if (!body || typeof body !== "object") throw conflict("Payment details are required.");
   if (!["cash", "bank", "card"].includes(body.method)) throw conflict("Choose a supported payment method.");
-  // This client build flag is not an authorization boundary.
-  if (body.method === "cash" && /usa/i.test(databaseName) && body.developmentCashOnDelivery !== true) {
-    throw conflict("USA cash checkout requires a development/debug build.");
-  }
   return models.Order.db.transaction(async (session) => {
     const group = await models.CheckoutGroup.findOne({ _id: groupId, user }).session(session);
     if (!group) throw conflict("Checkout not found.");
@@ -335,6 +331,7 @@ async function prepare(models, groupId, user, databaseName, body) {
       if (group.status === "cancelled") throw conflict("This checkout was cancelled. Request a new quote.");
       return group;
     }
+    await require("./payment-settings").requirePaymentMethod(models, body.method);
     if (body.deliveryMode !== undefined && body.deliveryMode !== group.deliveryMode) {
       throw conflict("Delivery speed changed after quoting. Request a new quote.");
     }
@@ -572,6 +569,7 @@ function stripeClient(databaseName, group) {
 }
 
 async function ensureIntent(models, group, databaseName) {
+  if (!group.paymentIntentId) await require("./payment-settings").requirePaymentMethod(models, "card");
   if (group.paymentMethod !== "card" || group.status !== "awaiting_payment") throw conflict("This checkout is not awaiting card payment.");
   const stripe = stripeClient(databaseName, group);
   const intent = group.paymentIntentId ? await stripe.paymentIntents.retrieve(group.paymentIntentId) :

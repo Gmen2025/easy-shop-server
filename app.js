@@ -169,6 +169,7 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(null, swaggerOptions));
 
 // Apply JWT authentication (after Swagger route)
 app.use(authJwt());
+app.use(api, require('./helpers/payment-settings').paymentStartGuard);
 app.use('/public/uploads', express.static(__dirname + '/public/uploads'));;
 
 
