@@ -246,6 +246,41 @@ test("offline company-list recovery persists one nearest offer without dispatch 
   assert.equal(f.group.deliveryFee, 10);
 });
 
+test("company-list recovery does not strand a store batch behind an unassigned nearby partner", async () => {
+  const { listAvailableDeliveries } = require("../service/availableDeliveries");
+  const f = storeBatch(fixture());
+  f.drivers[1].isCompanyOwned = false;
+  f.drivers[1].location = point(0);
+  f.drivers[0].location = point(2);
+  const rows = await listAvailableDeliveries(f.models, f.drivers[0], 3);
+  assert.equal(rows.length, 1, "An available partner is not an accepted assignment");
+  assert.equal(rows[0].canClaim, true);
+  assert.ok(f.orders.every((order) => order.companyOfferDriver === "d1" && !order.driver));
+  assert.equal((await listAvailableDeliveries(f.models, f.drivers[1], 3)).length, 1,
+    "Nearby partners retain manual claim access");
+  const result = await dispatch(f.models, f.orders[0], f.io, { ...f.options, sharedDriverId: "d1" });
+  assert.equal(result.driverId, "d1");
+  assert.ok(f.orders.every((order) => order.driver === "d1"));
+  assert.equal(f.group.deliveryFee, 10);
+});
+
+test("company recovery chooses an available compatible driver, or keeps an offline offer, despite nearby partners", async () => {
+  const { listAvailableDeliveries } = require("../service/availableDeliveries");
+  for (const offline of [false, true]) {
+    const f = storeBatch(fixture());
+    f.drivers[0].vehicleType = "motorcycle";
+    f.drivers[1].isAvailable = !offline;
+    f.drivers[1].location = point(2);
+    f.drivers.push({ ...f.drivers[1], _id: "partner", isCompanyOwned: false,
+      isAvailable: true, location: point(0) });
+    const rows = await listAvailableDeliveries(f.models, f.drivers[1], 3);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].canClaim, !offline);
+    assert.ok(f.orders.every((order) => order.companyOfferDriver === "d2"));
+    assert.deepEqual(await listAvailableDeliveries(f.models, f.drivers[0], 3), []);
+  }
+});
+
 test("failed Admin reassignment rolls back the old driver, batch membership and package state", async () => {
   const { reroute } = require("../service/driverAssignment");
   const f = storeBatch(fixture());

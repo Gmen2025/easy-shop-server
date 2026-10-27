@@ -221,11 +221,11 @@ async function ensureCompanyOffer(models, order, maxCarts) {
   const { group, orders } = await loadCart(models, order);
   if (!ready(orders) || group.routeDriver || orders.some((entry) => entry.companyOfferDriver)) return;
   const pickup = assignmentRoute(group, liveOrders(orders)).stops[0]?.location;
-  const candidates = await models.Driver.find({ approvalStatus: "approved", isSuspended: { $ne: true } });
+  // List recovery cannot contact partners or await their acceptance.
+  const candidates = await models.Driver.find({ isCompanyOwned: true, approvalStatus: "approved", isSuspended: { $ne: true } });
   const eligible = rankDrivers(candidates, pickup, liveOrders(orders));
   for (const driver of eligible) {
     if (!await driverCapacity(models, driver, group, maxCarts)) continue;
-    if (!driver.isCompanyOwned) return;
     return offer(models, group, orders, driver);
   }
 }

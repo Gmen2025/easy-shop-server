@@ -19,6 +19,19 @@ function endpoint(action) {
   };
 }
 
+function startBatchDispatch(req, batch) {
+  const io = req.app.get("io");
+  setImmediate(async () => {
+    try {
+      await require("../service/dispatchService").assignDriverToOrder(String(batch.orders[0]), io, {
+        dbName: req.dbName, models: req.dbModels,
+      });
+    } catch (error) {
+      console.error(`[Dispatch:${req.dbName}] Store batch ${batch._id} assignment failed; queued for retry:`, error.message);
+    }
+  });
+}
+
 async function ownedStore(req, id) {
   if (!req.auth?.userId) throw Object.assign(new Error("Sign in to manage your store."), { status: 401 });
   if (!mongoose.isValidObjectId(id)) throw conflict("Invalid store ID.");
@@ -259,12 +272,14 @@ router.post("/admin/assignments/:id/:decision", endpoint(async (req, res) => {
 router.post("/admin/dispatch-batches", endpoint(async (req, res) => {
   if (!req.auth?.isAdmin) throw Object.assign(new Error("Admin access required."), { status: 403 });
   const batch = await require("../service/storeDispatch").createBatch(req.dbModels, req.auth.userId, req.body.orderIds, { admin: true });
+  startBatchDispatch(req, batch);
   res.status(201).json({ success: true, batchId: batch._id, orderIds: batch.orders });
 }));
 
 router.post("/me/dispatch-batches", endpoint(async (req, res) => {
   if (!req.auth?.userId) throw Object.assign(new Error("Unauthorized"), { status: 401 });
   const batch = await require("../service/storeDispatch").createBatch(req.dbModels, req.auth.userId, req.body.orderIds);
+  startBatchDispatch(req, batch);
   res.status(201).json({ success: true, batchId: batch._id, orderIds: batch.orders });
 }));
 

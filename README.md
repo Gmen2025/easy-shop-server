@@ -57,6 +57,9 @@ A single-package dispatch needs no reason. Unknown measurements permit only a
 single manually selected package; measured batches must fit vehicle capacity.
 `StoreDispatch` records and transactional order locks prevent duplicate release.
 No driver being online is necessary to queue a batch.
+Owner and Admin batch endpoints start driver assignment immediately after saving,
+without waiting for a partner driver's response before returning the batch ID.
+The scheduler retries queued batches if the initial attempt fails.
 
 Drivers claim the entire store batch atomically through the existing
 available-deliveries API. Pickup, navigation and delivery gates require all live
@@ -105,6 +108,10 @@ offers persist in `companyOfferDriver` and appear only in the designated company
 driver's list. A nearby eligible partner may still manually claim an unclaimed
 batch. Approval, service, vehicle, ride and cargo checks govern fallback selection;
 going online and meeting current capacity are required for self-claim.
+Driver-list recovery also persists a company offer for already queued batches,
+even when a nearby partner is marked available but has not accepted. This
+socket-independent recovery does not wait on partner availability; nearby eligible
+partners retain manual claim access, and the first transactional claim wins.
 Partner responses expose pickup stops and approximate drop zones only,
 preserving exact recipient address/phone privacy before pickup.
 

@@ -84,6 +84,79 @@ test("single-package release needs no reason and permits manually selected unkno
   assert.equal(batch.cartRoute.cargo.measurementsAvailable, false);
 });
 
+test("owner and Admin batch endpoints start driver assignment after saving without waiting for driver acceptance", async () => {
+  const router = require("../routers/store-inventory");
+  const storeDispatch = require("../service/storeDispatch");
+  const dispatchService = require("../service/dispatchService");
+  const originalCreate = storeDispatch.createBatch;
+  const originalAssign = dispatchService.assignDriverToOrder;
+  const calls = [];
+  let finishAssignment;
+  try {
+    for (const scope of ["me", "admin"]) {
+      const f = fixture();
+      const io = { to() {} };
+      const batch = { _id: id(30), orders: [id(1)] };
+      storeDispatch.createBatch = async (models, userId, orderIds, options) => {
+        assert.equal(models, f.models);
+        assert.equal(userId, id(20));
+        assert.deepEqual(orderIds, batch.orders);
+        assert.equal(Boolean(options?.admin), scope === "admin");
+        return batch;
+      };
+      dispatchService.assignDriverToOrder = (orderId, socket, options) => {
+        calls.push({ orderId, socket, options });
+        return new Promise((resolve) => { finishAssignment = resolve; });
+      };
+      const handler = router.stack.find((entry) => entry.route?.path === `/${scope}/dispatch-batches`).route.stack[0].handle;
+      const req = { auth: { userId: id(20), isAdmin: scope === "admin" }, dbModels: f.models,
+        dbName: "regional-shop", body: { orderIds: batch.orders }, app: { get: () => io } };
+      const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+      const before = calls.length;
+      await handler(req, res);
+      assert.equal(res.code, 201);
+      assert.equal(res.body.batchId, batch._id);
+      await new Promise(setImmediate);
+      assert.equal(calls.length, before + 1);
+      assert.equal(calls.at(-1).orderId, id(1));
+      assert.equal(calls.at(-1).socket, io);
+      assert.equal(calls.at(-1).options.models, f.models);
+      assert.equal(calls.at(-1).options.dbName, "regional-shop");
+      finishAssignment({ success: true, offered: true });
+    }
+  } finally {
+    finishAssignment?.({ success: true });
+    storeDispatch.createBatch = originalCreate;
+    dispatchService.assignDriverToOrder = originalAssign;
+  }
+});
+
+test("batch assignment failures are logged and leave the saved batch queued for recovery", async () => {
+  const router = require("../routers/store-inventory");
+  const dispatchService = require("../service/dispatchService");
+  const originalAssign = dispatchService.assignDriverToOrder;
+  const originalError = console.error;
+  const errors = [];
+  const f = fixture();
+  try {
+    dispatchService.assignDriverToOrder = async () => { throw new Error("Dispatch connection failed"); };
+    console.error = (...args) => errors.push(args.join(" "));
+    const handler = router.stack.find((entry) => entry.route?.path === "/me/dispatch-batches").route.stack[0].handle;
+    const req = { auth: { userId: id(20) }, dbModels: f.models, dbName: "regional-shop",
+      body: { orderIds: [id(1)] }, app: { get: () => ({ to() {} }) } };
+    const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+    await handler(req, res);
+    await new Promise(setImmediate);
+    assert.equal(res.code, 201, "The durable batch was saved, not an accepted driver assignment");
+    assert.equal(f.batches.length, 1);
+    assert.ok(orderReady(f.orders[0]), "Recovery can still dispatch the saved batch");
+    assert.ok(errors.some((message) => message.includes(id(30)) && message.includes("Dispatch connection failed")));
+  } finally {
+    dispatchService.assignDriverToOrder = originalAssign;
+    console.error = originalError;
+  }
+});
+
 test("Admin can dispatch another owner's store packages only through the trusted Admin override", async () => {
   const f = fixture();
   await assert.rejects(createBatch(f.models, id(90), [id(1)]), (error) => error.status === 403);
