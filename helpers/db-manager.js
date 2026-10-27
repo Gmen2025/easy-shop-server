@@ -13,6 +13,7 @@ const { serviceRequestSchema } = require('../models/service-request');
 const { driverWalletTransactionSchema } = require('../models/driver-wallet-transaction');
 const { storeInventorySchema } = require('../models/store-inventory');
 const { checkoutGroupSchema } = require('../models/checkout-group');
+const { storeDispatchSchema } = require('../models/store-dispatch');
 const { deliveryAddressSchema } = require('../models/delivery-address');
 const { rideSchema } = require('../models/ride');
 const { rideTripSchema } = require('../models/ride-trip');
@@ -105,6 +106,7 @@ function getModelsForDb(dbName) {
     Store: db.models.Store || db.model('Store', storeSchema),
     StoreInventory: db.models.StoreInventory || db.model('StoreInventory', storeInventorySchema),
     CheckoutGroup: db.models.CheckoutGroup || db.model('CheckoutGroup', checkoutGroupSchema),
+    StoreDispatch: db.models.StoreDispatch || db.model('StoreDispatch', storeDispatchSchema),
     DeliveryAddress: db.models.DeliveryAddress || db.model('DeliveryAddress', deliveryAddressSchema),
     Ride: db.models.Ride || db.model('Ride', rideSchema),
     RideTrip: db.models.RideTrip || db.model('RideTrip', rideTripSchema),

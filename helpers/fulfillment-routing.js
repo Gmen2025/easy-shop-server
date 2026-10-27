@@ -122,24 +122,26 @@ async function findCompanyDriver(Driver, Order, coordinates, { excludedDriverIds
   const drivers = await Driver.find({
     isCompanyOwned: true,
     approvalStatus: "approved",
+    isSuspended: { $ne: true },
     ...(!allowUnavailable ? {
-      isSuspended: { $ne: true },
       $or: [{ isAvailable: true }, { availabilityStatus: true }],
     } : {}),
     _id: { $nin: excludedDriverIds },
   }).lean();
   const eligible = [];
+  const waiting = [];
   for (const driver of drivers) {
-    if (allowUnavailable && (driver.isSuspended || !(driver.isAvailable === true || driver.availabilityStatus === true))) continue;
+    if (driver.isSuspended || driver.exclusiveDelivery || driver.activeRideTrip || driver.pendingRideOffer ||
+        driver.serviceModes?.delivery === false) continue;
     if (!vehicleMatches(driver, requiredVehicle)) continue;
+    waiting.push(driver);
     const activeCount = await Order.countDocuments({
       driver: driver._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] },
     });
     if (activeCount < (requiredVehicle ? 1 : maxActiveOrders)) eligible.push(driver);
   }
-  if (eligible.length === 1) return eligible[0];
-  const nearest = coordinates && rankByDistance(eligible, coordinates).find((driver) => getCoordinates(driver.location));
-  return nearest || (allowUnavailable ? rankByDistance(drivers, coordinates)[0] : null) || null;
+  const available = eligible.filter((driver) => !allowUnavailable || driver.isAvailable === true || driver.availabilityStatus === true);
+  return rankByDistance(available.length ? available : allowUnavailable ? eligible.length ? eligible : waiting : [], coordinates)[0] || null;
 }
 
 module.exports = {

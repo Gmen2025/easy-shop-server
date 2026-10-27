@@ -291,7 +291,7 @@ router.put("/admin/company-drivers/:id", requireAdmin, async (req, res) => {
         });
         if (driver.activeCartRoutes?.length) {
           const active = await req.dbModels.Order.find({ driver: driver._id,
-            deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] } }).select("_id checkoutGroup cartRouteVersion").lean();
+            deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] } }).select("_id checkoutGroup cartRouteVersion storeDispatchBatch").lean();
           activeOrders = new Set(active.map(require("../service/cartDispatch").unit)).size;
         }
         if (activeOrders >= MAX_ACTIVE_ORDERS_PER_DRIVER) {
@@ -661,14 +661,19 @@ router.get("/me/queue", async (req, res) => {
     return res.status(200).json({
       success: true,
       count: orders.length,
-      ...(orders.some((order) => order.cartRouteVersion === 1) && forceReveal ? {
+      ...(orders.some((order) => order.cartRouteVersion === 1 || order.storeDispatchBatch) && forceReveal ? {
         routeStops: require("../service/cartDispatch").queueRoute(orders, getCoordinates(driver.location)),
       } : {}),
       queue: orders.map((order) => {
-        const pending = order.cartRouteVersion === 1 ? pendingCartPickups(orders, order.checkoutGroup) : [];
+        const pending = order.storeDispatchBatch ? orders.filter((entry) =>
+          String(entry.storeDispatchBatch) === String(order.storeDispatchBatch) && entry.deliveryStatus !== "Picked Up") :
+          order.cartRouteVersion === 1 ? pendingCartPickups(orders, order.checkoutGroup) : [];
         return {
           ...buildDriverOrderSummary(order, { forceReveal }),
-          ...(order.cartRouteVersion === 1 ? {
+          canRerouteBeforePickup: forceReveal && orders.filter((entry) =>
+            require("../service/cartDispatch").unit(entry) === require("../service/cartDispatch").unit(order))
+            .every((entry) => entry.deliveryStatus === "Driver Assigned"),
+          ...(order.cartRouteVersion === 1 || order.storeDispatchBatch ? {
             cartRouteVersion: 1, cartDeliveryAddressId: order.cartDeliveryAddressId,
             dropoffReady: order.deliveryStatus === "Picked Up" && !pending.length,
             pendingPickupOrderIds: pending.map((entry) => String(entry._id)),

@@ -67,7 +67,8 @@ const driverSchema = new mongoose.Schema({
   activeRideTrip: { type: mongoose.Schema.Types.ObjectId, ref: "RideTrip", default: null },
   pendingRideOffer: { type: mongoose.Schema.Types.ObjectId, ref: "Ride", default: null },
   dispatchVersion: { type: Number, default: 0 },
-  activeCartRoutes: [{ type: mongoose.Schema.Types.ObjectId, ref: "CheckoutGroup" }],
+  // Dispatch unit IDs: historical CheckoutGroup routes or StoreDispatch batches.
+  activeCartRoutes: [{ type: mongoose.Schema.Types.ObjectId }],
   rideLocationUpdatedAt: Date,
   vehicle: {
     type: { type: String, default: "", trim: true },

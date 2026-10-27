@@ -55,6 +55,7 @@ function fixture({ partner = false } = {}) {
     CheckoutGroup: { findById: () => query(group),
       updateOne: async (filter, changes) => { update(group, changes); return { modifiedCount: 1 }; } },
     Order: {
+      findById: (key) => query(orders.find((entry) => entry._id === key)),
       find: (filter) => query(orders.filter((entry) => matches(entry, filter))),
       countDocuments: (filter) => query(orders.filter((entry) => matches(entry, filter)).length),
       updateMany: async (filter, changes) => {
@@ -96,6 +97,203 @@ test("all stores must accept before a cart is offered; one claim atomically assi
   assert.deepEqual(f.drivers[0].activeCartRoutes, ["cart"]);
   assert.equal((await dispatch(f.models, f.orders[0], f.io, { ...f.options, companyDriverId: "d2" })).driverId, "d1");
   assert.ok(f.orders.every((order) => order.driver === "d1"), "A second claim cannot split the cart");
+});
+test("a store batch atomically assigns packages from different checkouts and does not claim their other stores", async () => {
+  const f = fixture();
+  f.group.store = "store0";
+  f.models.StoreDispatch = f.models.CheckoutGroup;
+  f.models.CheckoutGroup = { findById() { throw new Error("Store batches must not use a customer's payment group"); } };
+  f.orders.forEach((order, index) => {
+    order.cartRouteVersion = undefined;
+    order.storeRouteVersion = 1;
+    order.checkoutGroup = `customer${index}`;
+    order.storeDispatchBatch = "cart";
+    order.storeReadyAt = new Date();
+    order.store = f.orders[0].store;
+  });
+  f.orders.push({ ...f.orders[0], _id: "other-store", storeDispatchBatch: undefined,
+    storeReadyAt: undefined, store: { _id: "different-store" } });
+  await dispatch(f.models, f.orders[0], f.io, f.options);
+  const result = await dispatch(f.models, f.orders[0], f.io, { ...f.options, sharedDriverId: "d1" });
+  assert.deepEqual(result.cartOrderIds, ["a", "b"]);
+  assert.ok(f.orders.slice(0, 2).every((order) => order.driver === "d1"));
+  assert.equal(f.orders[2].driver, null);
+  assert.equal(f.group.routeDriver, "d1");
+  assert.equal((await dispatch(f.models, f.orders[1], f.io, { ...f.options, sharedDriverId: "d2" })).driverId, "d1");
+});
+
+function storeBatch(f) {
+  f.group.store = "store0";
+  f.models.StoreDispatch = f.models.CheckoutGroup;
+  f.orders.forEach((order) => {
+    order.cartRouteVersion = undefined;
+    order.storeRouteVersion = 1;
+    order.storeReadyAt = new Date();
+    order.storeDispatchBatch = "cart";
+    order.inventoryManaged = true;
+    order.store = f.orders[0].store;
+  });
+  f.models.Store = { find: (filter) => query(filter.owner === "owner" ? [{ _id: "store0" }] : []) };
+  return f;
+}
+
+test("store batches prefer nearest available company drivers over nearer offline drivers, then persist an offline offer", async () => {
+  const f = storeBatch(fixture());
+  f.drivers[0].isAvailable = false;
+  f.drivers[1].location = point(2);
+  const result = await dispatch(f.models, f.orders[0], f.io, f.options);
+  assert.equal(result.driverId, "d2", "An available company driver wins even outside partner radius");
+  assert.ok(f.orders.every((order) => order.companyOfferDriver === "d2" && !order.driver));
+  const offline = storeBatch(fixture());
+  offline.drivers.forEach((driver) => { driver.isAvailable = false; });
+  offline.drivers[1].location = point(2);
+  assert.equal((await dispatch(offline.models, offline.orders[0], offline.io, offline.options)).driverId, "d1");
+  const { listAvailableDeliveries } = require("../service/availableDeliveries");
+  const rows = await listAvailableDeliveries(offline.models, offline.drivers[0], 3);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].canClaim, false);
+  assert.equal(rows[0].canRespond, true);
+  assert.deepEqual(await listAvailableDeliveries(offline.models, offline.drivers[1], 3), []);
+  await assert.rejects(dispatch(offline.models, offline.orders[0], offline.io,
+    { ...offline.options, sharedDriverId: "d2" }), { status: 409 });
+  offline.drivers[0].isAvailable = true;
+  assert.equal((await dispatch(offline.models, offline.orders[0], offline.io,
+    { ...offline.options, sharedDriverId: "d1" })).success, true);
+});
+
+test("offline company driver reroute gives the next driver the whole batch; reject remains reviewable without pausing it", async () => {
+  const f = storeBatch(fixture());
+  f.drivers.forEach((driver) => { driver.isAvailable = false; });
+  await dispatch(f.models, f.orders[0], f.io, f.options);
+  await respond(f.models, f.orders[0], f.drivers[0], "reject");
+  assert.ok(f.orders.every((order) => order.companyOfferDriver === "d2" &&
+    order.companyDriverResponses[0].action === "reject" && !order.adminReviewRequired));
+  await respond(f.models, f.orders[0], f.drivers[1], "reroute");
+  assert.ok(f.orders.every((order) => !order.companyOfferDriver && !order.driver));
+  assert.ok(f.orders.every((order) => order.companyDriverResponses.length === 2));
+  assert.equal(f.group.deliveryFee, 10);
+});
+
+test("only the designated driver can reject or reroute a store batch; nearby partners retain manual claim access", async () => {
+  const f = storeBatch(fixture());
+  await dispatch(f.models, f.orders[0], f.io, f.options);
+  await assert.rejects(respond(f.models, f.orders[0], f.drivers[1]), { status: 409 });
+  f.drivers[1].isCompanyOwned = false;
+  const result = await dispatch(f.models, f.orders[0], f.io, { ...f.options, sharedDriverId: "d2" });
+  assert.equal(result.driverId, "d2");
+});
+
+test("dispatching-store owners can reroute an accepted whole batch, but never after any pickup", async () => {
+  const { reroute } = require("../service/driverAssignment");
+  const f = storeBatch(fixture());
+  await dispatch(f.models, f.orders[0], f.io, f.options);
+  await dispatch(f.models, f.orders[0], f.io, { ...f.options, companyDriverId: "d1" });
+  await assert.rejects(reroute(f.models, "a", { ownerId: "stranger" }), { status: 403 });
+  await reroute(f.models, "a", { ownerId: "owner" });
+  assert.equal(f.group.routeDriver, null);
+  assert.deepEqual(f.drivers[0].activeCartRoutes, []);
+  assert.ok(f.orders.every((order) => !order.driver && order.companyDriverResponses[0].action === "reroute"));
+  f.orders[0].deliveryStatus = "Picked Up";
+  await assert.rejects(reroute(f.models, "b", { admin: true, driverId: "d2" }), /before pickup/);
+  assert.equal(f.orders[0].deliveryStatus, "Picked Up");
+});
+
+test("Admin explicitly assigns an offline driver without ownership, while approval, rides, cargo and pickup checks remain enforced", async () => {
+  const { reroute } = require("../service/driverAssignment");
+  const f = storeBatch(fixture());
+  f.drivers[0].isAvailable = false;
+  f.drivers[0].location = point(20);
+  f.orders.forEach((order) => order.companyDriverResponses.push({ driver: "d1", status: "rejected", action: "reject" }));
+  const result = await reroute(f.models, "a", { admin: true, driverId: "d1" });
+  assert.equal(result.driverId, "d1");
+  assert.ok(f.orders.every((order) => order.driver === "d1"));
+  assert.equal(f.drivers[0].isAvailable, false, "Admin assignment does not turn an offline driver online");
+  assert.equal(f.group.deliveryFee, 10);
+  for (const change of [
+    (value) => { value.drivers[0].vehicleType = "motorcycle"; },
+    (value) => { value.drivers[0].isSuspended = true; },
+    (value) => { value.drivers[0].approvalStatus = "pending"; },
+    (value) => { value.drivers[0].activeRideTrip = "trip"; },
+    (value) => { value.config.vehicles.car.maxWeightKg = 1; },
+    (value) => { value.orders[0].refundStatus = "refunded"; },
+  ]) {
+    const invalid = storeBatch(fixture());
+    change(invalid);
+    await assert.rejects(reroute(invalid.models, "a", { admin: true, driverId: "d1" }));
+  }
+});
+
+test("company drivers can release accepted batches before pickup and cannot release another driver's batch", async () => {
+  const f = storeBatch(fixture());
+  await dispatch(f.models, f.orders[0], f.io, f.options);
+  await dispatch(f.models, f.orders[0], f.io, { ...f.options, companyDriverId: "d1" });
+  await assert.rejects(respond(f.models, f.orders[0], f.drivers[1]), { status: 409 });
+  await respond(f.models, f.orders[0], f.drivers[0], "reject");
+  assert.equal(f.group.routeDriver, null);
+  assert.ok(f.orders.every((order) => !order.driver && order.companyOfferDriver === "d2"));
+  assert.ok(f.orders.every((order) => order.companyDriverResponses[0].action === "reject"));
+});
+
+test("offline company-list recovery persists one nearest offer without dispatch sockets or a logged-in recipient", async () => {
+  const { listAvailableDeliveries } = require("../service/availableDeliveries");
+  const f = storeBatch(fixture());
+  f.drivers.forEach((driver) => { driver.isAvailable = false; });
+  f.drivers[1].location = point(2);
+  assert.deepEqual(await listAvailableDeliveries(f.models, f.drivers[1], 3), []);
+  assert.ok(f.orders.every((order) => order.companyOfferDriver === "d1"));
+  assert.equal((await listAvailableDeliveries(f.models, f.drivers[0], 3)).length, 1);
+  assert.equal((await listAvailableDeliveries(f.models, f.drivers[0], 3))[0].canClaim, false);
+  assert.equal(f.group.deliveryFee, 10);
+});
+
+test("failed Admin reassignment rolls back the old driver, batch membership and package state", async () => {
+  const { reroute } = require("../service/driverAssignment");
+  const f = storeBatch(fixture());
+  await dispatch(f.models, f.orders[0], f.io, f.options);
+  await dispatch(f.models, f.orders[0], f.io, { ...f.options, companyDriverId: "d1" });
+  f.drivers[1].vehicleType = "motorcycle";
+  f.models.Order.db.transaction = async (action) => {
+    const records = [f.group, ...f.orders, ...f.drivers];
+    const snapshots = records.map((record) => structuredClone(Object.fromEntries(
+      Object.entries(record).filter(([, value]) => typeof value !== "function"))));
+    try { return await action({}); }
+    catch (error) {
+      records.forEach((record, index) => {
+        for (const key of Object.keys(record)) if (typeof record[key] !== "function") delete record[key];
+        Object.assign(record, snapshots[index]);
+      });
+
+      throw error;
+    }
+  };
+  await assert.rejects(reroute(f.models, "a", { admin: true, driverId: "d2" }), /incompatible vehicle/);
+  assert.equal(f.group.routeDriver, "d1");
+  assert.deepEqual(f.drivers[0].activeCartRoutes, ["cart"]);
+  assert.ok(f.orders.every((order) => order.driver === "d1" && order.deliveryStatus === "Driver Assigned"));
+});
+
+test("Admin can reopen older driver-review flags without bypassing a store rejection", async () => {
+  const { reroute } = require("../service/driverAssignment");
+  const f = storeBatch(fixture());
+  f.orders.forEach((order) => { order.adminReviewRequired = "driver"; });
+  await reroute(f.models, "a", { admin: true, driverId: "d1" });
+  assert.ok(f.orders.every((order) => order.driver === "d1" && !order.adminReviewRequired));
+  const blocked = storeBatch(fixture());
+  blocked.orders[0].adminReviewRequired = "store";
+  await assert.rejects(reroute(blocked.models, "a", { admin: true, driverId: "d1" }), /ready, active/);
+});
+
+test("store acceptance alone and ready-but-unreleased packages are never driver-ready", () => {
+  const { orderReady } = require("../helpers/delivery-availability");
+  const f = fixture();
+  const order = { ...f.orders[0], storeRouteVersion: 1 };
+  assert.equal(orderReady(order), false);
+  assert.equal(require("../service/cartDispatch").ready([order]), false);
+  order.storeReadyAt = new Date();
+  assert.equal(orderReady(order), false);
+  order.storeDispatchBatch = "batch";
+  assert.equal(orderReady(order), true);
+  assert.equal(require("../service/cartDispatch").ready([order]), true);
 });
 test("multiple accepted customer carts share a vehicle only within combined measured capacity and cart limits", async () => {
   const f = fixture();
@@ -216,6 +414,8 @@ test("shared queue API blocks every address until its own cart pickups finish, i
   await handler(req, res);
   assert.equal(res.code, 200);
   assert.equal(res.body.queue[0].dropoffReady, false);
+  assert.equal(res.body.queue[0].canRerouteBeforePickup, false);
+  assert.equal(res.body.queue[1].canRerouteBeforePickup, false);
   assert.deepEqual(res.body.queue[0].pendingPickupOrderIds, ["b"]);
   assert.equal(res.body.queue[2].dropoffReady, true);
   assert.deepEqual(res.body.queue[2].pendingPickupOrderIds, []);

@@ -20,6 +20,13 @@ function createDriverRouteHandler({ compute = computeDrivingRoute, now = Date.no
         deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] },
       }).populate("store", "location");
       if (!order) return res.status(404).json({ message: "Active delivery assigned to you was not found." });
+      if (order.storeDispatchBatch && order.deliveryStatus === "Picked Up") {
+        const pending = await req.dbModels.Order.countDocuments({
+          storeDispatchBatch: order.storeDispatchBatch, deliveryStatus: { $nin: ["Picked Up", "Delivered"] },
+          fulfillmentStatus: { $ne: "cancelled" },
+        });
+        if (pending) return res.status(409).json({ message: "Collect every package in this store batch before starting drop-off routes." });
+      }
       if (order.cartRouteVersion === 1 && order.deliveryStatus === "Picked Up") {
         const siblings = await req.dbModels.Order.find({ checkoutGroup: order.checkoutGroup }).lean();
         if (pendingCartPickups(siblings, order.checkoutGroup).length) {

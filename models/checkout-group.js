@@ -22,6 +22,7 @@ const checkoutGroupSchema = new mongoose.Schema({
   serviceRequest: { type: mongoose.Schema.Types.ObjectId, ref: "ServiceRequest" },
   international: mongoose.Schema.Types.Mixed,
   cartRoute: mongoose.Schema.Types.Mixed,
+  storeRoutes: [mongoose.Schema.Types.Mixed],
   routeDriver: { type: mongoose.Schema.Types.ObjectId, ref: "Driver", default: null },
   fulfillmentRevision: { type: Number, default: 0 },
   expiresAt: { type: Date, required: true },

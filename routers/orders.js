@@ -626,15 +626,19 @@ router.get("/company/my-deliveries", async (req, res) => {
     const results = [];
     const seenCarts = new Set();
     for (const order of orders) {
-      if (order.cartRouteVersion === 1) {
-        const key = String(order.checkoutGroup);
+      if (order.storeRouteVersion && !order.storeDispatchBatch) continue;
+      if (order.cartRouteVersion === 1 || order.storeDispatchBatch) {
+        const key = require("../service/cartDispatch").unit(order);
         if (seenCarts.has(key)) continue;
         seenCarts.add(key);
+        if (order.storeDispatchBatch) await require("../service/cartDispatch").ensureCompanyOffer(
+          req.dbModels, order, MAX_ACTIVE_ORDERS_PER_DRIVER);
         const cart = await require("../service/cartDispatch").loadCart(req.dbModels, order);
         if (!require("../service/cartDispatch").ready(cart.orders) || cart.group.routeDriver) continue;
         const live = require("../service/cartDispatch").liveOrders(cart.orders);
         if (!live.every((entry) => String(entry.companyOfferDriver) === String(driver._id))) continue;
-        results.push({ _id: order._id, store: order.store, checkoutGroup: order.checkoutGroup,
+        results.push({ _id: order._id, store: order.store, checkoutGroup: order.storeDispatchBatch || order.checkoutGroup,
+          storeDispatchBatch: order.storeDispatchBatch,
           cartRoute: require("../service/cartDispatch").assignmentRoute(cart.group, live),
           cartOrderIds: live.map((entry) => String(entry._id)),
           deliveryFee: cart.group.deliveryFee, requiredVehicle: cart.group.cartRoute.vehicle,
@@ -708,7 +712,7 @@ router.get("/company/my-deliveries", async (req, res) => {
     });
     if (driver.activeCartRoutes?.length) {
       const active = await Order.find({ driver: driver._id, deliveryStatus: { $in: ["Driver Assigned", "Picked Up"] } })
-        .select("_id checkoutGroup cartRouteVersion").lean();
+        .select("_id checkoutGroup cartRouteVersion storeDispatchBatch").lean();
       activeOrders = new Set(active.map(require("../service/cartDispatch").unit)).size;
     }
     return res.status(200).json({
@@ -749,7 +753,7 @@ router.put("/:id/company-claim", async (req, res) => {
     if (order.driver) {
       return res.status(409).json({ success: false, message: "This delivery has already been claimed." });
     }
-    if (order.cartRouteVersion === 1) {
+    if (order.cartRouteVersion === 1 || order.storeDispatchBatch) {
       const result = await assignDriverToOrder(String(order._id), req.app.get("io"), {
         dbName: req.dbName, models: req.dbModels, companyDriverId: String(driver._id),
       });
@@ -759,6 +763,7 @@ router.put("/:id/company-claim", async (req, res) => {
       return res.json({ success: true, message: "Complete cart route claimed.", cartOrderIds: result.cartOrderIds,
         order: await Order.findById(order._id) });
     }
+    if (order.storeRouteVersion) return res.status(409).json({ success: false, message: "The store must prepare and dispatch this package first." });
     if (order.deliveryStatus !== "Pending" ||
       order.adminReviewRequired || order.fallbackStore ||
       (order.inventoryManaged && order.fulfillmentStatus !== "accepted") ||
@@ -826,10 +831,16 @@ const respondToCompanyOffer = async (req, res) => {
     if (!order) {
       return res.status(404).json({ success: false, message: "Order not found." });
     }
-    if (order.cartRouteVersion === 1) {
+    if (order.cartRouteVersion === 1 || order.storeDispatchBatch) {
       const action = req.path.endsWith("/company-reroute") ? "reroute" : "reject";
       await require("../service/cartDispatch").respond(req.dbModels, order, driver, action);
       return res.json({ success: true, message: `Complete cart returned to available drivers.${action === "reject" ? " Flagged for Admin review without pausing delivery." : ""} It stays queued if nobody is available. No payment has been cancelled or refunded.` });
+    }
+    if (order.driver && String(order.driver) === String(driver._id)) {
+      await require("../service/driverAssignment").reroute(req.dbModels, order._id, {
+        respondingDriver: driver, action: req.path.endsWith("/company-reroute") ? "reroute" : "reject",
+      });
+      return res.json({ success: true, message: "Delivery released before pickup. Rejection is retained for Admin review; payment is unchanged." });
     }
 
     if (!orderReady(order) || driverRejected(order, driver)) {

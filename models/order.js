@@ -171,6 +171,9 @@ const orderSchema = new mongoose.Schema({
     inventoryManaged: { type: Boolean, default: false },
     checkoutGroup: { type: mongoose.Schema.Types.ObjectId, ref: 'CheckoutGroup', default: null },
     cartRouteVersion: Number,
+    storeRouteVersion: Number,
+    storeReadyAt: Date,
+    storeDispatchBatch: { type: mongoose.Schema.Types.ObjectId, ref: 'StoreDispatch' },
     cartDeliveryKey: String,
     cartDeliveryAddressId: String,
     requiredVehicle: { type: String, enum: ['motorcycle', 'car', 'van', 'truck'] },
@@ -185,6 +188,7 @@ const orderSchema = new mongoose.Schema({
     },
     fulfillmentDeadline: { type: Date, default: null },
     fallbackStore: { type: mongoose.Schema.Types.ObjectId, ref: 'Store', default: null },
+    fallbackInventoryStore: { type: mongoose.Schema.Types.ObjectId, ref: 'Store', default: null },
     fallbackStoreAttempts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Store' }],
     adminReviewRequired: { type: String, enum: ['store', 'driver'] },
     fulfillmentAttempts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'Store' }],
@@ -277,6 +281,7 @@ orderSchema.index({ status: 1, deliveredAt: -1 });
 orderSchema.index({ deliveryStatus: 1, deliveredAt: -1 });
 orderSchema.index({ inventoryManaged: 1, fulfillmentStatus: 1, fulfillmentDeadline: 1 });
 orderSchema.index({ checkoutGroup: 1, paymentProvider: 1, refundStatus: 1 });
+orderSchema.index({ storeDispatchBatch: 1 }, { sparse: true });
 
 
 orderSchema.virtual('id').get(function () {

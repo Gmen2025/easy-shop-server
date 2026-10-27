@@ -87,6 +87,27 @@ async function quoteCartRoute(deliveries, products, config, databaseName, surcha
   return { version: 1, distanceKm, stops, cargo, vehicleOptions, vehicle: cargo.measurementsAvailable === false ? "" : types[0] };
 }
 
+async function quoteStoreRoutes(deliveries, products, config, databaseName, surcharge, distance = getDrivingDistanceKm) {
+  const stores = new Map();
+  for (const delivery of deliveries) {
+    const key = String(delivery.store._id);
+    if (!stores.has(key)) stores.set(key, []);
+    stores.get(key).push(delivery);
+  }
+  const routes = [];
+  for (const [storeId, members] of stores) {
+    const route = await quoteCartRoute(members, products, config, databaseName, surcharge, distance);
+    for (const delivery of members) {
+      delivery.pricingGroup = {
+        key: `store-route:${storeId}`, kind: "store-route", storeId,
+        distanceKm: route.distanceKm, stopCount: route.stops.length,
+      };
+    }
+    routes.push({ ...route, storeId, storeName: members[0].store.name });
+  }
+  return routes;
+}
+
 function combinedCargo(cargos) {
   const measured = cargos.every((cargo) => cargo && cargo.measurementsAvailable !== false &&
     Number.isFinite(cargo.weightKg) && Number.isFinite(cargo.volumeLiters));
@@ -102,4 +123,4 @@ function pendingCartPickups(orders, checkoutGroup) {
     !["Picked Up", "Delivered"].includes(order.deliveryStatus));
 }
 
-module.exports = { routeStops, planStops, quoteCartRoute, combinedCargo, pendingCartPickups };
+module.exports = { routeStops, planStops, quoteCartRoute, quoteStoreRoutes, combinedCargo, pendingCartPickups };

@@ -197,15 +197,85 @@ router.get("/me/assignments", endpoint(async (req, res) => {
   res.json(orders);
 }));
 
+router.get("/admin/assignments", endpoint(async (req, res) => {
+  if (!req.auth?.isAdmin) throw Object.assign(new Error("Admin access required."), { status: 403 });
+  await reconcileFallbackStores(req.dbModels);
+  const orders = await req.dbModels.Order.find({
+    $or: [
+      { fulfillmentStatus: { $in: ["pending", "accepted", "unassigned"] }, status: { $nin: ["3", "4", "Delivered", "Cancelled"] } },
+      { adminReviewRequired: "store" },
+      { companyDriverResponses: { $elemMatch: { status: "rejected", action: { $ne: "reroute" } } } },
+      { deliveryStatus: { $in: ["Pending", "Driver Assigned"] }, status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
+        fulfillmentStatus: { $ne: "payment_pending" } },
+    ],
+  }).populate("fallbackStore", "name address logo")
+    .populate({ path: "orderItems", populate: { path: "product", select: "name image price" } })
+    .sort({ dateOrdered: 1 }).lean();
+  res.json(orders);
+}));
+
+for (const scope of ["me", "admin"]) {
+  router.post(`/${scope}/assignments/:id/drivers/:decision`, endpoint(async (req, res) => {
+    if (scope === "admin" && !req.auth?.isAdmin) throw Object.assign(new Error("Admin access required."), { status: 403 });
+    if (!req.auth?.userId) throw Object.assign(new Error("Sign in to manage deliveries."), { status: 401 });
+    if (!mongoose.isValidObjectId(req.params.id) || !["reroute", "assign"].includes(req.params.decision) ||
+        req.params.decision === "assign" && !mongoose.isValidObjectId(req.body?.driverId)) throw conflict("Choose a valid order, action and driver.");
+    if (scope !== "admin" && req.params.decision === "assign") throw Object.assign(new Error("Only Admin can assign a specific driver."), { status: 403 });
+    const result = await require("../service/driverAssignment").reroute(req.dbModels, req.params.id, {
+      admin: scope === "admin", ownerId: req.auth.userId,
+      driverId: req.params.decision === "assign" ? req.body.driverId : undefined,
+      maxCarts: require("../service/dispatchService").MAX_ACTIVE_ORDERS_PER_DRIVER,
+    });
+    if (req.params.decision === "reroute") {
+      const order = await req.dbModels.Order.findById(req.params.id);
+      if (order.storeDispatchBatch) await require("../service/cartDispatch").ensureCompanyOffer(
+        req.dbModels, order, require("../service/dispatchService").MAX_ACTIVE_ORDERS_PER_DRIVER);
+    }
+    res.json(result);
+  }));
+}
+
+router.post("/admin/assignments/:id/:decision", endpoint(async (req, res) => {
+  if (!req.auth?.isAdmin) throw Object.assign(new Error("Admin access required."), { status: 403 });
+  if (!mongoose.isValidObjectId(req.params.id) || req.body?.storeId && !mongoose.isValidObjectId(req.body.storeId)) {
+    throw conflict("Invalid assignment or store ID.");
+  }
+  if (req.params.decision === "ready") {
+    const order = await req.dbModels.Order.findById(req.params.id).lean();
+    if (!order) throw conflict("Assignment not found.");
+    const result = await require("../service/storeDispatch").markReady(req.dbModels, order._id, order.store);
+    return res.json({ success: true, storeReadyAt: result.storeReadyAt });
+  }
+  const result = await require("../helpers/admin-store-assignments").respondAsAdmin(
+    req.dbModels, req.params.id, req.params.decision, { storeId: req.body?.storeId });
+  res.json({ success: true, fulfillmentStatus: result.fulfillmentStatus });
+}));
+
+router.post("/admin/dispatch-batches", endpoint(async (req, res) => {
+  if (!req.auth?.isAdmin) throw Object.assign(new Error("Admin access required."), { status: 403 });
+  const batch = await require("../service/storeDispatch").createBatch(req.dbModels, req.auth.userId, req.body.orderIds, { admin: true });
+  res.status(201).json({ success: true, batchId: batch._id, orderIds: batch.orders });
+}));
+
+router.post("/me/dispatch-batches", endpoint(async (req, res) => {
+  if (!req.auth?.userId) throw Object.assign(new Error("Unauthorized"), { status: 401 });
+  const batch = await require("../service/storeDispatch").createBatch(req.dbModels, req.auth.userId, req.body.orderIds);
+  res.status(201).json({ success: true, batchId: batch._id, orderIds: batch.orders });
+}));
+
 router.post("/me/assignments/:id/:decision", endpoint(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) throw conflict("Invalid assignment ID.");
-  if (!["accept", "reject", "reroute"].includes(req.params.decision)) throw conflict("Invalid assignment response.");
+  if (!["accept", "reject", "reroute", "ready"].includes(req.params.decision)) throw conflict("Invalid assignment response.");
   const order = await req.dbModels.Order.findById(req.params.id).lean();
   if (!order) throw Object.assign(new Error("Assignment not found."), { status: 404 });
   await ownedStore(req, String(order.fallbackStore || order.store));
+  if (req.params.decision === "ready") {
+    const result = await require("../service/storeDispatch").markReady(req.dbModels, order._id, order.store);
+    return res.json({ success: true, storeReadyAt: result.storeReadyAt });
+  }
   const result = order.fallbackStore
     ? await respondToFallbackStore(req.dbModels, order._id, order.fallbackStore, req.params.decision)
-    : await reroute(req.dbModels, order._id, { storeId: order.store, decision: req.params.decision === "reroute" ? "reject" : req.params.decision });
+    : await reroute(req.dbModels, order._id, { storeId: order.store, decision: req.params.decision });
   if (order.fallbackStore && req.params.decision === "reroute") {
     if (result.inventoryManaged) await reroute(req.dbModels, order._id);
     else await reconcileUnassignedPickupStores(req.dbModels);

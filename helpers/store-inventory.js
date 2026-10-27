@@ -41,8 +41,8 @@ function normalizeLines(lines) {
   return [...combined.values()];
 }
 
-async function eligibleStores(models, lines, { customerLocation, storefrontId, excluded = [], session } = {}) {
-  const filter = { approvalStatus: "approved", isOpen: { $ne: false }, _id: { $nin: excluded } };
+async function eligibleStores(models, lines, { customerLocation, storefrontId, excluded = [], session, allowClosed = false } = {}) {
+  const filter = { approvalStatus: "approved", ...(!allowClosed ? { isOpen: { $ne: false } } : {}), _id: { $nin: excluded } };
   if (storefrontId) {
     const selected = await models.Store.findById(storefrontId).session(session || null).lean();
     if (!selected) {
@@ -69,9 +69,27 @@ async function eligibleStores(models, lines, { customerLocation, storefrontId, e
     String(a._id).localeCompare(String(b._id)));
 }
 
-async function reserve(models, store, lines, session) {
+async function defaultPickupStore(models, lines, session) {
+  const setting = await models.SiteSetting.findOne({ key: CONFIG_KEY }).session(session || null).lean();
+  const storeId = setting?.inventoryConfig?.defaultStoreId;
+  if (!storeId) return null;
+  const store = await models.Store.findOne({ _id: storeId, approvalStatus: "approved" }).session(session || null).lean();
+  if (!store) return null;
+  const stocks = await models.StoreInventory.find({ store: storeId, product: { $in: lines.map((line) => line.product) } })
+    .session(session || null).lean();
+  return lines.every((line) => stocks.some((stock) => String(stock.product) === String(line.product) &&
+    stock.countInStock - stock.reserved >= line.quantity && Math.round(stock.price * 100) === Math.round(line.price * 100)))
+    ? store : null;
+}
+
+async function reserve(models, store, lines, session, { defaultFallback = false, allowClosed = false } = {}) {
+  if (defaultFallback) {
+    const fallback = await defaultPickupStore(models, lines, session);
+    if (String(fallback?._id) !== String(store)) throw conflict("Default-store stock or configuration changed. Refresh checkout.");
+    await models.SiteSetting.updateOne({ key: CONFIG_KEY }, { $inc: { reservationVersion: 1 } }, { session });
+  }
   const availableStore = await models.Store.updateOne({
-    _id: store, approvalStatus: "approved", isOpen: { $ne: false },
+    _id: store, approvalStatus: "approved", ...(!defaultFallback && !allowClosed ? { isOpen: { $ne: false } } : {}),
   }, { $inc: { inventoryVersion: 1 } }, { session });
   if (availableStore.modifiedCount !== 1) throw conflict("The assigned store is no longer available. Refresh checkout.");
   for (const line of lines) {
@@ -86,7 +104,7 @@ async function reserve(models, store, lines, session) {
 async function release(models, order, session, consume = false) {
   for (const line of order.reservedItems || []) {
     const result = await models.StoreInventory.updateOne({
-      store: order.store, product: line.product, reserved: { $gte: line.quantity },
+      store: order.store || order.fallbackInventoryStore, product: line.product, reserved: { $gte: line.quantity },
       ...(consume ? { countInStock: { $gte: line.quantity } } : {}),
     }, { $inc: { reserved: -line.quantity, ...(consume ? { countInStock: -line.quantity } : {}) } }, { session });
     if (result.modifiedCount !== 1) throw conflict("Inventory reservation is inconsistent. Contact Admin.");
@@ -106,9 +124,10 @@ async function reroute(models, orderId, { storeId, decision, now = new Date() } 
   const result = await models.Order.db.transaction(async (session) => {
     assigned = false;
     const order = await models.Order.findById(orderId).session(session);
-    if (!order?.inventoryManaged || order.adminReviewRequired || order.fallbackStore ||
+    if (!order?.inventoryManaged || order.adminReviewRequired || order.fallbackStore || order.driver || order.storeDispatchBatch ||
         ["3", "4", "Delivered", "Cancelled"].includes(order.status) ||
-        !["pending", "unassigned"].includes(order.fulfillmentStatus)) {
+        !(["pending", "unassigned"].includes(order.fulfillmentStatus) ||
+          decision === "reroute" && order.fulfillmentStatus === "accepted")) {
       throw conflict("This assignment is no longer awaiting a store response.");
     }
     if (storeId && String(order.store) !== String(storeId)) throw conflict("This assignment belongs to another store.");
@@ -126,10 +145,11 @@ async function reroute(models, orderId, { storeId, decision, now = new Date() } 
       order.fulfillmentStatus = "accepted";
       order.fulfillmentDeadline = null;
     } else {
-      if (order.fulfillmentStatus === "pending") {
+      if (["pending", "accepted"].includes(order.fulfillmentStatus)) {
         await release(models, order, session);
         order.fulfillmentAttempts.push(order.store);
       }
+      order.storeReadyAt = undefined;
       const lines = (order.reservedItems || []).map((line) => ({
         product: line.product, quantity: line.quantity, price: line.price,
       }));
@@ -157,23 +177,32 @@ async function reroute(models, orderId, { storeId, decision, now = new Date() } 
     await order.save({ session });
     return order;
   });
-  if (assigned) {
-    try {
-      const store = await models.Store.findById(result.store).lean();
-      if (store?.owner) await sendPushToUser({
-        User: models.User, userId: store.owner, title: "Store assignment",
-        body: `Order #${result._id} needs a response within 5 minutes.`,
-        data: { type: "store_order_assigned", orderId: String(result._id) },
-      });
-    } catch (error) { console.error("Store assignment notification failed:", error.message); }
-  }
+  if (assigned) await notifyStoreAssignment(models, result);
   return result;
+}
+
+async function notifyStoreAssignment(models, order) {
+  try {
+    const store = await models.Store.findById(order.store).lean();
+    if (store?.owner) await sendPushToUser({
+      User: models.User, userId: store.owner, title: "Store assignment",
+      body: `Order #${order._id} needs a response within 5 minutes.`,
+      data: { type: "store_order_assigned", orderId: String(order._id) },
+    });
+  } catch (error) { console.error("Store assignment notification failed:", error.message); }
 }
 
 async function updateManagedOrder(models, orderId, fields, { deleting = false } = {}) {
   return models.Order.db.transaction(async (session) => {
     const order = await models.Order.findById(orderId).session(session);
     if (!order) return null;
+    if (deleting && order.storeDispatchBatch) {
+      const batch = await models.StoreDispatch.findById(order.storeDispatchBatch).session(session);
+      if (!batch) throw conflict("Store dispatch record is missing. Contact support.");
+      batch.orders = batch.orders.filter((key) => String(key) !== String(order._id));
+      batch.fulfillmentRevision += 1;
+      await batch.save({ session });
+    }
     if (order.checkoutGroup && deleting) {
       const completedDelivery = order.fulfillmentStatus !== "cancelled" && (
         order.fulfillmentStatus === "completed" ||
@@ -207,6 +236,24 @@ async function updateManagedOrder(models, orderId, fields, { deleting = false } 
       throw conflict("Inventory-managed assignments cannot be reassigned manually.");
     }
     const completed = fields.deliveryStatus === "Delivered" || ["3", "Delivered"].includes(String(fields.status));
+    if (order.storeRouteVersion && !deleting && fields.deliveryStatus &&
+        !["Picked Up", "Delivered"].includes(fields.deliveryStatus)) {
+      throw conflict("Store batch progress cannot be reset through an individual order.");
+    }
+    if (order.storeRouteVersion && !deleting && (completed || fields.deliveryStatus === "Picked Up")) {
+      if (!order.storeDispatchBatch || !order.storeReadyAt || !order.driver) throw conflict("The store must prepare and dispatch this package before pickup.");
+      const { group, orders } = await require("../service/cartDispatch").loadCart(models, order, session);
+      if (String(order.driver) !== String(group.routeDriver)) throw conflict("Only the batch's assigned driver can collect this package.");
+      group.fulfillmentRevision += 1;
+      await group.save({ session });
+      if (fields.deliveryStatus === "Picked Up" && !["Driver Assigned", "Picked Up"].includes(order.deliveryStatus)) {
+        throw conflict("The batch must be assigned before pickup.");
+      }
+      if (completed && order.deliveryStatus !== "Delivered" && (order.deliveryStatus !== "Picked Up" ||
+          orders.some((entry) => entry.fulfillmentStatus !== "cancelled" && !["Picked Up", "Delivered"].includes(entry.deliveryStatus)))) {
+        throw conflict("Collect every package in the store batch before confirming delivery.");
+      }
+    }
     if (order.cartRouteVersion === 1 && !deleting) {
       const group = await models.CheckoutGroup.findById(order.checkoutGroup).session(session);
       if (!group) throw conflict("The cart route record is missing.");
@@ -272,7 +319,10 @@ async function updateManagedOrder(models, orderId, fields, { deleting = false } 
 
 async function aggregateCatalog(models, products) {
   if (!await inventoryEnabled(models)) return products;
-  const stores = await models.Store.find({ approvalStatus: "approved", isOpen: { $ne: false } }).select("_id").lean();
+  const setting = await models.SiteSetting.findOne({ key: CONFIG_KEY }).lean();
+  const storeFilter = { approvalStatus: "approved", $or: [{ isOpen: { $ne: false } }] };
+  if (setting?.inventoryConfig?.defaultStoreId) storeFilter.$or.push({ _id: setting.inventoryConfig.defaultStoreId });
+  const stores = await models.Store.find(storeFilter).select("_id").lean();
   const stocks = await models.StoreInventory.find({
     store: { $in: stores.map((store) => store._id) },
     product: { $in: products.map((product) => product._id) },
@@ -287,5 +337,5 @@ async function aggregateCatalog(models, products) {
 
 module.exports = {
   CONFIG_KEY, ACCEPTANCE_MS, inventoryEnabled, publicStore, conflict, normalizeLines,
-  eligibleStores, reserve, release, assignStore, reroute, updateManagedOrder, aggregateCatalog,
+  eligibleStores, defaultPickupStore, reserve, release, assignStore, reroute, notifyStoreAssignment, updateManagedOrder, aggregateCatalog,
 };

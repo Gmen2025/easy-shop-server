@@ -1,5 +1,5 @@
 const mongoose = require("mongoose");
-const { conflict, inventoryEnabled, normalizeLines, eligibleStores, reserve, release, assignStore, ACCEPTANCE_MS } = require("./store-inventory");
+const { conflict, inventoryEnabled, normalizeLines, eligibleStores, defaultPickupStore, reserve, release, assignStore, ACCEPTANCE_MS } = require("./store-inventory");
 const { getCoordinates, distanceMeters } = require("./fulfillment-routing");
 const { getDrivingDistanceKm } = require("./google-distance");
 const { VEHICLE_CONFIG_KEY, cargoFor, suitableVehicles, cents } = require("./vehicle-delivery");
@@ -124,13 +124,13 @@ async function geocodeAddress(address) {
   return { type: "Point", coordinates: [location.lng, location.lat] };
 }
 
-function allocateStock(allocations, candidatesByAllocation, stocks, products, addresses) {
+function allocateStock(allocations, candidatesByAllocation, stocks, products, addresses, { preferCommonStore = true } = {}) {
   const available = new Map(stocks.map((row) => [`${row.store}:${row.product}`, row.countInStock - row.reserved]));
   const required = new Map();
   for (const allocation of allocations) {
     required.set(allocation.product, (required.get(allocation.product) || 0) + allocation.quantity);
   }
-  const commonStore = candidatesByAllocation[0]?.find((store) =>
+  const commonStore = preferCommonStore && candidatesByAllocation[0]?.find((store) =>
     candidatesByAllocation.every((candidates) => candidates.some((candidate) => id(candidate) === id(store))) &&
     [...required].every(([product, quantity]) => (available.get(`${store._id}:${product}`) || 0) >= quantity));
   const candidates = commonStore ? allocations.map(() => [commonStore]) : candidatesByAllocation;
@@ -150,7 +150,8 @@ function allocateStock(allocations, candidatesByAllocation, stocks, products, ad
       let group = grouped.get(groupKey);
       if (!group) {
         group = { key: groupKey, store: { _id: id(store), name: store.name, address: store.address, logo: store.logo || "", location: store.location },
-          address: addresses.find((address) => address.id === allocation.addressId), storefrontId: allocation.storefrontId, lines: [] };
+          address: addresses.find((address) => address.id === allocation.addressId), storefrontId: allocation.storefrontId,
+          defaultFallback: Boolean(store.defaultFallback), lines: [] };
         grouped.set(groupKey, group);
       }
       if (allocation.storefrontId) group.storefrontId = allocation.storefrontId;
@@ -192,10 +193,13 @@ function allocateDeliveryFees(deliveries) {
       ? delivery.vehicleOptions.find((entry) => entry.type === delivery.vehicle)
       : [...delivery.vehicleOptions].sort((a, b) => a.fee - b.fee)[0];
     if (!option) throw conflict("Choose one of the suitable vehicles offered for this delivery.");
-    const route = delivery.pricingGroup?.kind === "cart-route";
+    const route = ["cart-route", "store-route"].includes(delivery.pricingGroup?.kind);
     const key = JSON.stringify([delivery.pricingGroup?.key || delivery.key, route ? "cart" : option.type]);
     if (!groups.has(key)) groups.set(key, []);
-    if (route && groups.get(key).some((member) => member.option.type !== option.type)) throw conflict("Choose one vehicle for the entire cart route.");
+    if (route && groups.get(key).some((member) => member.option.type !== option.type)) {
+      throw conflict(delivery.pricingGroup.kind === "store-route"
+        ? "Choose one vehicle for the complete route from this store." : "Choose one vehicle for the entire cart route.");
+    }
     groups.get(key).push({ delivery, option });
   }
   for (const members of groups.values()) {
@@ -208,9 +212,11 @@ function allocateDeliveryFees(deliveries) {
       delivery.totalPrice = (cents(delivery.itemsSubtotal) + cents(delivery.deliveryFee)) / 100;
       if (delivery.pricingGroup) Object.assign(delivery.pricingGroup, {
         storeId: anchor.delivery.store._id, storeName: anchor.delivery.store.name,
-        distanceKm: anchor.delivery.distanceKm, storeCount: members.length, vehicle: anchor.option.type,
+        distanceKm: anchor.delivery.distanceKm,
+        storeCount: new Set(members.map((member) => String(member.delivery.store._id))).size,
+        destinationCount: members.length, vehicle: anchor.option.type,
         deliveryFee: fee / 100,
-        ...(delivery.pricingGroup.kind === "cart-route" ? {
+        ...(["cart-route", "store-route"].includes(delivery.pricingGroup.kind) ? {
           billableDistanceKm: (Math.floor(Math.round(anchor.delivery.distanceKm * 1000) / members.length) +
             (index < Math.round(anchor.delivery.distanceKm * 1000) % members.length ? 1 : 0)) / 1000,
         } : {}),
@@ -245,11 +251,16 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
     if (!allocation.storefrontId && cents(product.price) !== cents(allocation.price)) throw conflict(`The price of ${product.name} changed. Refresh your cart.`);
   }
   const stocks = await models.StoreInventory.find({ product: { $in: products.map((entry) => entry._id) } }).lean();
-  const candidates = await Promise.all(allocations.map((allocation) => eligibleStores(models, [{ ...allocation, quantity: 1 }], {
-    customerLocation: addresses.find((address) => address.id === allocation.addressId).location,
-    storefrontId: allocation.storefrontId,
-  })));
-  const deliveries = allocateStock(allocations, candidates, stocks, products, addresses);
+  const candidates = await Promise.all(allocations.map(async (allocation) => {
+    const stores = await eligibleStores(models, [{ ...allocation, quantity: 1 }], {
+      customerLocation: addresses.find((address) => address.id === allocation.addressId).location,
+      storefrontId: allocation.storefrontId,
+    });
+    const fallback = await defaultPickupStore(models, [{ ...allocation, quantity: 1 }]);
+    return fallback && !stores.some((store) => id(store) === id(fallback))
+      ? [...stores, { ...fallback, defaultFallback: true }] : stores;
+  }));
+  const deliveries = allocateStock(allocations, candidates, stocks, products, addresses, { preferCommonStore: false });
   await Promise.all(deliveries.map(async (delivery) => {
     const pickup = getCoordinates(delivery.store.location);
     const dropoff = getCoordinates(delivery.address.location);
@@ -258,7 +269,7 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
     delivery.speedSurcharge = deliveryPlan.deliverySnapshot.speedSurcharge;
     delivery.itemsSubtotal = delivery.lines.reduce((sum, line) => sum + cents(line.price) * line.quantity, 0) / 100;
   }));
-  const cartRoute = await require("./cart-route").quoteCartRoute(deliveries, products, config, databaseName,
+  const storeRoutes = await require("./cart-route").quoteStoreRoutes(deliveries, products, config, databaseName,
     deliveryPlan.deliverySnapshot.speedSurcharge, distance);
   allocateDeliveryFees(deliveries);
   const totals = quoteTotals(deliveries);
@@ -267,7 +278,7 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
   }
   const fields = { user, deliveries, cart: body.cart.map((entry) => ({
     ...normalizeLines([entry])[0], key: entry.key, storefrontId: entry.storefrontId || null,
-  })), ...deliveryPlan, ...totals, cartRoute,
+  })), ...deliveryPlan, ...totals, storeRoutes,
     currency, ...(exchangeRate ? { exchangeRate, paymentAmount: fx.allocateDollars(deliveries, exchangeRate) } : {}),
     expiresAt: new Date(Date.now() + QUOTE_MS) };
   return transient ? new models.CheckoutGroup(fields) : models.CheckoutGroup.create(fields);
@@ -315,6 +326,10 @@ function selectVehicles(group, selections) {
     group.cartRoute.vehicle = group.deliveries[0].vehicle;
     group.markModified("cartRoute");
   }
+  for (const route of group.storeRoutes || []) {
+    route.vehicle = group.deliveries.find((delivery) => id(delivery.store) === String(route.storeId)).vehicle;
+  }
+  if (group.storeRoutes?.length) group.markModified("storeRoutes");
   Object.assign(group, quoteTotals(group.deliveries));
   if (group.international) require("./international-shipping").recalculate(group);
   else if (group.exchangeRate) group.paymentAmount = fx.allocateDollars(group.deliveries, group.exchangeRate);
@@ -375,6 +390,18 @@ async function prepare(models, groupId, user, databaseName, body) {
       group.cartRoute.cargo = cargo;
       group.markModified("cartRoute");
     }
+    for (const route of group.storeRoutes || []) {
+      const config = (await models.SiteSetting.findOne({ key: VEHICLE_CONFIG_KEY }).session(session).lean())?.vehicleDeliveryConfig;
+      const members = group.deliveries.filter((delivery) => id(delivery.store) === String(route.storeId));
+      const products = await models.Product.find({ _id: { $in: members.flatMap((delivery) => delivery.lines.map((line) => line.product)) } }).session(session).lean();
+      const cargo = cargoFor(members.flatMap((delivery) => delivery.lines), products);
+      if (!config?.enabled || !suitableVehicles(cargo, config).includes(route.vehicle) ||
+          cargo.measurementsAvailable === false && route.cargo.measurementsAvailable !== false) {
+        throw conflict("Store route vehicle capacity changed. Request a new quote.");
+      }
+      route.cargo = cargo;
+    }
+    if (group.storeRoutes?.length) group.markModified("storeRoutes");
     if (body.method === "bank") {
       const setting = await models.SiteSetting.findOne({ key: "bank-account-info" }).session(session).lean();
       const account = setting?.bankAccounts?.find((entry) => id(entry) === body.bankAccountId && entry.isActive !== false &&
@@ -404,7 +431,7 @@ async function prepare(models, groupId, user, databaseName, body) {
     for (const delivery of group.deliveries) {
       const currentStore = await models.Store.findById(delivery.store._id).session(session).lean();
       if (!currentStore || JSON.stringify(getCoordinates(currentStore.location)) !== JSON.stringify(getCoordinates(delivery.store.location))) throw conflict("A pickup location changed. Refresh the quote.");
-      if (delivery.storefrontId) {
+      if (delivery.storefrontId && !delivery.defaultFallback) {
         const allowed = await eligibleStores(models, delivery.lines, {
           customerLocation: delivery.address.location, storefrontId: delivery.storefrontId, session,
         });
@@ -435,7 +462,7 @@ async function prepare(models, groupId, user, databaseName, body) {
       // Lock the configuration and products against changes while these reservations are created.
       await models.SiteSetting.updateOne({ key: VEHICLE_CONFIG_KEY }, { $inc: { reservationVersion: 1 } }, { session });
       await models.Product.updateMany({ _id: { $in: approved.map((entry) => entry._id) } }, { $inc: { shippingReservationVersion: 1 } }, { session });
-      await reserve(models, delivery.store._id, delivery.lines, session);
+      await reserve(models, delivery.store._id, delivery.lines, session, { defaultFallback: delivery.defaultFallback === true });
       const items = [];
       for (const line of delivery.lines) {
         const [item] = await models.OrderItem.create([{ product: line.product, quantity: line.quantity, unitPrice: line.price }], { session });
@@ -460,6 +487,7 @@ async function prepare(models, groupId, user, databaseName, body) {
         zip: address.zip, country: address.country, phone: address.phone, customerLocation: address.location,
         inventoryManaged: true, checkoutGroup: group._id, storefrontId: delivery.storefrontId,
         ...(group.cartRoute ? { cartRouteVersion: 1, cartDeliveryKey: delivery.key, cartDeliveryAddressId: delivery.address.id } : {}),
+        ...(group.storeRoutes?.length ? { storeRouteVersion: 1, cartDeliveryKey: delivery.key, cartDeliveryAddressId: delivery.address.id } : {}),
         requiredVehicle: delivery.vehicle, cargo: delivery.cargo,
         deliveryFee: delivery.deliveryFee, deliveryPricingGroup: delivery.pricingGroup,
         deliveryDistanceKm: delivery.pricingGroup?.billableDistanceKm ?? delivery.distanceKm,
@@ -536,6 +564,14 @@ async function activate(models, groupId, { paymentIntent, bankReceipt, bankVerif
       if (!order || order.fulfillmentStatus !== "payment_pending") throw conflict("Checkout reservation is inconsistent. Contact support.");
       order.fulfillmentStatus = "pending";
       order.fulfillmentDeadline = new Date(Date.now() + ACCEPTANCE_MS);
+      const delivery = group.deliveries.find((entry) => entry.key === order.cartDeliveryKey);
+      if (delivery?.defaultFallback) {
+        order.fallbackInventoryStore = order.store;
+        order.fallbackStore = order.store;
+        order.store = null;
+        order.fulfillmentStatus = "unassigned";
+        order.fulfillmentDeadline = null;
+      }
       order.paymentStatus = group.paymentStatus === "completed" ? "completed" : "pending";
       order.paymentTransactionId = group.paymentIntentId || "";
       order.paymentProvider = group.paymentMethod === "card" ? "stripe" : group.paymentMethod;
@@ -556,12 +592,14 @@ async function activate(models, groupId, { paymentIntent, bankReceipt, bankVerif
 }
 
 async function notifyStores(models, group) {
-  const orders = await models.Order.find({ _id: { $in: group.orders } }).populate("store", "owner").lean();
+  const orders = await models.Order.find({ _id: { $in: group.orders } }).populate("store", "owner").populate("fallbackStore", "owner").lean();
   for (const order of orders) {
-    if (!order.store?.owner) continue;
+    const store = order.store || order.fallbackStore;
+    if (!store?.owner) continue;
     try {
-      await sendPushToUser({ User: models.User, userId: order.store.owner, title: "New delivery assignment",
-        body: `Order #${order._id} needs a response within five minutes.`,
+      await sendPushToUser({ User: models.User, userId: store.owner, title: "New delivery assignment",
+        body: order.fallbackStore ? `Order #${order._id} is queued for your default store without expiry.` :
+          `Order #${order._id} needs a response within five minutes.`,
         data: { type: "store_order_assigned", orderId: id(order) } });
     } catch (error) { console.error("Grouped checkout notification failed:", id(order), error.message); }
   }
@@ -668,11 +706,18 @@ async function cancelDelivery(models, groupId, orderId, user, isAdmin) {
       group.fulfillmentRevision += 1;
       await group.save({ session });
     }
+    if (order.storeDispatchBatch) {
+      const batch = await models.StoreDispatch.findById(order.storeDispatchBatch).session(session);
+      if (!batch || batch.routeDriver) throw conflict("This batch is assigned to a driver. Contact support before cancellation.");
+      batch.fulfillmentRevision += 1;
+      await batch.save({ session });
+    }
     if (group.international && group.international.shipments.find((entry) => entry.id === order.internationalShipping?.shipmentId)?.status !== "awaiting_hub") {
       throw conflict("International shipment handling has started. Contact support before cancellation or refund.");
     }
     if (order.deliveryStatus !== "Pending" || !["pending", "accepted", "unassigned"].includes(order.fulfillmentStatus)) throw conflict("Cancel before a driver is assigned. Contact support for an active delivery.");
-    if (["pending", "accepted"].includes(order.fulfillmentStatus)) await release(models, order, session);
+    if (["pending", "accepted"].includes(order.fulfillmentStatus) || order.fallbackInventoryStore) await release(models, order, session);
+    order.fallbackInventoryStore = null;
     order.reservedItems = [];
     order.fulfillmentStatus = "cancelled";
     order.fulfillmentDeadline = null;

@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { quoteCartRoute, planStops, routeStops, combinedCargo } = require("../helpers/cart-route");
+const { quoteCartRoute, quoteStoreRoutes, planStops, routeStops, combinedCargo } = require("../helpers/cart-route");
 const { allocateDeliveryFees, selectVehicles } = require("../helpers/multi-delivery");
 const { queueRoute } = require("../service/cartDispatch");
 const point = (x) => ({ type: "Point", coordinates: [x, 0] });
@@ -15,6 +15,27 @@ function delivery(key, store, destination = "home", storeX = 0, dropX = 2) {
     address: { id: destination, label: destination, location: point(dropX) },
     lines: [{ product: "p", quantity: 1, price: 10 }], itemsSubtotal: 10 };
 }
+test("store routes bill store -> first drop -> next drop once per store, without nearby-store fee sharing", async () => {
+  const deliveries = [delivery("a", "s1", "home", 0, 2), delivery("b", "s1", "office", 0, 3),
+    delivery("c", "s2", "home", 0.001, 2)];
+  const calls = [];
+  const routes = await quoteStoreRoutes(deliveries, products, config, "E_Shopping", 3, async (from, to) => {
+    calls.push([from, to]);
+    return from === "0,0" ? 4 : from === "0,2" ? 2 : 5;
+  });
+  assert.deepEqual(calls, [["0,0", "0,2"], ["0,2", "0,3"], ["0,0.001", "0,2"]]);
+  assert.deepEqual(routes.map((route) => route.distanceKm), [6, 5]);
+  allocateDeliveryFees(deliveries);
+  assert.deepEqual(deliveries.map((entry) => entry.deliveryFee), [10, 10, 14]);
+  assert.equal(deliveries.reduce((sum, entry) => sum + entry.deliveryFee, 0), 34);
+  assert.ok(deliveries.every((entry) => entry.pricingGroup.storeCount === 1));
+  const group = { status: "quote", expiresAt: new Date(Date.now() + 60000), deliveries, storeRoutes: routes, markModified() {} };
+  assert.throws(() => selectVehicles(group, [{ key: "a", vehicle: "car" }, { key: "b", vehicle: "van" },
+    { key: "c", vehicle: "motorcycle" }]), /one vehicle/);
+  selectVehicles(group, [{ key: "a", vehicle: "van" }, { key: "b", vehicle: "van" }, { key: "c", vehicle: "motorcycle" }]);
+  assert.equal(group.deliveryFee, 45);
+  assert.deepEqual(routes.map((route) => route.vehicle), ["van", "motorcycle"]);
+});
 test("cart fee is pickup1 -> pickup2 -> destination, with one base fee and surcharge, excluding driver GPS and other customers", async () => {
   const deliveries = [delivery("a", "store1", "home", 0), delivery("b", "store2", "home", 1)];
   const calls = [];

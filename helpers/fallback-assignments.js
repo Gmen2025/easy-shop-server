@@ -1,5 +1,5 @@
 const { getCoordinates, rankByDistance, resolvePickupStore } = require("./fulfillment-routing");
-const { CONFIG_KEY, conflict, reserve, assignStore, eligibleStores } = require("./store-inventory");
+const { CONFIG_KEY, conflict, reserve, release, assignStore, eligibleStores } = require("./store-inventory");
 
 const activeScope = {
   driver: null,
@@ -53,6 +53,10 @@ async function respondToFallbackStore(models, orderId, storeId, decision) {
       if (!group || group.routeDriver) throw conflict("This cart is already assigned to its driver.");
       group.fulfillmentRevision += 1;
       await group.save({ session });
+    }
+    if (order.fallbackInventoryStore) {
+      await release(models, order, session);
+      order.fallbackInventoryStore = null;
     }
     if (decision === "accept") {
       const store = await models.Store.findById(storeId).session(session).lean();

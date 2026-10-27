@@ -10,12 +10,29 @@ const id = (value) => String(value?._id || value || "");
 const conflict = (message) => Object.assign(new Error(message), { status: 409 });
 const cancelled = (order) => order.fulfillmentStatus === "cancelled" || ["4", "Cancelled"].includes(String(order.status));
 const liveOrders = (orders) => orders.filter((order) => !cancelled(order));
-const unit = (order) => order.cartRouteVersion === 1 ? id(order.checkoutGroup) : id(order);
+const unit = (order) => order.storeDispatchBatch ? id(order.storeDispatchBatch) :
+  order.cartRouteVersion === 1 ? id(order.checkoutGroup) : id(order);
+const groupModel = (models, group) => group.store ? models.StoreDispatch : models.CheckoutGroup;
+const groupScope = (group) => group.store ? { storeDispatchBatch: group._id } : { checkoutGroup: group._id };
+
+function notifyCustomers(models, group, orders) {
+  const notified = new Set();
+  for (const order of orders) {
+    if (!order.user || notified.has(id(order.user))) continue;
+    notified.add(id(order.user));
+    sendPushToUser({ User: models.User, userId: order.user, title: "Delivery assigned",
+      body: group.store ? "A driver has accepted your store's prepared delivery packages." :
+        "One driver has accepted all pickup stores and destinations for your cart.",
+      data: { type: "delivery_started", orderId: id(order), checkoutGroup: id(order.checkoutGroup) } })
+      .catch((error) => console.error("Delivery customer notification failed:", error.message));
+  }
+}
 
 async function loadCart(models, order, session) {
-  const group = await models.CheckoutGroup.findById(order.checkoutGroup).session(session);
+  const Model = order.storeDispatchBatch ? models.StoreDispatch : models.CheckoutGroup;
+  const group = await Model.findById(order.storeDispatchBatch || order.checkoutGroup).session(session);
   if (!group?.cartRoute || group.status !== "placed") throw conflict("This cart is not ready for dispatch.");
-  const orders = await models.Order.find({ checkoutGroup: group._id }).session(session).populate("store", "name address location");
+  const orders = await models.Order.find(groupScope(group)).session(session).populate("store", "name address location");
   if (!orders.length || group.orders.some((key) => !orders.some((entry) => id(entry) === id(key)))) {
     throw conflict("The complete cart assignment is missing. Contact Admin.");
   }
@@ -24,6 +41,7 @@ async function loadCart(models, order, session) {
 function ready(orders) {
   const live = liveOrders(orders);
   return live.length > 0 && live.every((entry) => !entry.driver && !entry.adminReviewRequired && !entry.fallbackStore &&
+    (!entry.storeRouteVersion || entry.storeReadyAt && entry.storeDispatchBatch) &&
     entry.fulfillmentStatus === "accepted" && entry.deliveryStatus === "Pending" &&
     (["pending_assignment", "assignment_failed"].includes(entry.dispatchStatus) ||
       (entry.dispatchStatus === "scheduled" && new Date(entry.deliveryWindowStart) <= new Date())));
@@ -51,12 +69,13 @@ async function offer(models, group, orders, driver) {
     if (current.orders.some((entry) => entry.companyOfferDriver && id(entry.companyOfferDriver) !== id(driver))) {
       throw conflict("This cart is already offered to another driver.");
     }
-    await models.CheckoutGroup.updateOne({ _id: group._id }, { $inc: { fulfillmentRevision: 1 } }, { session });
+    await groupModel(models, group).updateOne({ _id: group._id }, { $inc: { fulfillmentRevision: 1 } }, { session });
     await models.Order.updateMany({ _id: { $in: liveOrders(current.orders).map((entry) => entry._id) } },
       { $set: { companyOfferDriver: driver._id, dispatchStatus: "pending_assignment" } }, { session });
   });
-  sendPushToUser({ User: models.User, userId: driver.user, title: "Complete cart delivery available",
-    body: "Accept all pickup stores and drop-offs together. Other accepted carts may share your trip.",
+  sendPushToUser({ User: models.User, userId: driver.user, title: group.store ? "Store delivery batch available" : "Complete cart delivery available",
+    body: group.store ? "Accept this store's ready packages together for one pickup." :
+      "Accept all pickup stores and drop-offs together. Other accepted carts may share your trip.",
     data: { type: "company_delivery_offer", orderId: id(orders[0]), checkoutGroup: id(group) } })
     .catch((error) => console.error("Cart offer notification failed:", error.message));
   return { success: true, offered: true, driverId: id(driver), orderId: id(orders[0]) };
@@ -76,6 +95,7 @@ async function assign(models, order, candidate, maxCarts, company, shared = fals
     { $inc: { dispatchVersion: 1 } }, { new: true, session });
     if (!driver || !await driverCapacity(models, driver, group, maxCarts, session)) throw conflict("Driver capacity changed. Finish a cart or choose a larger vehicle.");
     if (shared && (!driverAvailable(driver) ||
+      group.store && driver.isCompanyOwned && liveOrders(orders).some((entry) => id(entry.companyOfferDriver) !== id(driver)) ||
       !pickupEligible(driver, assignmentRoute(group, liveOrders(orders)).stops[0]?.location) ||
       liveOrders(orders).some((entry) => driverRejected(entry, driver)))) {
       throw conflict("This cart is no longer available to your driver profile. Refresh assignments.");
@@ -97,15 +117,15 @@ async function assign(models, order, candidate, maxCarts, company, shared = fals
 
 async function undo(models, group, driver, maxCarts) {
   await models.Order.db.transaction(async (session) => {
-    const current = await models.CheckoutGroup.findById(group._id).session(session);
+    const current = await groupModel(models, group).findById(group._id).session(session);
     if (id(current?.routeDriver) !== id(driver)) throw conflict("Cart driver changed during response recovery.");
-    const orders = await models.Order.find({ checkoutGroup: group._id }).session(session);
+    const orders = await models.Order.find(groupScope(group)).session(session);
     if (orders.some((order) => order.deliveryStatus === "Picked Up" || order.deliveryStatus === "Delivered")) {
       throw conflict("Pickup already started. Contact Admin; this cart cannot be reassigned.");
     }
     current.routeDriver = null; current.fulfillmentRevision += 1; await current.save({ session });
     await models.Driver.updateOne({ _id: driver._id }, { $pull: { activeCartRoutes: group._id } }, { session });
-    await models.Order.updateMany({ checkoutGroup: group._id, driver: driver._id }, { $set: {
+    await models.Order.updateMany({ ...groupScope(group), driver: driver._id }, { $set: {
       driver: null, deliveryStatus: "Pending", status: "Pending", dispatchStatus: "pending_assignment", queueBatchId: null,
     } }, { session });
     const active = await models.Order.find({ driver: driver._id, deliveryStatus: { $in: activeStatuses } }).session(session).lean();
@@ -126,10 +146,7 @@ async function dispatch(models, order, io, { companyDriverId, sharedDriverId, ma
       orderId: id(order), driverId: id(candidate), checkoutGroup: id(group),
       cartOrderIds: assigned.orders.map(id), autoAssigned: true,
     });
-    sendPushToUser({ User: models.User, userId: order.user, title: "Cart delivery assigned",
-      body: "One driver has accepted all pickup stores and destinations for your cart.",
-      data: { type: "delivery_started", orderId: id(order), checkoutGroup: id(group) } })
-      .catch((error) => console.error("Cart claim notification failed:", error.message));
+    notifyCustomers(models, group, assigned.orders);
     return { success: true, driverId: id(candidate), orderId: id(order), cartOrderIds: assigned.orders.map(id) };
   }
   const live = liveOrders(orders);
@@ -143,13 +160,8 @@ async function dispatch(models, order, io, { companyDriverId, sharedDriverId, ma
     candidates = [driver];
   } else {
     candidates = await models.Driver.find({ approvalStatus: "approved", isSuspended: { $ne: true },
-      $or: [{ isAvailable: true }, { availabilityStatus: true }] });
-    const pickup = getCoordinates(route.stops[0].location);
-    candidates.sort((a, b) => Number(Boolean(a.isCompanyOwned)) - Number(Boolean(b.isCompanyOwned)) ||
-      distanceMeters(pickup, getCoordinates(a.location)) - distanceMeters(pickup, getCoordinates(b.location)));
-    candidates = candidates.filter((driver) => (driver.isCompanyOwned ||
-      distanceMeters(pickup, getCoordinates(driver.location)) <= DRIVER_RADIUS_METERS) &&
-      !live.some((entry) => entry.companyDriverResponses?.some((response) => id(response.driver) === id(driver) && response.status === "rejected")));
+      $or: [{ isAvailable: true }, { availabilityStatus: true }, { isCompanyOwned: true }] });
+    candidates = rankDrivers(candidates, route.stops[0].location, live);
   }
   for (const candidate of candidates) {
     if (!await driverCapacity(models, candidate, group, maxCarts)) continue;
@@ -167,15 +179,13 @@ async function dispatch(models, order, io, { companyDriverId, sharedDriverId, ma
           pickupStores: route.stops.filter((stop) => stop.type === "pickup"),
         }, deliveryFee: group.deliveryFee }, autoAssigned: Boolean(candidate.isCompanyOwned),
     });
-    sendPushToUser({ User: models.User, userId: candidate.user, title: "Complete cart route assigned",
-      body: "All pickup stores for this cart are in your delivery queue.",
+    sendPushToUser({ User: models.User, userId: candidate.user, title: group.store ? "Store batch assigned" : "Complete cart route assigned",
+      body: group.store ? "Collect all ready packages in this store batch before beginning drop-offs." :
+        "All pickup stores for this cart are in your delivery queue.",
       data: { type: "delivery_assigned", orderId: id(order), checkoutGroup: id(group) } })
       .catch((error) => console.error("Cart assignment notification failed:", error.message));
     if (candidate.isCompanyOwned || (await decision(io, { orderId: id(order), driverId: id(candidate), timeoutMs: 30000 })).accepted) {
-      sendPushToUser({ User: models.User, userId: order.user, title: "Cart delivery assigned",
-        body: "One driver has accepted all pickup stores and destinations for your cart.",
-        data: { type: "delivery_started", orderId: id(order), checkoutGroup: id(group) } })
-        .catch((error) => console.error("Cart customer notification failed:", error.message));
+      notifyCustomers(models, group, assigned.orders);
       return { success: true, driverId: id(candidate), orderId: id(order), cartOrderIds: assigned.orders.map(id) };
     }
     await undo(models, group, candidate, maxCarts);
@@ -186,24 +196,56 @@ async function dispatch(models, order, io, { companyDriverId, sharedDriverId, ma
 async function respond(models, order, driver, action = "reject") {
   if (!["reject", "reroute"].includes(action)) throw Object.assign(new Error("Invalid delivery response."), { status: 400 });
   if (!driver.isCompanyOwned) throw Object.assign(new Error("Only company drivers can respond to deliveries."), { status: 403 });
+  if (order.driver) {
+    if (id(order.driver) !== id(driver)) throw conflict("This delivery is assigned to another driver.");
+    const result = await require("./driverAssignment").reroute(models, order._id, { respondingDriver: driver, action });
+    if (order.storeDispatchBatch) await ensureCompanyOffer(models, order, require("./dispatchService").MAX_ACTIVE_ORDERS_PER_DRIVER);
+    return result;
+  }
   await models.Order.db.transaction(async (session) => {
     const { group, orders } = await loadCart(models, order, session);
-    if (!ready(orders) || group.routeDriver || liveOrders(orders).some((entry) => driverRejected(entry, driver))) {
+    if (!ready(orders) || group.routeDriver || liveOrders(orders).some((entry) => driverRejected(entry, driver)) ||
+        group.store && liveOrders(orders).some((entry) => id(entry.companyOfferDriver) !== id(driver))) {
       throw conflict("This complete cart is no longer available or you have already responded.");
     }
-    await models.CheckoutGroup.updateOne({ _id: group._id }, { $inc: { fulfillmentRevision: 1 } }, { session });
+    await groupModel(models, group).updateOne({ _id: group._id }, { $inc: { fulfillmentRevision: 1 } }, { session });
     await models.Order.updateMany({ _id: { $in: liveOrders(orders).map((entry) => entry._id) } }, {
       $set: { companyOfferDriver: null, dispatchStatus: "pending_assignment" },
       $push: { companyDriverResponses: { driver: driver._id, status: "rejected", action } },
     }, { session });
   });
+  if (order.storeDispatchBatch) await ensureCompanyOffer(models, order, require("./dispatchService").MAX_ACTIVE_ORDERS_PER_DRIVER);
+}
+
+async function ensureCompanyOffer(models, order, maxCarts) {
+  const { group, orders } = await loadCart(models, order);
+  if (!ready(orders) || group.routeDriver || orders.some((entry) => entry.companyOfferDriver)) return;
+  const pickup = assignmentRoute(group, liveOrders(orders)).stops[0]?.location;
+  const candidates = await models.Driver.find({ approvalStatus: "approved", isSuspended: { $ne: true } });
+  const eligible = rankDrivers(candidates, pickup, liveOrders(orders));
+  for (const driver of eligible) {
+    if (!await driverCapacity(models, driver, group, maxCarts)) continue;
+    if (!driver.isCompanyOwned) return;
+    return offer(models, group, orders, driver);
+  }
+}
+
+function rankDrivers(drivers, pickup, orders) {
+  const coordinates = getCoordinates(pickup);
+  return drivers.filter((driver) => !orders.some((entry) => driverRejected(entry, driver)) &&
+      (driver.isCompanyOwned || driverAvailable(driver) &&
+        distanceMeters(coordinates, getCoordinates(driver.location)) <= DRIVER_RADIUS_METERS))
+    .sort((a, b) => Number(Boolean(a.isCompanyOwned)) - Number(Boolean(b.isCompanyOwned)) ||
+      Number(!driverAvailable(a)) - Number(!driverAvailable(b)) ||
+      distanceMeters(coordinates, getCoordinates(a.location)) -
+        distanceMeters(coordinates, getCoordinates(b.location)) || id(a).localeCompare(id(b)));
 }
 
 function queueRoute(orders, origin) {
   const pickups = new Map(), drops = new Map(), cartPickups = new Map();
   for (const order of orders) {
     const pickupKey = `pickup:${id(order.store)}`;
-    const dropKey = `dropoff:${unit(order)}:${order.cartDeliveryAddressId || id(order)}`;
+    const dropKey = `dropoff:${unit(order)}:${id(order.checkoutGroup)}:${order.cartDeliveryAddressId || id(order)}`;
     if (order.deliveryStatus !== "Picked Up") {
       if (!pickups.has(pickupKey)) pickups.set(pickupKey, { key: pickupKey, type: "pickup", name: order.store?.name || "Store",
         location: order.store?.location, orderIds: [], requires: [] });
@@ -216,7 +258,7 @@ function queueRoute(orders, origin) {
     drops.get(dropKey).orderIds.push(id(order));
   }
   for (const order of orders) {
-    const dropKey = `dropoff:${unit(order)}:${order.cartDeliveryAddressId || id(order)}`;
+    const dropKey = `dropoff:${unit(order)}:${id(order.checkoutGroup)}:${order.cartDeliveryAddressId || id(order)}`;
     drops.get(dropKey).requires = [...(cartPickups.get(unit(order)) || [])];
   }
   const stops = [...pickups.values(), ...drops.values()];
@@ -229,4 +271,4 @@ function assignmentRoute(group, orders) {
   return { ...group.cartRoute, stops: queueRoute(liveOrders(orders)) };
 }
 
-module.exports = { dispatch, respond, driverCapacity, loadCart, ready, queueRoute, assignmentRoute, unit, activeStatuses, liveOrders };
+module.exports = { dispatch, respond, ensureCompanyOffer, driverCapacity, loadCart, ready, queueRoute, assignmentRoute, unit, activeStatuses, liveOrders };

@@ -2,75 +2,106 @@
 
 A comprehensive REST API for an e-commerce platform built with Node.js, Express, and MongoDB. Features include JWT authentication, payment gateway integrations (Stripe & Telebirr), order management, and email notifications.
 
-## Cart-route delivery pricing and assignments
+## Per-store delivery routes and store dispatch
 
-New grouped product quotes use one fixed customer-cart route in both USA and
-Ethio, shared by mobile and website. Unique pickup stores and allocated drop-off
-addresses form a dependency-constrained route. Every pickup for that customer
-cart must finish before any of its drop-offs become eligible, even if an earlier
-drop-off is closer or already has all of its own products collected.
-The deterministic multi-start nearest-next planner uses geographic distances to
-choose an ordering, then prices Google's road distances along that ordering.
-This is a heuristic, not a guaranteed shortest-road-route optimizer.
+New product quotes on website and mobile use `storeRoutes` in USA and Ethiopia.
+Each fulfilling store has its own road route: store -> first drop-off -> subsequent
+drop-offs. Charge its configured vehicle base fee, distance rate (USA miles /
+Ethiopia kilometers), and one speed surcharge per store. Nearby stores do not
+share a fee. Select one vehicle for all destinations from that store; other stores
+may use different vehicles. Exact-cent destination shares conserve each route's
+fee and billable distance for receipts, commissions and refunds.
+The geographic nearest-next ordering is priced using actual Google road legs;
+it is not a guaranteed shortest-road-route optimizer. Driver travel to pickup,
+other customers' detours and operational batching never reprice a reserved fee.
+US exports use these rules only for the US store-to-hub legs; international
+shipping remains separately priced.
 
-Charge one vehicle base fee, the complete route distance rate (miles in USA,
-kilometers in Ethio), and one delivery-speed surcharge. Exclude driver travel to
-the first pickup and all other customers' pickups, drop-offs and detours.
-The fee stays fixed after reservation, independent of dispatch or batching.
-Child store orders retain exact-cent allocated shares for receipts, commissions
-and refunds; allocated billable-distance shares avoid double-counting analytics.
-Unassigned cancellations refund their saved shares without repricing the route.
-International shipping applies this only to the US store-to-hub route;
-overseas/final-delivery tariffs remain separate.
+Checkout allocates nearest eligible matching-price stock first, within the
+selected storefront family when applicable. After payment/checkout activation,
+stores accept or reject timed requests. Rejections/timeouts try other eligible
+stores before the configured default-store fallback. The fallback stays in a
+durable no-expiry list even while the default store is offline, including for
+unrelated storefronts. If no open store has stock, checkout can quote and reserve
+matching stock at the approved configured default even while closed. Activation
+keeps that stock reserved in the offline queue to prevent overselling. Claiming
+transactionally revalidates the reservation; rejection, rerouting and cancellation
+release it.
+The default store must open to claim; it may instead reroute or reject for Admin
+review. Claiming and rerouting never require Admin approval. A claimed request
+can be prepared and dispatched directly, or rerouted before it is released to a
+driver batch. Rerouting offers other eligible stores a timed chance to accept.
+Only explicit fallback rejection enters Admin review; it does not cancel payment
+or refund it. Store changes do not change the saved customer delivery fee.
 
-All live store orders must be accepted before the complete cart can be offered.
-Transactional group/driver writes assign all its pickup orders to one driver,
-prevent split claims, and reject individual reassignment or premature delivery.
-Every noncancelled pickup in the cart must be collected before any delivery
-or drop-off navigation. Drivers can accept several carts within the configured
-cart-count limit and conservative combined vehicle capacity. Missing package
-measurements allow one manually selected cart, but prohibit multi-cart batching.
-Legacy order dispatch cannot add unverified cargo to a driver carrying a cart.
-Shared stores appear once in the company driver's combined operational plan;
-live GPS can affect that plan but never the customer's price. Partner drivers
-retain existing pre-pickup exact-address privacy.
+Admins use **Store Requests** on either client, backed by
+`GET stores/admin/assignments` and
+`POST stores/admin/assignments/:id/{accept|reroute|ready}`. Claiming uses the
+assigned/default store (or an explicit `storeId`). Admin can bypass ownership,
+online status and storefront scope; approved status, stock and matching prices
+still apply. Admin rerouting reopens prior
+eligible attempts except the released store, with an offline default queue if
+none can accept. Admin can release ready packages using
+`POST stores/admin/dispatch-batches` with `{ "orderIds": ["..."] }`.
+Rejected requests remain visible for review, including after cancellation.
+Deletion uses the existing Admin order-delete endpoint: grouped deliveries must
+first be cancelled through their checkout and any required refund reconciled.
+Claim/reroute cannot reopen cancelled, payment-pending or driver-dispatched orders.
 
-When stores exhaust acceptance/rerouting attempts, the configured default store
-receives a durable fallback request even for an unrelated storefront. It can
-claim with matching stock/prices, reroute, or reject for Admin review. Other
-fallback stores still respect storefront-family scope. Fallback decisions
-serialize against cart driver assignment; they do not reprice reserved delivery.
-A fully collected cart can deliver while a different accepted cart still has
-pickups; the pickup gate applies per customer cart, not to the entire driver batch.
+New orders carry `storeRouteVersion: 1`. Acceptance alone never offers them to
+drivers. Owners use `POST stores/me/assignments/:id/ready`, then
+`POST stores/me/dispatch-batches` with `{ "orderIds": ["..."] }`.
+Select 1-20 accepted ready packages from one open approved owned store with the
+same vehicle. Packages from different customer checkouts may share a batch.
+A single-package dispatch needs no reason. Unknown measurements permit only a
+single manually selected package; measured batches must fit vehicle capacity.
+`StoreDispatch` records and transactional order locks prevent duplicate release.
+No driver being online is necessary to queue a batch.
 
-Deploy backend first, then website and mobile together. No backfill is required:
-saved quotes/orders without cart-route metadata retain legacy pricing/dispatch.
-Existing cart-route prices stay fixed, but operational pickup gating also applies
-to existing cart-route orders.
-Vehicle delivery pricing and per-store inventory must already be enabled.
-Focused tests: `node --test tests\cart-route.test.js tests\cart-dispatch.test.js tests\multi-delivery.test.js tests\driver-route.test.js`.
+Drivers claim the entire store batch atomically through the existing
+available-deliveries API. Pickup, navigation and delivery gates require all live
+packages in that batch to be collected before any drop-off. Other stores in a
+customer's checkout prepare/dispatch independently. Payments and refund records
+remain in the original `CheckoutGroup`; the dispatch batch is not a new payment.
+Driver approval, availability, capacity and partner pickup radius are rechecked
+on claim. A driver's combined operational route may include several batches.
+
+Deploy backend first, then website and mobile together. Inventory and vehicle
+pricing must already be enabled, with an approved default store and valid map
+pins. Existing quotes/orders retain their saved legacy pricing and dispatch,
+including cart-wide pickup gates on historical `cartRouteVersion: 1` orders.
+No backfill or repricing of paid orders is required.
+
+Focused tests: `node --test tests\cart-route.test.js tests\cart-dispatch.test.js tests\store-dispatch.test.js tests\store-inventory.test.js tests\multi-delivery.test.js tests\driver-route.test.js`.
 
 ### Shared unclaimed delivery assignments
 
 Website and mobile driver dashboards use authenticated
 `GET /api/v1/drivers/me/available-deliveries` and
 `PUT /api/v1/drivers/me/available-deliveries/:id/claim`. Unassigned, dispatch-ready
-carts and legacy deliveries are not restricted to the driver selected for an
+carts saved under legacy rules are not restricted to the driver selected for an
 automatic company offer. Eligible available company and partner drivers can
 claim them; the first successful transactional claim wins. A claim accepts the
 whole cart immediately and does not require a live socket or a second acceptance.
 Both reads and claims enforce approval, suspension, availability, delivery mode,
 vehicle, remaining capacity and ride exclusions. Partner drivers must be within
 the existing 5 km first-pickup radius; company drivers retain their no-radius
-fallback. Partner responses expose pickup stops and approximate drop zones only,
+fallback. New store-dispatch batches instead designate one company driver at a
+time: nearby available partner first, nearest available company driver next
+(without a radius limit), then nearest eligible offline company driver. Offline
+offers persist in `companyOfferDriver` and appear only in the designated company
+driver's list. A nearby eligible partner may still manually claim an unclaimed
+batch. Approval, service, vehicle, ride and cargo checks govern fallback selection;
+going online and meeting current capacity are required for self-claim.
+Partner responses expose pickup stops and approximate drop zones only,
 preserving exact recipient address/phone privacy before pickup.
 
 Unclaimed requests remain in the database when nobody is available. Company
 drivers see this durable backlog on reopening, focus and periodic refresh even
 while offline or full, with `canClaim: false`; going online does not assign an
 order automatically through the list. Company drivers have `canRespond: true`
-on unclaimed ready requests, even without a designated offer or available
-alternative. `PUT orders/:id/company-reject` and `/company-reroute` both record
+on their unclaimed ready requests, even without an available alternative.
+New store batches require a designated offer to respond. `PUT orders/:id/company-reject` and `/company-reroute` both record
 that driver's refusal for the whole cart, clear the company offer and leave the
 request queued for other eligible company or partner drivers. These actions
 remove it only from the responding driver's list. Reject also flags it for
@@ -80,10 +111,27 @@ does not. The saved response's `action` distinguishes the two while both use
 responses without an action remain visible to Admin. Neither action sets
 the dispatch-blocking `adminReviewRequired` field, cancels the order, changes
 its price or refunds payment. Partner drivers cannot use these company response
-actions. Assigned, blocking-Admin-review, cancelled,
+actions. Blocking-Admin-review, cancelled,
 future-scheduled and not-store-accepted requests cannot be released this way.
+An assigned company driver may also release the whole batch before any pickup.
+Once any live package is picked up, neither drivers, stores nor Admin may reassign
+the batch; a physical handover workflow is not implemented.
 Previous refusals exclude only the responding driver from subsequent claims
 and offers. Existing automatic dispatch and company offer APIs remain supported.
+
+Dispatching store owners and Admin use
+`POST stores/{me|admin}/assignments/:id/drivers/reroute` to release/reoffer the whole
+batch without splitting it. Driver rejections remain visible in **Admin > Store
+Requests**, including after cancellation, and do not block other drivers.
+`POST stores/admin/assignments/:id/drivers/assign` with `{ "driverId": "..." }`
+directly assigns the complete batch (or legacy single delivery), bypassing online
+status, ownership, proximity and previous refusal. The selected driver must still
+be approved, non-suspended, compatible and have capacity, with no active ride or
+exclusive load. Admin assignment never turns an offline driver online.
+Admin can also claim matching stock and release ready batches from closed approved
+stores. None of these overrides bypass payment/refund, stock, preparation,
+scheduled-window or pickup/completion safeguards. Use the existing checkout
+cancellation/refund flow before deleting active paid orders.
 
 ## Regional payment availability
 

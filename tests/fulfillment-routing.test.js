@@ -359,17 +359,18 @@ test("shared assignment APIs authenticate drivers and claim using the profile li
   assert.equal(String(f.order.driver), String(f.candidate._id));
 });
 
-test("a default offer remains visible for a mismatched vehicle but cannot be claimed", async () => {
+test("a mismatched company vehicle is not selected for a durable fallback offer", async () => {
   const fixture = dispatchFixture();
   fixture.order.requiredVehicle = "van";
   fixture.candidate.vehicleType = "car";
   const result = await assignDriverToOrder(String(fixture.order._id), fixture.io, { models: fixture.models });
-  assert.equal(result.offered, true);
+  assert.equal(result.success, false);
+  assert.equal(fixture.order.companyOfferDriver, null);
   assert.equal(fixture.order.driver, null);
   const claim = await assignDriverToOrder(String(fixture.order._id), fixture.io, {
     models: fixture.models, companyDriverId: String(fixture.candidate._id),
   });
-  assert.equal(claim.reason, "driver_unavailable");
+  assert.equal(claim.reason, "company_offer_unavailable");
   assert.equal(fixture.order.driver, null);
 });
 

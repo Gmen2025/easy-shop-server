@@ -243,8 +243,8 @@ async function syncDriverAvailability(Driver, Order, driverId) {
   if (driver.activeRideTrip || driver.pendingRideOffer || driver.serviceModes?.delivery === false) return;
   if (driver.activeCartRoutes?.length) {
     const active = await Order.find({ driver: driverId, deliveryStatus: { $in: ACTIVE_DELIVERY_STATUSES } })
-      .select("_id checkoutGroup cartRouteVersion").lean();
-    const routes = [...new Set(active.filter((order) => order.cartRouteVersion === 1).map((order) => String(order.checkoutGroup)))];
+      .select("_id checkoutGroup cartRouteVersion storeDispatchBatch").lean();
+    const routes = [...new Set(active.filter((order) => order.cartRouteVersion === 1 || order.storeDispatchBatch).map(require("./cartDispatch").unit))];
     const count = new Set(active.map(require("./cartDispatch").unit)).size;
     await Driver.findByIdAndUpdate(driverId, { activeCartRoutes: routes,
       isAvailable: count < MAX_ACTIVE_ORDERS_PER_DRIVER, availabilityStatus: count < MAX_ACTIVE_ORDERS_PER_DRIVER });
@@ -325,9 +325,10 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
     if (!order) {
       throw new Error("Order not found.");
     }
-    if (order.cartRouteVersion === 1) {
+    if (order.cartRouteVersion === 1 || order.storeDispatchBatch) {
       return { cartOrder: order };
     }
+    if (order.storeRouteVersion) return { success: false, reason: "store_dispatch_required" };
     if (options.sharedDriverId && !orderReady(order)) {
       return { success: false, reason: "order_not_dispatchable" };
     }

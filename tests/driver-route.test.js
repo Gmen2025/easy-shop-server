@@ -118,6 +118,26 @@ test("cart drop-off navigation waits for every address's pickups and ignores can
   }
 });
 
+test("store batch drop-off navigation waits for every package, independently of the original checkout", async () => {
+  for (const pending of [0, 1]) {
+    const { req, res } = fixture({ status: "Picked Up" });
+    req.dbModels.Order.findOne = () => ({ populate: async () => ({
+      storeDispatchBatch: "batch1", checkoutGroup: "customer1", deliveryStatus: "Picked Up",
+      customerLocation: { coordinates: [38.2, 9.2] },
+    }) });
+    req.dbModels.Order.countDocuments = async (filter) => {
+      assert.equal(filter.storeDispatchBatch, "batch1");
+      assert.equal(filter.checkoutGroup, undefined);
+      assert.equal(filter.fulfillmentStatus.$ne, "cancelled");
+      return pending;
+    };
+    let calls = 0;
+    await createDriverRouteHandler({ compute: async () => { calls++; return { coordinates: [], distance: 1, duration: 2 }; } })(req, res);
+    assert.equal(res.statusCode, pending ? 409 : 200);
+    assert.equal(calls, pending ? 0 : 1);
+  }
+});
+
 test("unauthorized, suspended, unassigned and invalid-location requests never call Google", async () => {
   const scenarios = [
     [{}, (req) => { req.auth = null; }, 401],

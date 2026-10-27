@@ -43,8 +43,9 @@ function fixture() {
       find: (filter) => query(stores.filter((store) =>
         (!filter._id?.$nin?.includes(store._id)) &&
         (!filter._id?.$in || filter._id.$in.includes(store._id)) &&
-        (!filter.$or || filter.$or.some((rule) => rule._id === store._id || rule.parentStore && rule.parentStore === store.parentStore)) &&
-        store.approvalStatus === "approved" && store.isOpen !== false)),
+        (!filter.$or || filter.$or.some((rule) => rule.isOpen && store.isOpen !== false ||
+          rule._id === store._id || rule.parentStore && rule.parentStore === store.parentStore)) &&
+        store.approvalStatus === "approved" && (store.isOpen !== false || filter.$or?.some((rule) => rule._id === store._id)))),
       findById: (storeId) => query(stores.find((store) => store._id === String(storeId))),
     },
     StoreInventory: {
@@ -200,6 +201,14 @@ test("catalog stock sums store availability and store sales retain historical pu
     orderItems: [{ quantity: 2, unitPrice: 10, product: { price: 999 } }],
   }, id(1), new Set());
   assert.equal(summary.sales, 20);
+});
+
+test("catalog keeps approved offline default stock purchasable but excludes other closed stores", async () => {
+  const f = fixture();
+  f.stores[0].isOpen = false;
+  f.stores[2].isOpen = false;
+  const products = await aggregateCatalog(f.models, [{ _id: product, price: 10 }]);
+  assert.equal(products[0].countInStock, 10, "Open store plus offline default; ordinary closed stock is excluded");
 });
 
 test("cart delivery cannot complete while a different address still has pickups; stock is consumed only after all pickups", async () => {
