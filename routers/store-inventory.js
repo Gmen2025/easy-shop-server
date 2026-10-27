@@ -240,6 +240,11 @@ router.post("/admin/assignments/:id/:decision", endpoint(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id) || req.body?.storeId && !mongoose.isValidObjectId(req.body.storeId)) {
     throw conflict("Invalid assignment or store ID.");
   }
+  if (req.params.decision === "enable-preparation") {
+    const orderIds = await require("../service/storeDispatch").enablePreparation(req.dbModels, req.auth.userId,
+      req.params.id, { admin: true, vehicle: req.body?.vehicle });
+    return res.json({ success: true, orderIds });
+  }
   if (req.params.decision === "ready") {
     const order = await req.dbModels.Order.findById(req.params.id).lean();
     if (!order) throw conflict("Assignment not found.");
@@ -265,10 +270,15 @@ router.post("/me/dispatch-batches", endpoint(async (req, res) => {
 
 router.post("/me/assignments/:id/:decision", endpoint(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) throw conflict("Invalid assignment ID.");
-  if (!["accept", "reject", "reroute", "ready"].includes(req.params.decision)) throw conflict("Invalid assignment response.");
+  if (!["accept", "reject", "reroute", "ready", "enable-preparation"].includes(req.params.decision)) throw conflict("Invalid assignment response.");
   const order = await req.dbModels.Order.findById(req.params.id).lean();
   if (!order) throw Object.assign(new Error("Assignment not found."), { status: 404 });
   await ownedStore(req, String(order.fallbackStore || order.store));
+  if (req.params.decision === "enable-preparation") {
+    const orderIds = await require("../service/storeDispatch").enablePreparation(req.dbModels, req.auth.userId,
+      req.params.id, { vehicle: req.body?.vehicle });
+    return res.json({ success: true, orderIds });
+  }
   if (req.params.decision === "ready") {
     const result = await require("../service/storeDispatch").markReady(req.dbModels, order._id, order.store);
     return res.json({ success: true, storeReadyAt: result.storeReadyAt });

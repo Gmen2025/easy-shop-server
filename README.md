@@ -72,6 +72,18 @@ pins. Existing quotes/orders retain their saved legacy pricing and dispatch,
 including cart-wide pickup gates on historical `cartRouteVersion: 1` orders.
 No backfill or repricing of paid orders is required.
 
+Older accepted orders do not show preparation controls until explicitly upgraded.
+**Enable store preparation** on either client calls
+`POST stores/{me|admin}/assignments/:id/enable-preparation` with optional `{ "vehicle": "car" }`.
+Only the assigned store owner or Admin can opt in. Legacy cart-wide orders upgrade
+all active packages together, only after every store has accepted and before any
+driver assignment/pickup. Saved fees, checkout IDs, billing routes, payment records
+and stock reservations stay unchanged. Existing company offers are withdrawn.
+The upgrade does not mark packages ready: each store then uses **Mark package ready**
+and **Dispatch selected**. Missing cargo measurements are recorded as unknown and
+require single-package dispatch; orders lacking a saved vehicle require explicit
+selection of a suitable enabled vehicle. No automatic migration runs.
+
 Focused tests: `node --test tests\cart-route.test.js tests\cart-dispatch.test.js tests\store-dispatch.test.js tests\store-inventory.test.js tests\multi-delivery.test.js tests\driver-route.test.js`.
 
 ### Shared unclaimed delivery assignments

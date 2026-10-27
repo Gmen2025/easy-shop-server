@@ -1,7 +1,7 @@
 const mongoose = require("mongoose");
 const { conflict } = require("../helpers/store-inventory");
 const { combinedCargo } = require("../helpers/cart-route");
-const { suitableVehicles, VEHICLE_CONFIG_KEY, cents } = require("../helpers/vehicle-delivery");
+const { suitableVehicles, cargoFor, VEHICLE_CONFIG_KEY, cents } = require("../helpers/vehicle-delivery");
 
 const id = (value) => String(value?._id || value || "");
 
@@ -67,4 +67,61 @@ async function createBatch(models, userId, orderIds, { admin = false } = {}) {
   });
 }
 
-module.exports = { markReady, createBatch, validatePackages };
+async function enablePreparation(models, userId, orderId, { admin = false, vehicle } = {}) {
+  return models.Order.db.transaction(async (session) => {
+    const order = await models.Order.findById(orderId).session(session);
+    if (!order) throw conflict("Assignment not found.");
+    if (!admin) {
+      const store = await models.Store.findOne({ _id: order.store, owner: userId }).session(session);
+      if (!store) throw Object.assign(new Error("You cannot manage this store."), { status: 403 });
+    }
+    if (order.storeRouteVersion === 1) throw conflict("Store preparation is already enabled. Refresh assignments.");
+    let orders;
+    if (order.cartRouteVersion === 1) {
+      const group = await models.CheckoutGroup.findById(order.checkoutGroup).session(session);
+      if (!group || group.status !== "placed" || group.routeDriver) throw conflict("This cart is not awaiting store dispatch.");
+      group.fulfillmentRevision += 1;
+      await group.save({ session });
+      orders = await models.Order.find({ checkoutGroup: group._id }).session(session)
+        .populate({ path: "orderItems", populate: { path: "product", select: "packageSize" } });
+      if (!orders.length || group.orders.some((key) => !orders.some((entry) => id(entry) === id(key)))) {
+        throw conflict("The complete cart is missing. Contact Admin.");
+      }
+    } else {
+      orders = [await models.Order.findById(orderId).session(session)
+        .populate({ path: "orderItems", populate: { path: "product", select: "packageSize" } })];
+    }
+    const active = orders.filter((entry) => entry.fulfillmentStatus !== "cancelled" &&
+      !["4", "Cancelled"].includes(String(entry.status)));
+    if (!active.length || active.some((entry) => entry.driver || entry.storeDispatchBatch || entry.storeRouteVersion ||
+        entry.fulfillmentStatus !== "accepted" || !entry.store || entry.fallbackStore || entry.adminReviewRequired ||
+        entry.deliveryStatus !== "Pending" || ["3", "Delivered"].includes(String(entry.status)) ||
+        entry.paymentStatus === "failed" || entry.refundStatus && entry.refundStatus !== "not_required")) {
+      throw conflict("All active cart packages must be claimed by their stores and unassigned to drivers before enabling preparation.");
+    }
+    const config = (await models.SiteSetting.findOne({ key: VEHICLE_CONFIG_KEY }).session(session).lean())?.vehicleDeliveryConfig;
+    if (!config?.enabled) throw conflict("Admin must enable delivery vehicles before enabling store preparation.");
+    for (const entry of active) {
+      if (!entry.orderItems?.length || entry.orderItems.some((item) => !Number.isSafeInteger(item.quantity) || item.quantity < 1)) {
+        throw conflict("This order has invalid or missing package lines. Contact Admin.");
+      }
+      const cargo = entry.cargo || cargoFor(entry.orderItems.map((item) => ({
+        product: item.product?._id, quantity: item.quantity,
+      })), entry.orderItems.map((item) => item.product).filter(Boolean));
+      const requiredVehicle = entry.requiredVehicle || vehicle;
+      if (!requiredVehicle || !suitableVehicles(cargo, config).includes(requiredVehicle)) {
+        throw conflict("Choose an enabled delivery vehicle that fits all packages without a saved vehicle. Unknown-size packages must be dispatched singly.");
+      }
+      entry.storeRouteVersion = 1;
+      entry.cartRouteVersion = undefined;
+      entry.storeReadyAt = undefined;
+      entry.companyOfferDriver = null;
+      entry.requiredVehicle = requiredVehicle;
+      entry.cargo = cargo;
+      await entry.save({ session });
+    }
+    return active.map((entry) => entry._id);
+  });
+}
+
+module.exports = { markReady, createBatch, validatePackages, enablePreparation };
