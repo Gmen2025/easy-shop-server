@@ -264,7 +264,7 @@ test("company-list recovery does not strand a store batch behind an unassigned n
   assert.equal(f.group.deliveryFee, 10);
 });
 
-test("scheduled store batches appear as upcoming to the compatible company driver without opening claims early", async () => {
+test("scheduled store batches expose every package window and allow the driver to claim early", async () => {
   const { listAvailableDeliveries } = require("../service/availableDeliveries");
   const f = storeBatch(fixture());
   const start = new Date(Date.now() + 86400000);
@@ -275,26 +275,68 @@ test("scheduled store batches appear as upcoming to the compatible company drive
   const rows = await listAvailableDeliveries(f.models, f.drivers[0], 3);
   assert.equal(rows.length, 1);
   assert.equal(rows[0].upcoming, true);
-  assert.equal(rows[0].canClaim, false);
-  assert.equal(rows[0].canRespond, false);
+  assert.equal(rows[0].canClaim, true);
+  assert.equal(rows[0].canRespond, true);
+  assert.equal(rows[0].packageDeliveryWindows.length, 2);
+  assert.equal(rows[0].packageDeliveryWindows[1].orderId, "b");
+  assert.equal(new Date(rows[0].packageDeliveryWindows[1].deliveryWindowStart).getTime(), start.getTime());
   assert.equal(new Date(rows[0].deliveryWindowStart).getTime(), start.getTime());
   assert.ok(f.orders.every((order) => order.companyOfferDriver === "d1" &&
     order.dispatchStatus === "scheduled" && !order.driver));
-  assert.equal((await dispatch(f.models, f.orders[0], f.io, f.options)).success, false);
-  assert.equal((await dispatch(f.models, f.orders[0], f.io, { ...f.options, sharedDriverId: "d1" })).success, false);
-  assert.equal((await dispatch(f.models, f.orders[0], f.io, { ...f.options, companyDriverId: "d1" })).success, false);
-  await assert.rejects(respond(f.models, f.orders[0], f.drivers[0]), { status: 409 });
   const partner = { ...f.drivers[1], isCompanyOwned: false };
-  assert.deepEqual(await listAvailableDeliveries(f.models, partner, 3), []);
+  assert.equal((await listAvailableDeliveries(f.models, partner, 3))[0].canClaim, true);
   f.orders[0].deliveryWindowStart = new Date(Date.now() - 1000);
-  assert.equal((await listAvailableDeliveries(f.models, f.drivers[0], 3))[0].canClaim, false,
-    "Every live package must reach its window");
+  assert.equal((await listAvailableDeliveries(f.models, f.drivers[0], 3))[0].canClaim, true);
   f.orders[1].deliveryWindowStart = new Date(Date.now() - 1000);
   const due = await listAvailableDeliveries(f.models, f.drivers[0], 3);
   assert.equal(due[0].upcoming, false);
   assert.equal(due[0].canClaim, true);
   assert.equal(due[0].canRespond, true);
   assert.equal((await dispatch(f.models, f.orders[0], f.io, { ...f.options, sharedDriverId: "d1" })).success, true);
+});
+
+test("early batch claims work through company and shared endpoints without changing schedules or fees", async () => {
+  for (const mode of ["companyDriverId", "sharedDriverId"]) {
+    const f = storeBatch(fixture());
+    const start = new Date(Date.now() + 86400000);
+    f.orders.forEach((order) => {
+      order.dispatchStatus = "scheduled"; order.deliveryMode = "SCHEDULED"; order.deliveryWindowStart = start;
+    });
+    await dispatch(f.models, f.orders[0], f.io, f.options);
+    const result = await dispatch(f.models, f.orders[0], f.io, { ...f.options, [mode]: "d1" });
+    assert.equal(result.driverId, "d1");
+    assert.ok(f.orders.every((order) => order.driver === "d1" && order.deliveryWindowStart === start));
+    assert.equal(f.group.deliveryFee, 10);
+    await respond(f.models, f.orders[0], f.drivers[0], "reroute");
+    assert.ok(f.orders.every((order) => !order.driver && order.companyOfferDriver === "d2" &&
+      order.deliveryWindowStart === start));
+  }
+});
+
+test("measured store batches use the driver's actual configured capacity without changing the billed vehicle", async () => {
+  const { listAvailableDeliveries } = require("../service/availableDeliveries");
+  const f = storeBatch(fixture());
+  f.group.cartRoute.vehicle = "motorcycle";
+  f.orders.forEach((order) => { order.requiredVehicle = "motorcycle"; });
+  const billedRoute = JSON.stringify(f.group.cartRoute);
+  const rows = await listAvailableDeliveries(f.models, f.drivers[0], 3);
+  assert.equal(rows[0].canClaim, true, "A car that fits the load can claim a motorcycle-priced batch");
+  await dispatch(f.models, f.orders[0], f.io, { ...f.options, sharedDriverId: "d1" });
+  assert.equal(JSON.stringify(f.group.cartRoute), billedRoute);
+  assert.equal(f.group.deliveryFee, 10);
+  const small = storeBatch(fixture());
+  small.drivers[0].vehicleType = "motorcycle";
+  small.config.vehicles.motorcycle = { ...small.config.vehicles.car, maxWeightKg: 1 };
+  assert.equal(await driverCapacity(small.models, small.drivers[0], small.group, 3), false);
+  small.config.vehicles.motorcycle.maxWeightKg = 10;
+  assert.equal(await driverCapacity(small.models, small.drivers[0], small.group, 3), true);
+  small.config.vehicles.motorcycle.enabled = false;
+  assert.equal(await driverCapacity(small.models, small.drivers[0], small.group, 3), false);
+  const unknown = storeBatch(fixture());
+  unknown.group.cartRoute.vehicle = "motorcycle";
+  unknown.group.cartRoute.cargo = { measurementsAvailable: false, packages: [], knownWeightKg: 0, knownVolumeLiters: 0 };
+  assert.equal(await driverCapacity(unknown.models, unknown.drivers[0], unknown.group, 3), false,
+    "Unknown measurements cannot establish fit for a different vehicle");
 });
 
 test("upcoming visibility preserves vehicle, preparation, refusal and cancellation safeguards", async () => {
@@ -318,7 +360,7 @@ test("upcoming visibility preserves vehicle, preparation, refusal and cancellati
   }
 });
 
-test("upcoming company offers persist offline while partners and historical scheduled carts stay due-only", async () => {
+test("upcoming company offers persist offline while historical scheduled carts stay due-only", async () => {
   const { listAvailableDeliveries } = require("../service/availableDeliveries");
   const f = storeBatch(fixture());
   f.drivers.forEach((driver) => { driver.isAvailable = false; });

@@ -201,9 +201,10 @@ test("reopening rejected scheduled requests restores their future dispatch windo
   f.order.deliveryWindowStart = new Date(Date.now() + 3600000);
   await respondAsAdmin(f.models, id(20), "accept");
   assert.equal(f.order.dispatchStatus, "scheduled");
+  assert.equal(orderReady(f.order), false, "Store acceptance alone cannot expose a future order");
   f.order.storeReadyAt = new Date();
   f.order.storeDispatchBatch = id(50);
-  assert.equal(orderReady(f.order), false);
+  assert.equal(orderReady(f.order), true, "Released batches may be claimed before their window");
   assert.equal(orderReady(f.order, new Date(Date.now() + 7200000)), true);
 });
 

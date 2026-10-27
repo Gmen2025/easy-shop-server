@@ -45,7 +45,7 @@ function ready(orders, { includeScheduled = false } = {}) {
     entry.fulfillmentStatus === "accepted" && entry.deliveryStatus === "Pending" &&
     (["pending_assignment", "assignment_failed"].includes(entry.dispatchStatus) ||
       (entry.dispatchStatus === "scheduled" && (new Date(entry.deliveryWindowStart) <= new Date() ||
-        includeScheduled && new Date(entry.deliveryWindowStart) > new Date()))));
+        (includeScheduled || entry.storeDispatchBatch) && new Date(entry.deliveryWindowStart) > new Date()))));
 }
 
 async function driverCapacity(models, driver, incoming, maxCarts, session) {
@@ -53,14 +53,16 @@ async function driverCapacity(models, driver, incoming, maxCarts, session) {
   const count = new Set(active.map(unit)).size;
   if (count >= maxCarts || driver.exclusiveDelivery || driver.activeRideTrip || driver.pendingRideOffer ||
     driver.serviceModes?.delivery === false || driver.isSuspended || driver.approvalStatus !== "approved" ||
-    vehicleName(driver) !== incoming.cartRoute.vehicle) return false;
+    !incoming.store && vehicleName(driver) !== incoming.cartRoute.vehicle) return false;
+  const vehicle = incoming.store ? vehicleName(driver) : incoming.cartRoute.vehicle;
   const config = (await models.SiteSetting.findOne({ key: "vehicle-delivery-config" }).session(session).lean())?.vehicleDeliveryConfig;
   if (!config?.enabled) return false;
   const cargo = combinedCargo([...active.map((order) => order.cargo), incoming.cartRoute.cargo]);
   // Missing measurements require a manually selected single-cart vehicle, never speculative batching.
   if (!cargo) return count === 0 && incoming.cartRoute.cargo.measurementsAvailable === false &&
-    suitableVehicles(incoming.cartRoute.cargo, config).includes(incoming.cartRoute.vehicle);
-  return suitableVehicles(cargo, config).includes(incoming.cartRoute.vehicle);
+    vehicleName(driver) === incoming.cartRoute.vehicle &&
+    suitableVehicles(incoming.cartRoute.cargo, config).includes(vehicle);
+  return suitableVehicles(cargo, config).includes(vehicle);
 }
 
 async function offer(models, group, orders, driver, { includeScheduled = false } = {}) {
@@ -211,7 +213,7 @@ async function respond(models, order, driver, action = "reject") {
     }
     await groupModel(models, group).updateOne({ _id: group._id }, { $inc: { fulfillmentRevision: 1 } }, { session });
     await models.Order.updateMany({ _id: { $in: liveOrders(orders).map((entry) => entry._id) } }, {
-      $set: { companyOfferDriver: null, dispatchStatus: "pending_assignment" },
+      $set: { companyOfferDriver: null },
       $push: { companyDriverResponses: { driver: driver._id, status: "rejected", action } },
     }, { session });
   });

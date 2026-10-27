@@ -21,8 +21,8 @@ async function change(models, orderId, { admin = false, ownerId, respondingDrive
         !["Pending", "Driver Assigned"].includes(entry.deliveryStatus) ||
         ["3", "4", "Delivered", "Cancelled"].includes(String(entry.status)) ||
         entry.paymentStatus === "failed" || entry.refundStatus && entry.refundStatus !== "not_required" ||
-        entry.deliveryMode === "SCHEDULED" && new Date(entry.deliveryWindowStart) > new Date() ||
-        entry.dispatchStatus === "scheduled" && new Date(entry.deliveryWindowStart) > new Date())) {
+        !entry.storeDispatchBatch && (entry.deliveryMode === "SCHEDULED" || entry.dispatchStatus === "scheduled") &&
+          new Date(entry.deliveryWindowStart) > new Date())) {
       throw conflict("Only ready, active deliveries can be reassigned before pickup. Payment and pickup safeguards still apply.");
     }
     if (!admin) {

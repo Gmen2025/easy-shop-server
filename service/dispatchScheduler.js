@@ -45,6 +45,7 @@ async function dispatchPendingOrders(io, { databaseNames = getAllowedDatabaseNam
         $or: [
           { dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] } },
           { dispatchStatus: "scheduled", deliveryWindowStart: { $lte: now } },
+          { dispatchStatus: "scheduled", storeDispatchBatch: { $ne: null } },
           { store: null, dispatchStatus: "scheduled" },
         ],
       }).select("_id").sort({ dispatchPriority: -1, dateOrdered: 1 }).lean();

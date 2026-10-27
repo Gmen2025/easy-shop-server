@@ -2,7 +2,6 @@ const { buildDriverOrderSummary } = require("../helpers/driver-view");
 const { getDeliverySchedule } = require("../helpers/delivery");
 const { driverAvailable, pickupEligible, driverRejected, legacyEligible, orderReady } = require("../helpers/delivery-availability");
 const cartDispatch = require("./cartDispatch");
-const { vehicleName } = require("../helpers/vehicle-delivery");
 
 async function listAvailableDeliveries(models, driver, maxOrders) {
   const orders = await models.Order.find({
@@ -13,7 +12,7 @@ async function listAvailableDeliveries(models, driver, maxOrders) {
       { $or: [
         { dispatchStatus: { $in: ["pending_assignment", "assignment_failed"] } },
         { dispatchStatus: "scheduled", deliveryWindowStart: { $lte: new Date() } },
-        ...(driver.isCompanyOwned ? [{ dispatchStatus: "scheduled", storeDispatchBatch: { $ne: null } }] : []),
+        { dispatchStatus: "scheduled", storeDispatchBatch: { $ne: null } },
       ] },
     ],
   }).populate("store", "name address location")
@@ -36,13 +35,12 @@ async function listAvailableDeliveries(models, driver, maxOrders) {
       const { group, orders: siblings } = await cartDispatch.loadCart(models, order);
       if (!cartDispatch.ready(siblings, { includeScheduled }) || group.routeDriver) continue;
       const live = cartDispatch.liveOrders(siblings);
-      const upcoming = !cartDispatch.ready(siblings);
-      if (upcoming && vehicleName(driver) !== group.cartRoute.vehicle) continue;
+      const upcoming = live.some((entry) => new Date(entry.deliveryWindowStart) > new Date());
       if (live.some((entry) => driverRejected(entry, driver))) continue;
       if (group.store && driver.isCompanyOwned &&
           !live.every((entry) => String(entry.companyOfferDriver || "") === String(driver._id))) continue;
       const route = cartDispatch.assignmentRoute(group, live);
-      const canClaim = !upcoming && driverAvailable(driver) && pickupEligible(driver, route.stops[0]?.location) &&
+      const canClaim = driverAvailable(driver) && pickupEligible(driver, route.stops[0]?.location) &&
         await cartDispatch.driverCapacity(models, driver, group, maxOrders);
       if (!canClaim && !driver.isCompanyOwned) continue;
       results.push({
@@ -59,7 +57,10 @@ async function listAvailableDeliveries(models, driver, maxOrders) {
         items: group.deliveries.flatMap((delivery) => delivery.lines.map((line) => ({
           name: line.name || "Item", quantity: line.quantity,
         }))),
-        canClaim, canRespond: canRespond && !upcoming, upcoming, sharedAssignment: true,
+        ...(group.store ? { packageDeliveryWindows: live.map((entry) => ({
+          orderId: String(entry._id), ...getDeliverySchedule(entry),
+        })) } : {}),
+        canClaim, canRespond, upcoming, sharedAssignment: true,
       });
     } else {
       const canClaim = legacyEligible(driver, order, activeCount, maxOrders);

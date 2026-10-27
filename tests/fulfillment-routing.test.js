@@ -1007,7 +1007,7 @@ test("manual company claims cannot bypass the nearest eligible fallback driver",
   assert.equal(fixture.order.driver, null);
 });
 
-test("retry scan respects databases and dispatches only pending or due scheduled orders", async () => {
+test("retry scan respects databases and includes released scheduled batches before their windows", async () => {
   const calls = [];
   const now = new Date();
   await dispatchPendingOrders({}, {
@@ -1020,6 +1020,7 @@ test("retry scan respects databases and dispatches only pending or due scheduled
       assert.equal(filter.driver, null);
       assert.equal(filter.deliveryStatus, "Pending");
       assert.deepEqual(filter.$or[1], { dispatchStatus: "scheduled", deliveryWindowStart: { $lte: now } });
+      assert.deepEqual(filter.$or[2], { dispatchStatus: "scheduled", storeDispatchBatch: { $ne: null } });
       assert.ok(filter.status.$nin.includes("Cancelled"));
       return query([{ _id: `${dbName}-order` }]);
     } } }),

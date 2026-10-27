@@ -21,7 +21,7 @@ function orderReady(order, now = new Date(), { includeScheduled = false } = {}) 
     (!order.inventoryManaged || order.fulfillmentStatus === "accepted") &&
     (["pending_assignment", "assignment_failed"].includes(order.dispatchStatus) ||
       order.dispatchStatus === "scheduled" && (new Date(order.deliveryWindowStart) <= now ||
-        includeScheduled && new Date(order.deliveryWindowStart) > now));
+        (includeScheduled || order.storeDispatchBatch) && new Date(order.deliveryWindowStart) > now));
 }
 
 function driverRejected(order, driver) {

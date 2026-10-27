@@ -115,11 +115,18 @@ partners retain manual claim access, and the first transactional claim wins.
 Prepared and dispatched scheduled store batches also appear as upcoming offers
 for their designated compatible company driver, including while offline.
 Listing them preserves `dispatchStatus: scheduled` and the saved delivery windows.
-`upcoming: true`, `canClaim: false` and `canRespond: false` identify these
-view-only offers. Claiming and responses open only after every live package's
-window starts; the server enforces this even for direct API calls. Partners and
-legacy orders retain their existing due-only visibility. Vehicle compatibility
-is not relaxed for upcoming batches.
+`upcoming: true` identifies a future delivery window, not a claim restriction.
+Drivers may claim a released store batch immediately, before its scheduled
+window; company drivers may also reject/reroute it before pickup. Availability,
+approval, cargo capacity and assignment permissions still apply. Legacy orders
+retain their due-only claiming rules. `packageDeliveryWindows` exposes each live
+package's order ID and saved schedule, and store cards show their delivery window.
+Early claiming never changes saved delivery dates or fees.
+Measured store batches may use any enabled vehicle that fits the combined load
+in the driver's actual configured vehicle, regardless of the billed vehicle.
+Unknown-size single packages still require the explicitly selected vehicle;
+fit for a different vehicle cannot be established without measurements.
+Historical cart-wide assignments retain exact vehicle matching.
 Partner responses expose pickup stops and approximate drop zones only,
 preserving exact recipient address/phone privacy before pickup.
 
