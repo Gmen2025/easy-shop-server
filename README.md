@@ -112,6 +112,14 @@ Driver-list recovery also persists a company offer for already queued batches,
 even when a nearby partner is marked available but has not accepted. This
 socket-independent recovery does not wait on partner availability; nearby eligible
 partners retain manual claim access, and the first transactional claim wins.
+Prepared and dispatched scheduled store batches also appear as upcoming offers
+for their designated compatible company driver, including while offline.
+Listing them preserves `dispatchStatus: scheduled` and the saved delivery windows.
+`upcoming: true`, `canClaim: false` and `canRespond: false` identify these
+view-only offers. Claiming and responses open only after every live package's
+window starts; the server enforces this even for direct API calls. Partners and
+legacy orders retain their existing due-only visibility. Vehicle compatibility
+is not relaxed for upcoming batches.
 Partner responses expose pickup stops and approximate drop zones only,
 preserving exact recipient address/phone privacy before pickup.
 

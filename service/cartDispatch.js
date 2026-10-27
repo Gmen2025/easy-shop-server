@@ -38,13 +38,14 @@ async function loadCart(models, order, session) {
   }
   return { group, orders };
 }
-function ready(orders) {
+function ready(orders, { includeScheduled = false } = {}) {
   const live = liveOrders(orders);
   return live.length > 0 && live.every((entry) => !entry.driver && !entry.adminReviewRequired && !entry.fallbackStore &&
     (!entry.storeRouteVersion || entry.storeReadyAt && entry.storeDispatchBatch) &&
     entry.fulfillmentStatus === "accepted" && entry.deliveryStatus === "Pending" &&
     (["pending_assignment", "assignment_failed"].includes(entry.dispatchStatus) ||
-      (entry.dispatchStatus === "scheduled" && new Date(entry.deliveryWindowStart) <= new Date())));
+      (entry.dispatchStatus === "scheduled" && (new Date(entry.deliveryWindowStart) <= new Date() ||
+        includeScheduled && new Date(entry.deliveryWindowStart) > new Date()))));
 }
 
 async function driverCapacity(models, driver, incoming, maxCarts, session) {
@@ -62,16 +63,16 @@ async function driverCapacity(models, driver, incoming, maxCarts, session) {
   return suitableVehicles(cargo, config).includes(incoming.cartRoute.vehicle);
 }
 
-async function offer(models, group, orders, driver) {
+async function offer(models, group, orders, driver, { includeScheduled = false } = {}) {
   await models.Order.db.transaction(async (session) => {
     const current = await loadCart(models, orders[0], session);
-    if (!ready(current.orders) || current.group.routeDriver) throw conflict("This cart changed. Refresh assignments.");
+    if (!ready(current.orders, { includeScheduled }) || current.group.routeDriver) throw conflict("This cart changed. Refresh assignments.");
     if (current.orders.some((entry) => entry.companyOfferDriver && id(entry.companyOfferDriver) !== id(driver))) {
       throw conflict("This cart is already offered to another driver.");
     }
     await groupModel(models, group).updateOne({ _id: group._id }, { $inc: { fulfillmentRevision: 1 } }, { session });
     await models.Order.updateMany({ _id: { $in: liveOrders(current.orders).map((entry) => entry._id) } },
-      { $set: { companyOfferDriver: driver._id, dispatchStatus: "pending_assignment" } }, { session });
+      { $set: { companyOfferDriver: driver._id } }, { session });
   });
   sendPushToUser({ User: models.User, userId: driver.user, title: group.store ? "Store delivery batch available" : "Complete cart delivery available",
     body: group.store ? "Accept this store's ready packages together for one pickup." :
@@ -217,16 +218,16 @@ async function respond(models, order, driver, action = "reject") {
   if (order.storeDispatchBatch) await ensureCompanyOffer(models, order, require("./dispatchService").MAX_ACTIVE_ORDERS_PER_DRIVER);
 }
 
-async function ensureCompanyOffer(models, order, maxCarts) {
+async function ensureCompanyOffer(models, order, maxCarts, { includeScheduled = false } = {}) {
   const { group, orders } = await loadCart(models, order);
-  if (!ready(orders) || group.routeDriver || orders.some((entry) => entry.companyOfferDriver)) return;
+  if (!ready(orders, { includeScheduled }) || group.routeDriver || orders.some((entry) => entry.companyOfferDriver)) return;
   const pickup = assignmentRoute(group, liveOrders(orders)).stops[0]?.location;
   // List recovery cannot contact partners or await their acceptance.
   const candidates = await models.Driver.find({ isCompanyOwned: true, approvalStatus: "approved", isSuspended: { $ne: true } });
   const eligible = rankDrivers(candidates, pickup, liveOrders(orders));
   for (const driver of eligible) {
     if (!await driverCapacity(models, driver, group, maxCarts)) continue;
-    return offer(models, group, orders, driver);
+    return offer(models, group, orders, driver, { includeScheduled });
   }
 }
 

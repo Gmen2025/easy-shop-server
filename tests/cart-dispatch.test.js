@@ -264,6 +264,83 @@ test("company-list recovery does not strand a store batch behind an unassigned n
   assert.equal(f.group.deliveryFee, 10);
 });
 
+test("scheduled store batches appear as upcoming to the compatible company driver without opening claims early", async () => {
+  const { listAvailableDeliveries } = require("../service/availableDeliveries");
+  const f = storeBatch(fixture());
+  const start = new Date(Date.now() + 86400000);
+  f.orders.forEach((order) => {
+    order.dispatchStatus = "scheduled";
+    order.deliveryWindowStart = start;
+  });
+  const rows = await listAvailableDeliveries(f.models, f.drivers[0], 3);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].upcoming, true);
+  assert.equal(rows[0].canClaim, false);
+  assert.equal(rows[0].canRespond, false);
+  assert.equal(new Date(rows[0].deliveryWindowStart).getTime(), start.getTime());
+  assert.ok(f.orders.every((order) => order.companyOfferDriver === "d1" &&
+    order.dispatchStatus === "scheduled" && !order.driver));
+  assert.equal((await dispatch(f.models, f.orders[0], f.io, f.options)).success, false);
+  assert.equal((await dispatch(f.models, f.orders[0], f.io, { ...f.options, sharedDriverId: "d1" })).success, false);
+  assert.equal((await dispatch(f.models, f.orders[0], f.io, { ...f.options, companyDriverId: "d1" })).success, false);
+  await assert.rejects(respond(f.models, f.orders[0], f.drivers[0]), { status: 409 });
+  const partner = { ...f.drivers[1], isCompanyOwned: false };
+  assert.deepEqual(await listAvailableDeliveries(f.models, partner, 3), []);
+  f.orders[0].deliveryWindowStart = new Date(Date.now() - 1000);
+  assert.equal((await listAvailableDeliveries(f.models, f.drivers[0], 3))[0].canClaim, false,
+    "Every live package must reach its window");
+  f.orders[1].deliveryWindowStart = new Date(Date.now() - 1000);
+  const due = await listAvailableDeliveries(f.models, f.drivers[0], 3);
+  assert.equal(due[0].upcoming, false);
+  assert.equal(due[0].canClaim, true);
+  assert.equal(due[0].canRespond, true);
+  assert.equal((await dispatch(f.models, f.orders[0], f.io, { ...f.options, sharedDriverId: "d1" })).success, true);
+});
+
+test("upcoming visibility preserves vehicle, preparation, refusal and cancellation safeguards", async () => {
+  const { listAvailableDeliveries } = require("../service/availableDeliveries");
+  for (const change of [
+    (f) => { f.drivers.forEach((driver) => { driver.vehicleType = "motorcycle"; }); },
+    (f) => { f.orders[0].storeReadyAt = null; },
+    (f) => { f.orders.forEach((order) => { order.storeDispatchBatch = null; }); },
+    (f) => { f.orders.forEach((order) => { order.fulfillmentStatus = "cancelled"; order.status = "4"; }); },
+    (f) => { f.orders[0].companyDriverResponses.push({ driver: "d1", status: "rejected" }); },
+    (f) => { f.orders[0].deliveryWindowStart = new Date("invalid"); },
+  ]) {
+    const f = storeBatch(fixture());
+    f.orders.forEach((order) => {
+      order.dispatchStatus = "scheduled";
+      order.deliveryWindowStart = new Date(Date.now() + 86400000);
+    });
+    change(f);
+    assert.deepEqual(await listAvailableDeliveries(f.models, f.drivers[0], 3), []);
+    assert.ok(f.orders.every((order) => !order.driver));
+  }
+});
+
+test("upcoming company offers persist offline while partners and historical scheduled carts stay due-only", async () => {
+  const { listAvailableDeliveries } = require("../service/availableDeliveries");
+  const f = storeBatch(fixture());
+  f.drivers.forEach((driver) => { driver.isAvailable = false; });
+  f.orders.forEach((order) => {
+    order.dispatchStatus = "scheduled";
+    order.deliveryWindowStart = new Date(Date.now() + 86400000);
+  });
+  const rows = await listAvailableDeliveries(f.models, f.drivers[0], 3);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].upcoming, true);
+  assert.equal(rows[0].canClaim, false);
+  assert.ok(f.orders.every((order) => order.companyOfferDriver === "d1" && order.dispatchStatus === "scheduled"));
+  assert.deepEqual(await listAvailableDeliveries(f.models, f.drivers[1], 3), []);
+  const legacy = fixture();
+  legacy.orders.forEach((order) => {
+    order.dispatchStatus = "scheduled";
+    order.deliveryWindowStart = new Date(Date.now() + 86400000);
+  });
+  assert.deepEqual(await listAvailableDeliveries(legacy.models, legacy.drivers[0], 3), []);
+  assert.ok(legacy.orders.every((order) => !order.companyOfferDriver && !order.driver));
+});
+
 test("company recovery chooses an available compatible driver, or keeps an offline offer, despite nearby partners", async () => {
   const { listAvailableDeliveries } = require("../service/availableDeliveries");
   for (const offline of [false, true]) {

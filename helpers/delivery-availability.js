@@ -14,13 +14,14 @@ function pickupEligible(driver, location) {
     distanceMeters(getCoordinates(driver.location), pickup) <= DRIVER_RADIUS_METERS));
 }
 
-function orderReady(order, now = new Date()) {
+function orderReady(order, now = new Date(), { includeScheduled = false } = {}) {
   return !order.driver && !order.adminReviewRequired && !order.fallbackStore &&
     (!order.storeRouteVersion || Boolean(order.storeReadyAt && order.storeDispatchBatch)) &&
     order.deliveryStatus === "Pending" && !["3", "4", "Delivered", "Cancelled"].includes(String(order.status)) &&
     (!order.inventoryManaged || order.fulfillmentStatus === "accepted") &&
     (["pending_assignment", "assignment_failed"].includes(order.dispatchStatus) ||
-      order.dispatchStatus === "scheduled" && new Date(order.deliveryWindowStart) <= now);
+      order.dispatchStatus === "scheduled" && (new Date(order.deliveryWindowStart) <= now ||
+        includeScheduled && new Date(order.deliveryWindowStart) > now));
 }
 
 function driverRejected(order, driver) {
