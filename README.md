@@ -2,6 +2,42 @@
 
 A comprehensive REST API for an e-commerce platform built with Node.js, Express, and MongoDB. Features include JWT authentication, payment gateway integrations (Stripe & Telebirr), order management, and email notifications.
 
+## Shared website notification inbox
+
+Business events sent through `helpers/push-notify.js` and the existing notification
+send/admin endpoints persist `Notification` documents on the recipient User
+model's database connection, even when the account has no Expo tokens.
+Token-only driver assignment paths also save entries for the driver's linked
+user. Existing mobile Expo payloads and push-token registration remain supported.
+Admin broadcasts now reach every account's inbox as well as registered devices.
+
+Authenticated endpoints under `/api/v1/notifications`:
+
+- `GET /inbox`: `{ notifications, unreadCount, nextCursor }`; newest first, 20
+  entries per page. Each entry has `id`, `title`, `body`, `data`, `isRead` and
+  `createdAt`. Pass `?before=<nextCursor>` for older entries. `unreadCount` covers
+  the entire inbox, not just the current page.
+- `PUT /inbox/:notificationId/read`: idempotently mark an owned entry read.
+- `PUT /inbox/read-all`: mark the signed-in user's existing unread entries read.
+
+Inbox endpoints use the JWT `userId` and selected database; even admins cannot
+read or mark another user's inbox through these endpoints. Responses are not
+cacheable. Existing send endpoints retain their push result fields (`sent`,
+`tickets`, `receiptIds`); `sent` counts Expo messages, not stored inbox entries,
+so successful inbox delivery with no registered mobile devices returns `sent: 0`.
+Explicit send endpoint persistence failures are forwarded to the API error
+handler. Business-event sends remain best-effort: failures are logged and
+returned with an `error` field so a saved order/assignment is not rolled back by
+a notification failure. Expo delivery is attempted independently of inbox storage.
+
+Deploy this backend before the website. Collections and indexes use the existing
+per-database Mongoose model setup; no backfill or new environment variables are
+required. History starts after deployment. The mobile device-local inbox/read
+state is unchanged and is not synchronized with the website. Browser push when
+the site is closed is not included.
+
+Validate with `node --test tests/notifications.test.js`.
+
 ## Per-store delivery routes and store dispatch
 
 New product quotes on website and mobile use `storeRoutes` in USA and Ethiopia.

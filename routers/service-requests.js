@@ -331,7 +331,7 @@ router.put('/:id', async (req, res) => {
 
   if (payload.assignedTechnician !== undefined && updated.assignedTechnician) {
     const Driver = req.dbModels?.Driver;
-    const driver = Driver ? await Driver.findById(updated.assignedTechnician).select('name pushTokens') : null;
+    const driver = Driver ? await Driver.findById(updated.assignedTechnician).select('name pushTokens user') : null;
     const assignmentPayload = {
       type: 'service_request_assigned',
       request: updated,
@@ -341,6 +341,8 @@ router.put('/:id', async (req, res) => {
     const io = req.app.get('io');
     io?.to(`driver:${updated.assignedTechnician}`).emit('service_request_assigned', assignmentPayload);
     await sendPushToTokens({
+      User: req.dbModels.User,
+      userId: driver?.user,
       tokens: driver?.pushTokens || [],
       title: 'New service job assigned',
       body: `${updated.machineType || 'Machine service'} needs your attention.`,

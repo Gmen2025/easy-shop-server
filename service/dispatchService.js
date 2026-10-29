@@ -598,6 +598,8 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
     });
 
     const assignmentNotification = sendPushToTokens({
+      User,
+      userId: lockDriver.isCompanyOwned || options.sharedDriverId ? undefined : lockDriver.user,
       tokens: Array.isArray(lockDriver.pushTokens) ? lockDriver.pushTokens : [],
       title: queueSequence > 1 ? "New delivery added to your route" : "New delivery assigned",
       body: `Order #${updatedOrder._id} is ready for pickup.`,

@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { Expo } = require('expo-server-sdk');
+const mongoose = require('mongoose');
+const { saveNotifications } = require('../helpers/notification-inbox');
 
 const expo = new Expo();
 
@@ -18,6 +20,17 @@ const requireAdmin = (req, res, next) => {
   const auth = getAuthUser(req);
   if (!auth?.isAdmin) {
     return res.status(403).json({ message: 'Admin access required' });
+  }
+  next();
+};
+
+const validateNotification = (req, res, next) => {
+  const { title, body, data } = req.body || {};
+  if (typeof title !== 'string' || !title.trim() || typeof body !== 'string' || !body.trim()) {
+    return res.status(400).json({ message: 'A non-empty title and body are required' });
+  }
+  if (data !== undefined && (data === null || typeof data !== 'object' || Array.isArray(data))) {
+    return res.status(400).json({ message: 'Notification data must be an object' });
   }
   next();
 };
@@ -88,6 +101,71 @@ const getDriverTokens = (driver) =>
   [...new Set(Array.isArray(driver?.pushTokens) ? driver.pushTokens : [])].filter((token) =>
     Expo.isExpoPushToken(token)
   );
+
+router.use('/inbox', (req, res, next) => {
+  if (!mongoose.isObjectIdOrHexString(req.auth?.userId)) {
+    return res.status(401).json({ message: 'Authentication required' });
+  }
+  if (!req.dbModels?.Notification) {
+    return res.status(500).json({ message: 'Notification model is not available' });
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  next();
+});
+
+router.get('/inbox', async (req, res, next) => {
+  try {
+    const { Notification } = req.dbModels;
+    const { before } = req.query;
+    if (before !== undefined && !mongoose.isObjectIdOrHexString(before)) {
+      return res.status(400).json({ message: 'Invalid notification cursor' });
+    }
+    const user = req.auth.userId;
+    const filter = { user, ...(before ? { _id: { $lt: before } } : {}) };
+    const [items, unreadCount] = await Promise.all([
+      Notification.find(filter).sort({ _id: -1 }).limit(21).lean(),
+      Notification.countDocuments({ user, isRead: false }),
+    ]);
+    const hasMore = items.length > 20;
+    const notifications = items.slice(0, 20).map(({ _id, title, body, data, isRead, createdAt }) => ({
+      id: String(_id), title, body, data, isRead, createdAt,
+    }));
+    return res.json({
+      notifications,
+      unreadCount,
+      nextCursor: hasMore ? notifications.at(-1).id : null,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/inbox/read-all', async (req, res, next) => {
+  try {
+    await req.dbModels.Notification.updateMany(
+      { user: req.auth.userId, isRead: false }, { $set: { isRead: true } }
+    );
+    return res.json({ message: 'Notifications marked as read' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.put('/inbox/:notificationId/read', async (req, res, next) => {
+  try {
+    if (!mongoose.isObjectIdOrHexString(req.params.notificationId)) {
+      return res.status(400).json({ message: 'Invalid notification ID' });
+    }
+    const item = await req.dbModels.Notification.findOneAndUpdate(
+      { _id: req.params.notificationId, user: req.auth.userId },
+      { $set: { isRead: true } }, { new: true }
+    );
+    if (!item) return res.status(404).json({ message: 'Notification not found' });
+    return res.json({ id: String(item._id), isRead: item.isRead });
+  } catch (error) {
+    next(error);
+  }
+});
 
 router.put('/drivers/:driverId/push-token', async (req, res) => {
   const Driver = getDriverModel(req);
@@ -350,7 +428,7 @@ router.delete('/:userId/push-token', async (req, res) => {
  *       404:
  *         description: User or tokens not found
  */
-router.post('/send', async (req, res) => {
+router.post('/send', validateNotification, async (req, res, next) => {
   const User = getUserModel(req);
   const { userId, title, body, data } = req.body || {};
 
@@ -358,35 +436,28 @@ router.post('/send', async (req, res) => {
     return res.status(500).json({ message: 'User model is not available' });
   }
 
-  if (!userId || !title || !body) {
-    return res.status(400).json({ message: 'userId, title, and body are required' });
+  if (!mongoose.isObjectIdOrHexString(userId)) {
+    return res.status(400).json({ message: 'A valid userId is required' });
   }
 
   if (!canManageUserTokens(req, userId)) {
     return res.status(403).json({ message: 'Forbidden' });
   }
 
-  const user = await User.findById(userId).select('pushTokens expoPushTokens');
-  if (!user) {
-    return res.status(404).json({ message: 'User not found' });
-  }
+  try {
+    const user = await User.findById(userId).select('pushTokens expoPushTokens');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
 
-  const tokens = getUserTokens(user);
-  if (tokens.length === 0) {
-    return res.status(404).json({ message: 'No push tokens registered for this user' });
+    const [result] = await Promise.all([
+      sendToTokens({ tokens: getUserTokens(user), title, body, data }),
+      saveNotifications({ User, userIds: [user._id], title, body, data }),
+    ]);
+    return res.json({ message: 'Push request processed', ...result });
+  } catch (error) {
+    return next(error);
   }
-
-  const result = await sendToTokens({ tokens, title, body, data });
-  if (result.sent === 0) {
-    return res.status(400).json({ message: 'No valid Expo tokens to send' });
-  }
-
-  return res.json({
-    message: 'Push request processed',
-    sent: result.sent,
-    tickets: result.tickets,
-    receiptIds: result.receiptIds,
-  });
 });
 
 /**
@@ -424,7 +495,7 @@ router.post('/send', async (req, res) => {
  *       404:
  *         description: User not found
  */
-router.post('/admin/send-user', requireAdmin, async (req, res) => {
+router.post('/admin/send-user', requireAdmin, validateNotification, async (req, res, next) => {
   const User = getUserModel(req);
   const { userId, title, body, data } = req.body || {};
 
@@ -432,23 +503,25 @@ router.post('/admin/send-user', requireAdmin, async (req, res) => {
     return res.status(500).json({ message: 'User model is not available' });
   }
 
-  if (!userId || !title || !body) {
-    return res.status(400).json({ message: 'userId, title, and body are required' });
+  if (!mongoose.isObjectIdOrHexString(userId)) {
+    return res.status(400).json({ message: 'A valid userId is required' });
   }
 
-  const user = await User.findById(userId).select('pushTokens expoPushTokens');
-  if (!user) {
-    return res.status(404).json({ message: 'User not found' });
+  try {
+    const user = await User.findById(userId).select('pushTokens expoPushTokens');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const [result] = await Promise.all([
+      sendToTokens({ tokens: getUserTokens(user), title, body, data: data || {} }),
+      saveNotifications({ User, userIds: [user._id], title, body, data }),
+    ]);
+
+    return res.json({ message: 'Admin notification processed', ...result });
+  } catch (error) {
+    return next(error);
   }
-
-  const result = await sendToTokens({
-    tokens: getUserTokens(user),
-    title,
-    body,
-    data: data || {},
-  });
-
-  return res.json({ message: 'Admin notification processed', ...result });
 });
 
 /**
@@ -485,7 +558,7 @@ router.post('/admin/send-user', requireAdmin, async (req, res) => {
  *       403:
  *         description: Admin access required
  */
-router.post('/admin/send-many', requireAdmin, async (req, res) => {
+router.post('/admin/send-many', requireAdmin, validateNotification, async (req, res, next) => {
   const User = getUserModel(req);
   const { userIds = [], title, body, data } = req.body || {};
 
@@ -493,21 +566,23 @@ router.post('/admin/send-many', requireAdmin, async (req, res) => {
     return res.status(500).json({ message: 'User model is not available' });
   }
 
-  if (!Array.isArray(userIds) || userIds.length === 0 || !title || !body) {
-    return res.status(400).json({ message: 'userIds[], title, and body are required' });
+  if (!Array.isArray(userIds) || userIds.length === 0 || !userIds.every((id) => mongoose.isObjectIdOrHexString(id))) {
+    return res.status(400).json({ message: 'userIds must be a non-empty array of valid user IDs' });
   }
 
-  const users = await User.find({ _id: { $in: userIds } }).select('pushTokens expoPushTokens');
-  const tokens = users.flatMap((user) => getUserTokens(user));
+  try {
+    const users = await User.find({ _id: { $in: userIds } }).select('pushTokens expoPushTokens');
+    const tokens = users.flatMap((user) => getUserTokens(user));
 
-  const result = await sendToTokens({
-    tokens,
-    title,
-    body,
-    data: data || {},
-  });
+    const [result] = await Promise.all([
+      sendToTokens({ tokens, title, body, data: data || {} }),
+      saveNotifications({ User, userIds: users.map((user) => user._id), title, body, data }),
+    ]);
 
-  return res.json({ message: 'Bulk admin notification processed', ...result });
+    return res.json({ message: 'Bulk admin notification processed', ...result });
+  } catch (error) {
+    return next(error);
+  }
 });
 
 /**
@@ -540,7 +615,7 @@ router.post('/admin/send-many', requireAdmin, async (req, res) => {
  *       403:
  *         description: Admin access required
  */
-router.post('/admin/broadcast', requireAdmin, async (req, res) => {
+router.post('/admin/broadcast', requireAdmin, validateNotification, async (req, res, next) => {
   const User = getUserModel(req);
   const { title, body, data } = req.body || {};
 
@@ -552,24 +627,26 @@ router.post('/admin/broadcast', requireAdmin, async (req, res) => {
     return res.status(400).json({ message: 'title and body are required' });
   }
 
-  const users = await User.find({}).select('pushTokens expoPushTokens');
-  const tokens = users.flatMap((user) => getUserTokens(user));
+  try {
+    const users = await User.find({}).select('pushTokens expoPushTokens');
+    const tokens = users.flatMap((user) => getUserTokens(user));
 
-  console.log('[PushNotification] Broadcast prepared', {
-    userCount: users.length,
-    tokenCount: tokens.length,
-    tokens,
-    title,
-  });
+    console.log('[PushNotification] Broadcast prepared', {
+      userCount: users.length,
+      tokenCount: tokens.length,
+      tokens,
+      title,
+    });
 
-  const result = await sendToTokens({
-    tokens,
-    title,
-    body,
-    data: data || {},
-  });
+    const [result] = await Promise.all([
+      sendToTokens({ tokens, title, body, data: data || {} }),
+      saveNotifications({ User, userIds: users.map((user) => user._id), title, body, data }),
+    ]);
 
-  return res.json({ message: 'Broadcast notification processed', ...result });
+    return res.json({ message: 'Broadcast notification processed', ...result });
+  } catch (error) {
+    return next(error);
+  }
 });
 
 /**
