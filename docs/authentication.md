@@ -122,6 +122,46 @@ every operation independently enforces expiration.
 5. `POST /users/auth/social/exchange` with `{code, codeVerifier}` returns the
    ordinary full user login response or the 2FA challenge below.
 
+### Google sign-in after email/password registration
+
+If the selected Google email was previously registered with email/password in
+the selected store, an unlinked Google identity returns `account_conflict` after
+consent. This is intentional, not proof of incorrect Google credentials. Use
+the account's original sign-in method; resetting provider credentials or
+enabling the Google switch does not link accounts. The mobile callback handler
+displays a specific explanation for this code. Older mobile builds display
+"Social sign-in was not completed" for all callback errors; update the client
+to see the actual category. Unknown `social_auth_failed` errors still require
+separate diagnosis and should not be assumed to be account conflicts.
+
+Do not delete customer accounts or bypass this check to enable Google sign-in.
+To link Google, sign in using email/password, open **Profile > Security Settings >
+Link Google account**, enter the current password and (if enrolled) a fresh
+authenticator/email/backup code, then authorize the Google account with the same
+email. Google must be enabled in the admin provider settings. Apple and Facebook
+linking are not currently provided.
+
+* Protected `POST /users/auth/social/link/start` accepts `{provider:"google",
+  password, redirectUri, codeChallenge}` plus the existing factor-proof fields
+  `code`, `useBackupCode`, `challengeId` when 2FA is enrolled. Email codes come
+  from `/users/auth/2fa/send-code`. Returns `{authorizationUrl}` to open in the
+  system browser; never put the password or access JWT in a browser URL.
+* The existing Google callback returns a separate one-use, 60-second link
+  handoff. Protected `POST /users/auth/social/link/exchange` accepts
+  `{code, codeVerifier}` in the original store and signed-in session and returns
+  `{linked:true,provider:"google"}`. It creates only an AuthIdentity after both
+  account and Google ownership are verified; no new user, login token, or order
+  migration is produced. Link handoffs cannot be exchanged as login handoffs.
+* The state binds the user, store, PKCE and password/security snapshot. A
+  changed password or 2FA configuration invalidates pending linking. Google
+  emails that differ return `link_email_mismatch`; another account's existing
+  Google identity cannot be reassigned. Provider switches are checked throughout.
+  The existing unique `(provider,subject)` AuthIdentity index remains required.
+* Cancellation does not link the account. If the final request is interrupted,
+  refresh Security Settings to inspect the linked providers before retrying.
+  Deploy the backend before shipping the updated app; no new credentials,
+  callback URL or database index is required.
+
 Provider-created customer accounts can omit phone/password. Normal password
 registration's required fields are unchanged. Existing driver/store-owner
 password logins retain their checks, approval rules, JWT claims and responses.

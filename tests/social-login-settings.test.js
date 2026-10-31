@@ -58,6 +58,16 @@ async function serve(t) {
   return `http://127.0.0.1:${server.address().port}/api/v1`;
 }
 
+test("Google linking endpoints require bearer authentication and are never public JWT exceptions", async (t) => {
+  const base = await serve(t);
+  for (const path of ["social/link/start", "social/link/exchange"]) {
+    const result = await fetch(`${base}/users/auth/${path}`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    assert.equal(result.status, 401);
+  }
+});
+
 test("global switch defaults OFF; public read is uncached; writes are admin-only and strictly boolean", async (t) => {
   const state = fixture(t);
   const base = await serve(t);

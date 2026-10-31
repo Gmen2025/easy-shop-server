@@ -279,6 +279,141 @@ test("provider verified email never automatically links an existing account", as
     (error) => error.code === "account_conflict" && error.status === 409);
 });
 
+function linkingFixture(t, security) {
+  const f = fixture(security);
+  f.user.passwordHash = require("bcryptjs").hashSync("current-password", 4);
+  const identities = [];
+  f.req.dbModels.AuthIdentity = {
+    findOne: async (filter) => identities.find((row) => matches(row, filter)) || null,
+    create: async (row) => {
+      if (identities.some((identity) => identity.provider === row.provider && identity.subject === row.subject)) {
+        throw Object.assign(new Error("duplicate"), { code: 11000 });
+      }
+      identities.push(clone(row));
+      return row;
+    },
+  };
+  let enabled = true;
+  t.mock.method(require("../helpers/db-manager"), "getModelsForDb", () => ({
+    ...f.req.dbModels,
+    SiteSetting: { findOne: () => ({ select: () => ({ lean: async () => ({
+      socialLoginProviders: { google: enabled },
+    }) }) }) },
+  }));
+  for (const [key, value] of Object.entries({
+    GOOGLE_CLIENT_ID: "test-client", GOOGLE_CLIENT_SECRET: "test-only",
+    OAUTH_CALLBACK_BASE_URL: "https://api.example/api/v1",
+  })) {
+    const previous = process.env[key];
+    process.env[key] = value;
+    t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+  }
+  return { ...f, identities, disable: () => { enabled = false; } };
+}
+
+test("Google linking starts only with current password and enrolled factor; state binds account and PKCE", async (t) => {
+  const { req, user, identities } = linkingFixture(t, enrolled().security);
+  const verifier = auth.opaque();
+  req.body = { provider: "google", password: "wrong", redirectUri: "addugeneteshop://auth",
+    codeChallenge: social.pkce(verifier) };
+  await assert.rejects(social.startLink(req, user), { code: "invalid_credentials" });
+  req.body.password = "current-password";
+  await assert.rejects(social.startLink(req, user), { code: "invalid_code" });
+  req.body.code = "link-backup";
+  req.body.useBackupCode = true;
+  user.authSecurity.backupHashes = [auth.hash("link-backup")];
+  const url = new URL(await social.startLink(req, user));
+  assert.equal(url.origin, "https://accounts.google.com");
+  assert.equal(url.searchParams.get("redirect_uri"), "https://api.example/api/v1/users/auth/social/callback/google");
+  assert.equal(url.searchParams.has("password"), false);
+  const record = await auth.attempt(req, url.searchParams.get("state"), "oauth-state");
+  assert.equal(record.payload.link.userId, user.id);
+  assert.equal(record.payload.link.proof, social.linkProof(user));
+  assert.equal(record.payload.dbName, "test");
+  assert.equal(record.payload.codeChallenge, social.pkce(verifier));
+  assert.equal(user.authSecurity.backupHashes.length, 0);
+  assert.equal(identities.length, 0, "Start never attaches an identity");
+  const response = { redirect: (status, location) => ({ status, location }) };
+  const cancelled = await social.callback({
+    ...req, method: "GET", params: { provider: "google" },
+    query: { state: url.searchParams.get("state"), error: "access_denied" },
+  }, response);
+  assert.equal(cancelled.status, 303);
+  assert.equal(identities.length, 0, "Cancellation never attaches an identity");
+});
+
+test("Google linking handoff attaches only to the authenticated owner, is PKCE-bound and one-use", async (t) => {
+  const { req, user, identities } = linkingFixture(t);
+  const verifier = auth.opaque();
+  const payload = { provider: "google", codeChallenge: social.pkce(verifier),
+    link: { userId: user.id, proof: social.linkProof(user) },
+    identity: { subject: "google-subject", email: user.email } };
+  const handoff = await auth.createRecord(req, "oauth-link-handoff", user._id, payload, 60000);
+  req.body = { code: handoff.id, codeVerifier: "wrong" };
+  await assert.rejects(social.exchangeLink(req, user), /proof/);
+  req.body.codeVerifier = verifier;
+  await assert.rejects(social.exchange(req), /Invalid/, "Link handoffs cannot issue login tokens");
+  await assert.rejects(social.exchangeLink(req, { ...user, _id: "other", id: "other" }), /Invalid/);
+  const before = clone(user);
+  const linked = await social.exchangeLink(req, user);
+  assert.deepEqual(linked, { linked: true, provider: "google" });
+  assert.deepEqual(identities, [{ provider: "google", subject: "google-subject", userId: user.id }]);
+  assert.deepEqual(user, before, "Password, profile, roles and 2FA are not changed");
+  await assert.rejects(social.exchangeLink(req, user), /Invalid/);
+  assert.equal((await social.resolveIdentity(req, "google", payload.identity)).id, user.id,
+    "Later Google sign-in resolves the existing account");
+});
+
+test("Google linking rejects email mismatch, changed security, disabled providers and other identity owners", async (t) => {
+  const { req, user, identities, disable } = linkingFixture(t);
+  const verifier = auth.opaque();
+  const handoff = async (identity = { subject: "google-subject", email: user.email }) => {
+    const record = await auth.createRecord(req, "oauth-link-handoff", user.id, {
+      provider: "google", codeChallenge: social.pkce(verifier),
+      link: { userId: user.id, proof: social.linkProof(user) }, identity,
+    }, 60000);
+    req.body = { code: record.id, codeVerifier: verifier };
+  };
+  await handoff({ subject: "google-subject", email: "different@example.com" });
+  await assert.rejects(social.exchangeLink(req, user), { code: "link_email_mismatch" });
+  await handoff();
+  user.passwordHash = "changed";
+  await assert.rejects(social.exchangeLink(req, user), { code: "link_expired" });
+  await handoff();
+  user.authSecurity = { enabled: true, version: "changed" };
+  await assert.rejects(social.exchangeLink(req, user), { code: "link_expired" });
+  identities.push({ provider: "google", subject: "google-subject", userId: "another-account" });
+  await handoff();
+  await assert.rejects(social.exchangeLink(req, user), { code: "account_conflict" });
+  await handoff();
+  disable();
+  await assert.rejects(social.exchangeLink(req, user), { code: "social_login_disabled" });
+  assert.equal(identities.length, 1);
+  assert.equal(identities[0].userId, "another-account");
+});
+
+test("Google linking handles duplicate-identity races without reassigning the winning account", async (t) => {
+  const { req, user, identities } = linkingFixture(t);
+  const verifier = auth.opaque();
+  let owner = user.id;
+  req.dbModels.AuthIdentity.create = async () => {
+    identities.push({ provider: "google", subject: "racing-subject", userId: owner });
+    throw Object.assign(new Error("duplicate"), { code: 11000 });
+  };
+  for (const winningOwner of [user.id, "other-account"]) {
+    identities.length = 0;
+    owner = winningOwner;
+    const record = await auth.createRecord(req, "oauth-link-handoff", user.id, {
+      provider: "google", codeChallenge: social.pkce(verifier),
+      link: { userId: user.id, proof: social.linkProof(user) },
+      identity: { subject: "racing-subject", email: user.email },
+    });
+    req.body = { code: record.id, codeVerifier: verifier };
+    if (owner === user.id) assert.equal((await social.exchangeLink(req, user)).linked, true);
+    else await assert.rejects(social.exchangeLink(req, user), { code: "account_conflict" });
+    assert.equal(identities[0].userId, owner);
+  }
+});
 test("rate limits persist across requests and email cooldowns share an atomic user key", async () => {
   const { req, user } = fixture();
   await auth.rateLimit(req, "test", 1);
@@ -289,6 +424,50 @@ test("rate limits persist across requests and email cooldowns share an atomic us
   await assert.rejects(auth.sendEmail(req, "id", { _id: "id" }, user), (e) => e.status === 429);
 });
 
+test("Google callback prepares a linking handoff without creating a user or linking before PKCE exchange", async (t) => {
+  const { req, user, identities } = linkingFixture(t);
+  const verifier = auth.opaque();
+  const identity = { sub: "google-subject", email: user.email, email_verified: true, nonce: "nonce" };
+  const fetchCalls = [];
+  const realJose = require("jose");
+  const callbackModule = { exports: {} };
+  require("node:vm").runInNewContext(require("node:fs").readFileSync(
+    require.resolve("../helpers/social-auth"), "utf8"), {
+    module: callbackModule, URL, URLSearchParams, Buffer, process,
+    AbortSignal,
+    fetch: async (url, options) => {
+      fetchCalls.push({ url, body: new URLSearchParams(options.body) });
+      return { ok: true, json: async () => ({ id_token: "mock-provider-token" }) };
+    },
+    require: (name) => name === "jose" ? {
+      ...realJose,
+      jwtVerify: async (_token, _keys, options) => {
+        assert.equal(options.audience, "test-client");
+        assert.ok(options.requiredClaims.includes("nonce"));
+        return { payload: identity };
+      },
+    } : require(require.resolve(name, { paths: [require("node:path").dirname(require.resolve("../helpers/social-auth"))] })),
+  });
+  const state = await auth.createRecord(req, "oauth-state", null, {
+    provider: "google", dbName: "test", redirectUri: "addugeneteshop://auth", nonce: "nonce",
+    verifier: "backend-verifier", codeChallenge: social.pkce(verifier),
+    link: { userId: user.id, proof: social.linkProof(user) },
+  });
+  const result = await callbackModule.exports.callback({
+    ...req, method: "GET", params: { provider: "google" },
+    query: { state: state.id, code: "google-authorization-code" },
+  }, { redirect: (status, location) => ({ status, location }) });
+  assert.equal(result.status, 303);
+  const code = new URL(result.location).searchParams.get("code");
+  assert.ok(code);
+  assert.equal(identities.length, 0);
+  const handoff = await auth.attempt(req, code, "oauth-link-handoff", user.id);
+  assert.equal(handoff.payload.identity.subject, identity.sub);
+  assert.equal(fetchCalls[0].url, "https://oauth2.googleapis.com/token");
+  assert.equal(fetchCalls[0].body.get("code_verifier"), "backend-verifier");
+  req.body = { code, codeVerifier: verifier };
+  assert.equal((await social.exchangeLink(req, user)).linked, true);
+});
 test("mail unavailable/cooling-down login remains recoverable with backups, never a token", async () => {
   const { req, user } = fixture({
     enabled: true, method: "email", version: "email-v1", backupHashes: [auth.hash("backup")],

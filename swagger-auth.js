@@ -42,6 +42,21 @@ const loginResponses = {
   },
 };
 const paths = {
+  '/api/v1/users/auth/social/link/start': {
+    post: operation('Verify account ownership and start Google linking',
+      'Requires the signed-in account current password and its current second factor when enrolled. Google must be enabled. Only same-email Google linking is supported. Returns a Google authorization URL, never an access token. Open the URL in the system browser; no bearer JWT or password goes in browser URLs. State expires in ten minutes and binds user, security snapshot, store and app PKCE.',
+      object({ provider: { type: 'string', enum: ['google'] }, password: { type: 'string', format: 'password', maxLength: 1024 },
+        redirectUri: string, codeChallenge: { type: 'string', pattern: '^[A-Za-z0-9_-]{43}$' },
+        ...factorProof.properties, databaseName: string }, ['provider', 'password', 'redirectUri', 'codeChallenge']),
+      object({ authorizationUrl: { type: 'string', format: 'uri' } }, ['authorizationUrl'])),
+  },
+  '/api/v1/users/auth/social/link/exchange': {
+    post: operation('Finish Google linking to the authenticated account',
+      'Requires the same signed-in user, selected store and app PKCE verifier. A separate one-use 60-second linking handoff cannot be used for login. Password/security changes invalidate it. Google email must match the account, and a Google identity owned by another account is never moved. Only adds AuthIdentity; existing profile, roles, orders, password and 2FA remain unchanged. No access token is issued.',
+      object({ code: opaque, codeVerifier: { type: 'string', minLength: 43, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$' },
+        databaseName: string }, ['code', 'codeVerifier']),
+      object({ linked: { type: 'boolean', enum: [true] }, provider: { type: 'string', enum: ['google'] } }, ['linked', 'provider'])),
+  },
   '/api/v1/users/auth/social/start': {
     get: {
       tags: ['Authentication'], summary: 'Start browser-based Google, Apple, or Facebook login',
@@ -112,14 +127,14 @@ const paths = {
   },
 };
 const callbackResponses = {
-  303: { description: 'Redirect to the validated app URI with a one-use code, or error=account_conflict|email_required|social_auth_failed. Never an access token.',
+  303: { description: 'Redirect to the validated app URI with a one-use login/linking code, or error=account_conflict|email_required|social_login_disabled|link_email_mismatch|link_expired|social_auth_failed. Never an access token.',
     headers: { Location: { schema: string } } },
   400: failures[400], 500: failures[500],
 };
 paths['/api/v1/users/auth/social/callback/{provider}'] = {
   get: {
     tags: ['Authentication'], summary: 'Receive a provider OAuth callback',
-    description: 'Provider-owned return endpoint; do not invoke manually. Restores database from persisted state, not a callback database parameter. State expires in ten minutes. New provider subjects with an existing account email are rejected, not linked. Apple uses the POST form callback.',
+    description: 'Provider-owned return endpoint; do not invoke manually. Restores database and login/link purpose from persisted state, not callback parameters. State expires in ten minutes. Ordinary login rejects existing-account email conflicts. An authenticated Google link start returns a separate linking handoff only after verifying the same email and account security snapshot; identity creation happens at protected link/exchange, never automatically in this callback. Apple uses the POST form callback.',
     security: [], parameters: [
       { in: 'path', name: 'provider', required: true, schema: provider },
       { in: 'query', name: 'state', required: true, schema: opaque },

@@ -1,8 +1,10 @@
 const crypto = require("crypto");
+const bcrypt = require("bcryptjs");
 const { createRemoteJWKSet, jwtVerify, SignJWT, importPKCS8 } = require("jose");
 const auth = require("./auth-security");
 const { requireSocialLoginEnabled } = require("./social-login-settings");
-const { getModelsForDb, DEFAULT_DB_NAME } = require("./db-manager");
+const db = require("./db-manager");
+const { DEFAULT_DB_NAME } = db;
 
 const jwks = {
   google: createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs")),
@@ -44,7 +46,7 @@ async function requestJson(url, options = {}) {
   return result;
 }
 
-async function start(req) {
+async function start(req, link = null) {
   const provider = req.query.provider;
   await requireSocialLoginEnabled(provider);
   const cfg = config(provider);
@@ -52,11 +54,12 @@ async function start(req) {
   const codeChallenge = req.query.codeChallenge;
   if (typeof codeChallenge !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(codeChallenge)) throw auth.fail("S256 codeChallenge is required");
   await auth.rateLimit(req, `oauth:${req.ip}`, 30);
-  const central = { dbModels: getModelsForDb(DEFAULT_DB_NAME) };
+  const central = { dbModels: db.getModelsForDb(DEFAULT_DB_NAME) };
   const verifier = auth.opaque() + auth.opaque();
   const nonce = auth.opaque();
   const { id } = await auth.createRecord(central, "oauth-state", null, {
     dbName: req.dbName, provider, redirectUri, codeChallenge, nonce, verifier,
+    ...(link ? { link } : {}),
   }, 10 * 60 * 1000);
   const endpoint = provider === "google" ? "https://accounts.google.com/o/oauth2/v2/auth"
     : provider === "apple" ? "https://appleid.apple.com/auth/authorize"
@@ -74,6 +77,70 @@ async function start(req) {
   }
   url.search = new URLSearchParams(params).toString();
   return url.toString();
+}
+
+const linkProof = (user) => auth.hash(JSON.stringify([
+  user.passwordHash, auth.securityOf(user).version, Boolean(auth.securityOf(user).enabled),
+]));
+
+async function startLink(req, user) {
+  if (req.body.provider !== "google") throw auth.fail("Only Google account linking is supported");
+  await requireSocialLoginEnabled("google");
+  config("google");
+  allowRedirect(req.body.redirectUri);
+  if (typeof req.body.codeChallenge !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(req.body.codeChallenge)) {
+    throw auth.fail("S256 codeChallenge is required");
+  }
+  await auth.rateLimit(req, `link:${user.id}`, 10);
+  if (typeof req.body.password !== "string" || req.body.password.length > 1024 ||
+      !user.passwordHash || !await bcrypt.compare(req.body.password, user.passwordHash)) {
+    throw auth.fail("Enter your current account password to link Google", 403, "invalid_credentials");
+  }
+  if (auth.securityOf(user).enabled) await auth.managementFactor(req, user, req.body);
+  if (await req.dbModels.AuthIdentity.findOne({ provider: "google", userId: user._id })) {
+    throw auth.fail("Google is already linked to this account", 409, "already_linked");
+  }
+  req.query = { provider: "google", redirectUri: req.body.redirectUri, codeChallenge: req.body.codeChallenge };
+  return start(req, { userId: String(user._id), proof: linkProof(user) });
+}
+
+async function linkUser(req, link, identity) {
+  const user = await auth.securityUser(req, link.userId);
+  if (!user || !auth.same(link.proof, linkProof(user))) {
+    throw auth.fail("Account security changed. Start Google linking again", 409, "link_expired");
+  }
+  if (String(user.email).trim().toLowerCase() !== identity.email) {
+    throw auth.fail("Choose the Google account with the same email as your existing account", 409, "link_email_mismatch");
+  }
+  return user;
+}
+
+async function exchangeLink(req, user) {
+  await auth.rateLimit(req, `link-exchange:${user.id}`, 20);
+  const record = await auth.attempt(req, req.body.code, "oauth-link-handoff", user._id);
+  await requireSocialLoginEnabled(record.payload.provider);
+  if (record.payload.provider !== "google" ||
+      !validPkce(req.body.codeVerifier, record.payload.codeChallenge)) throw auth.fail("Invalid Google linking proof");
+  await linkUser(req, record.payload.link, record.payload.identity);
+  await auth.consume(req, record);
+  const identity = record.payload.identity;
+  const existing = await req.dbModels.AuthIdentity.findOne({ provider: "google", subject: identity.subject });
+  if (existing) {
+    if (String(existing.userId) !== String(user._id)) {
+      throw auth.fail("This Google account is already linked to another account", 409, "account_conflict");
+    }
+    return { linked: true, provider: "google" };
+  }
+  try {
+    await req.dbModels.AuthIdentity.create({ provider: "google", subject: identity.subject, userId: user._id });
+  } catch (error) {
+    if (error.code !== 11000) throw error;
+    const winner = await req.dbModels.AuthIdentity.findOne({ provider: "google", subject: identity.subject });
+    if (!winner || String(winner.userId) !== String(user._id)) {
+      throw auth.fail("This Google account is already linked to another account", 409, "account_conflict");
+    }
+  }
+  return { linked: true, provider: "google" };
 }
 
 async function appleSecret(clientId) {
@@ -159,19 +226,21 @@ async function callback(req, res) {
   const values = req.method === "POST" ? req.body : req.query;
   let payload;
   try {
-    const central = { dbModels: getModelsForDb(DEFAULT_DB_NAME) };
+    const central = { dbModels: db.getModelsForDb(DEFAULT_DB_NAME) };
     const record = await auth.attempt(central, values.state, "oauth-state");
     payload = record.payload;
     await auth.consume(central, record);
     if (payload.provider !== req.params.provider || values.error) throw auth.fail("Provider authorization was cancelled");
     req.dbName = payload.dbName;
-    req.dbModels = getModelsForDb(payload.dbName);
+    req.dbModels = db.getModelsForDb(payload.dbName);
     await requireSocialLoginEnabled(payload.provider);
     const identity = await providerIdentity(payload.provider, values.code, payload);
-    const user = await resolveIdentity(req, payload.provider, identity);
-    const { id } = await auth.createRecord(req, "oauth-handoff", user._id, {
+    const user = payload.link ? await linkUser(req, payload.link, identity) :
+      await resolveIdentity(req, payload.provider, identity);
+    const { id } = await auth.createRecord(req, payload.link ? "oauth-link-handoff" : "oauth-handoff", user._id, {
       codeChallenge: payload.codeChallenge,
       provider: payload.provider,
+      ...(payload.link ? { link: payload.link, identity } : {}),
     }, 60 * 1000);
     const redirect = new URL(payload.redirectUri);
     redirect.searchParams.set("code", id);
@@ -181,6 +250,8 @@ async function callback(req, res) {
     const redirect = new URL(payload.redirectUri);
     redirect.searchParams.set("error", error.code === "social_login_disabled" ? "social_login_disabled" :
       error.code === "account_conflict" ? "account_conflict" :
+      error.code === "link_email_mismatch" ? "link_email_mismatch" :
+      error.code === "link_expired" ? "link_expired" :
       error.code === "email_required" ? "email_required" : "social_auth_failed");
     return res.redirect(303, redirect.toString());
   }
@@ -197,4 +268,4 @@ async function exchange(req) {
   return auth.login(req, user, "normal", { socialLogin: true, socialProvider: record.payload.provider });
 }
 
-module.exports = { start, callback, exchange, pkce, validPkce, config, allowRedirect, providerIdentity, resolveIdentity };
+module.exports = { start, startLink, exchangeLink, linkProof, callback, exchange, pkce, validPkce, config, allowRedirect, providerIdentity, resolveIdentity };

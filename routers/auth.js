@@ -38,6 +38,14 @@ router.post("/social/callback/apple", wrap(async (req, res) => {
   return social.callback(req, res);
 }));
 router.post("/social/exchange", wrap(async (req, res) => res.json(await social.exchange(req))));
+router.post("/social/link/start", wrap(async (req, res) => {
+  const user = await currentUser(req);
+  res.json({ authorizationUrl: await social.startLink(req, user) });
+}));
+router.post("/social/link/exchange", wrap(async (req, res) => {
+  const user = await currentUser(req);
+  res.json(await social.exchangeLink(req, user));
+}));
 router.post("/2fa/verify", wrap(async (req, res) => res.json(await auth.verifyLogin(req, req.body))));
 
 router.post("/2fa/resend", wrap(async (req, res) => {
