@@ -222,14 +222,71 @@ async function resolveIdentity(req, provider, identity) {
   }
 }
 
-async function callback(req, res) {
-  const values = req.method === "POST" ? req.body : req.query;
-  let payload;
+const callbackError = (error) => ["social_login_disabled", "account_conflict", "link_email_mismatch",
+  "link_expired", "email_required"].includes(error.code) ? error.code : "social_auth_failed";
+const REPLAY_WAIT_MS = 500;
+const REPLAY_POLLS = 16;
+
+// Browsers can prefetch/prerender or reload the provider redirect, delivering the same one-time callback twice.
+// A repeat carrying the same state and provider code gets the original outcome instead of an invalid-state page.
+async function replayCallback(central, values) {
+  if (typeof values.state !== "string" || values.state.length > 300 || typeof values.code !== "string" || !values.code) return null;
+  const filter = { key: auth.hash(values.state), type: "oauth-state", used: true,
+    expiresAt: { $gt: new Date() }, "payload.codeHash": auth.hash(values.code) };
+  for (let poll = 0; poll < REPLAY_POLLS; poll += 1) {
+    const replay = await central.dbModels.AuthRecord.findOneAndUpdate({
+      ...filter, "payload.outcome": { $exists: true }, attempts: { $lt: auth.MAX_ATTEMPTS },
+    }, { $inc: { attempts: 1 } }, { new: true });
+    if (replay) return replay;
+    if (!(await central.dbModels.AuthRecord.findOne(filter))) return null;
+    await new Promise((resolve) => setTimeout(resolve, REPLAY_WAIT_MS));
+  }
+  return null;
+}
+
+async function handoffRedirect(req, payload, outcome) {
+  const redirect = new URL(payload.redirectUri);
+  if (outcome.error) {
+    redirect.searchParams.set("error", outcome.error);
+    return redirect.toString();
+  }
+  req.dbName = payload.dbName;
+  req.dbModels = db.getModelsForDb(payload.dbName);
+  await requireSocialLoginEnabled(payload.provider);
+  const { id } = await auth.createRecord(req, outcome.type, outcome.userId, outcome.payload, 60 * 1000);
+  redirect.searchParams.set("code", id);
+  return redirect.toString();
+}
+
+function invalidStateRedirect(res) {
+  const appRedirect = (process.env.OAUTH_APP_REDIRECT_URIS || "addugeneteshop://auth").split(",")[0].trim();
   try {
-    const central = { dbModels: db.getModelsForDb(DEFAULT_DB_NAME) };
-    const record = await auth.attempt(central, values.state, "oauth-state");
+    const redirect = new URL(allowRedirect(appRedirect));
+    redirect.searchParams.set("error", "invalid_state");
+    return res.redirect(303, redirect.toString());
+  } catch {
+    return res.status(400).json({ message: "Invalid or expired OAuth state", code: "invalid_state" });
+  }
+}
+
+async function callback(req, res) {
+  const values = (req.method === "POST" ? req.body : req.query) || {};
+  const central = { dbModels: db.getModelsForDb(DEFAULT_DB_NAME) };
+  let payload;
+  let recordId;
+  let outcome;
+  try {
+    const record = await auth.attempt(central, values.state, "oauth-state").catch(() => null);
+    const consumed = record && await auth.consume(central, record, typeof values.code === "string" && values.code ?
+      { "payload.codeHash": auth.hash(values.code) } : {}).then(() => true, () => false);
+    if (!consumed) {
+      const replay = await replayCallback(central, values);
+      if (!replay || replay.payload.provider !== req.params.provider) return invalidStateRedirect(res);
+      payload = replay.payload;
+      return res.redirect(303, await handoffRedirect(req, payload, payload.outcome));
+    }
     payload = record.payload;
-    await auth.consume(central, record);
+    recordId = record._id;
     if (payload.provider !== req.params.provider || values.error) throw auth.fail("Provider authorization was cancelled");
     req.dbName = payload.dbName;
     req.dbModels = db.getModelsForDb(payload.dbName);
@@ -237,22 +294,30 @@ async function callback(req, res) {
     const identity = await providerIdentity(payload.provider, values.code, payload);
     const user = payload.link ? await linkUser(req, payload.link, identity) :
       await resolveIdentity(req, payload.provider, identity);
-    const { id } = await auth.createRecord(req, payload.link ? "oauth-link-handoff" : "oauth-handoff", user._id, {
-      codeChallenge: payload.codeChallenge,
-      provider: payload.provider,
-      ...(payload.link ? { link: payload.link, identity } : {}),
-    }, 60 * 1000);
-    const redirect = new URL(payload.redirectUri);
-    redirect.searchParams.set("code", id);
-    return res.redirect(303, redirect.toString());
+    outcome = {
+      type: payload.link ? "oauth-link-handoff" : "oauth-handoff",
+      userId: user._id,
+      payload: {
+        codeChallenge: payload.codeChallenge,
+        provider: payload.provider,
+        ...(payload.link ? { link: payload.link, identity } : {}),
+      },
+    };
   } catch (error) {
-    if (!payload) return res.status(400).json({ message: "Invalid or expired OAuth state", code: "invalid_state" });
+    if (!payload) return invalidStateRedirect(res);
+    if (!recordId) {
+      const redirect = new URL(payload.redirectUri);
+      redirect.searchParams.set("error", callbackError(error));
+      return res.redirect(303, redirect.toString());
+    }
+    outcome = { error: callbackError(error) };
+  }
+  await central.dbModels.AuthRecord.updateOne({ _id: recordId }, { $set: { "payload.outcome": outcome } });
+  try {
+    return res.redirect(303, await handoffRedirect(req, payload, outcome));
+  } catch (error) {
     const redirect = new URL(payload.redirectUri);
-    redirect.searchParams.set("error", error.code === "social_login_disabled" ? "social_login_disabled" :
-      error.code === "account_conflict" ? "account_conflict" :
-      error.code === "link_email_mismatch" ? "link_email_mismatch" :
-      error.code === "link_expired" ? "link_expired" :
-      error.code === "email_required" ? "email_required" : "social_auth_failed");
+    redirect.searchParams.set("error", callbackError(error));
     return res.redirect(303, redirect.toString());
   }
 }

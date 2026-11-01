@@ -63,6 +63,10 @@ class Records {
     apply(row, update);
     return clone(row);
   }
+  async findOne(filter) {
+    const row = this.rows.find((value) => matches(value, filter));
+    return row ? clone(row) : null;
+  }
   async updateOne(filter, update) {
     const row = this.rows.find((value) => matches(value, filter));
     if (!row) return { modifiedCount: 0 };
@@ -269,6 +273,63 @@ test("OAuth state cannot be reused or substituted for a handoff", async () => {
   await assert.rejects(auth.attempt(req, state.id, "oauth-handoff"));
   await auth.consume(req, state.record);
   await assert.rejects(auth.attempt(req, state.id, "oauth-state"));
+});
+
+test("a repeated provider callback replays its original outcome instead of failing with invalid state", async (t) => {
+  const { req } = fixture();
+  t.mock.method(require("../helpers/db-manager"), "getModelsForDb", () => ({
+    ...req.dbModels,
+    SiteSetting: { findOne: () => ({ select: () => ({ lean: async () => ({
+      socialLoginProviders: { facebook: true },
+    }) }) }) },
+  }));
+  const verifier = auth.opaque();
+  const response = { redirect: (status, location) => ({ status, location }) };
+  const call = (state, code, provider = "facebook") => social.callback({
+    ...req, method: "GET", params: { provider }, query: { state, code },
+  }, response);
+  const state = await auth.createRecord(req, "oauth-state", null, {
+    provider: "facebook", dbName: "test", redirectUri: "addugeneteshop://auth",
+    codeChallenge: social.pkce(verifier), codeHash: auth.hash("fb-code"),
+    outcome: { type: "oauth-handoff", userId: "user1",
+      payload: { codeChallenge: social.pkce(verifier), provider: "facebook" } },
+  });
+  req.dbModels.AuthRecord.rows[0].used = true;
+  req.dbModels.AuthRecord.rows[0].attempts = 1;
+
+  const first = await call(state.id, "fb-code");
+  assert.equal(first.status, 303);
+  const code = new URL(first.location).searchParams.get("code");
+  assert.ok(code, "Replay delivers a fresh handoff to the app");
+  const second = new URL((await call(state.id, "fb-code")).location).searchParams.get("code");
+  assert.notEqual(second, code);
+  req.body = { code, codeVerifier: verifier };
+  assert.ok((await social.exchange(req)).token, "Replayed handoff still requires the app PKCE verifier");
+  req.body = { code: second, codeVerifier: "wrong" };
+  await assert.rejects(social.exchange(req), /Invalid/);
+
+  for (const [badState, badCode, provider] of [[state.id, "other-code"], ["unknown", "fb-code"], [state.id, "fb-code", "google"]]) {
+    const result = await call(badState, badCode, provider);
+    assert.equal(result.status, 303);
+    assert.equal(result.location, "addugeneteshop://auth?error=invalid_state");
+  }
+  req.dbModels.AuthRecord.rows[0].attempts = auth.MAX_ATTEMPTS;
+  assert.equal((await call(state.id, "fb-code")).location, "addugeneteshop://auth?error=invalid_state",
+    "Replays are bounded by the state attempt limit");
+});
+
+test("a callback repeated while the first is still processing waits for its outcome", async (t) => {
+  const { req } = fixture();
+  t.mock.method(require("../helpers/db-manager"), "getModelsForDb", () => req.dbModels);
+  const state = await auth.createRecord(req, "oauth-state", null, {
+    provider: "facebook", dbName: "test", redirectUri: "addugeneteshop://auth", codeHash: auth.hash("fb-code"),
+  });
+  Object.assign(req.dbModels.AuthRecord.rows[0], { used: true, attempts: 1 });
+  setTimeout(() => { req.dbModels.AuthRecord.rows[0].payload.outcome = { error: "account_conflict" }; }, 100);
+  const result = await social.callback({
+    ...req, method: "GET", params: { provider: "facebook" }, query: { state: state.id, code: "fb-code" },
+  }, { redirect: (status, location) => ({ status, location }) });
+  assert.equal(result.location, "addugeneteshop://auth?error=account_conflict");
 });
 
 test("provider verified email never automatically links an existing account", async () => {

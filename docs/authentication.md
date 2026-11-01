@@ -119,6 +119,13 @@ every operation independently enforces expiration.
    or `?error=account_conflict|email_required|social_auth_failed`. **No access or
    provider tokens appear in app URLs.** State expires in ten minutes; the handoff
    expires in 60 seconds and is one-use, PKCE-bound and database-bound.
+   Browsers (notably Facebook's "Continue as …" re-authorization page) may
+   prefetch, prerender or reload the provider redirect so the callback arrives
+   twice. State is still consumed once; a repeat with the **same state and
+   provider code** within the state lifetime (bounded by the attempt limit)
+   receives the original outcome (a fresh one-use, PKCE-bound handoff or the
+   same error). Unknown, expired or mismatched callbacks redirect to the first
+   `OAUTH_APP_REDIRECT_URIS` entry with `?error=invalid_state`.
 5. `POST /users/auth/social/exchange` with `{code, codeVerifier}` returns the
    ordinary full user login response or the 2FA challenge below.
 

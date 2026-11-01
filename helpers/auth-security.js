@@ -82,10 +82,10 @@ async function attempt(req, id, type, userId) {
   return record;
 }
 
-async function consume(req, record) {
+async function consume(req, record, extra = {}) {
   const result = await req.dbModels.AuthRecord.findOneAndUpdate({
     _id: record._id, used: false, expiresAt: { $gt: new Date() },
-  }, { $set: { used: true } }, { new: true });
+  }, { $set: { ...extra, used: true } }, { new: true });
   if (!result) throw fail("Challenge already used or expired", 400, "invalid_challenge");
 }
 
