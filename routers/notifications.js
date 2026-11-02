@@ -113,6 +113,59 @@ router.use('/inbox', (req, res, next) => {
   next();
 });
 
+/**
+ * @swagger
+ * /api/v1/notifications/inbox:
+ *   get:
+ *     summary: Get the authenticated user's notification inbox
+ *     tags: [Notifications]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: query
+ *         name: before
+ *         required: false
+ *         description: Notification ID cursor for fetching the next page
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Notification page and unread count
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 notifications:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                       title:
+ *                         type: string
+ *                       body:
+ *                         type: string
+ *                       data:
+ *                         type: object
+ *                       isRead:
+ *                         type: boolean
+ *                       createdAt:
+ *                         type: string
+ *                         format: date-time
+ *                 unreadCount:
+ *                   type: integer
+ *                 nextCursor:
+ *                   type: string
+ *                   nullable: true
+ *       400:
+ *         description: Invalid notification cursor
+ *       401:
+ *         description: Authentication required
+ *       500:
+ *         description: Notification model is not available
+ */
 router.get('/inbox', async (req, res, next) => {
   try {
     const { Notification } = req.dbModels;
@@ -140,6 +193,29 @@ router.get('/inbox', async (req, res, next) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/notifications/inbox/read-all:
+ *   put:
+ *     summary: Mark all notifications as read for the authenticated user
+ *     tags: [Notifications]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Notifications marked as read
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *       401:
+ *         description: Authentication required
+ *       500:
+ *         description: Notification model is not available
+ */
 router.put('/inbox/read-all', async (req, res, next) => {
   try {
     await req.dbModels.Notification.updateMany(
@@ -151,6 +227,42 @@ router.put('/inbox/read-all', async (req, res, next) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/notifications/inbox/{notificationId}/read:
+ *   put:
+ *     summary: Mark one notification as read for the authenticated user
+ *     tags: [Notifications]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: notificationId
+ *         required: true
+ *         description: Notification ID
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Notification read status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id:
+ *                   type: string
+ *                 isRead:
+ *                   type: boolean
+ *       400:
+ *         description: Invalid notification ID
+ *       401:
+ *         description: Authentication required
+ *       404:
+ *         description: Notification not found
+ *       500:
+ *         description: Notification model is not available
+ */
 router.put('/inbox/:notificationId/read', async (req, res, next) => {
   try {
     if (!mongoose.isObjectIdOrHexString(req.params.notificationId)) {
@@ -167,6 +279,53 @@ router.put('/inbox/:notificationId/read', async (req, res, next) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/v1/notifications/drivers/{driverId}/push-token:
+ *   put:
+ *     summary: Register an Expo push token for a driver
+ *     tags: [Notifications]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: driverId
+ *         required: true
+ *         description: Driver ID
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [pushToken]
+ *             properties:
+ *               pushToken:
+ *                 type: string
+ *                 description: Expo push token
+ *     responses:
+ *       200:
+ *         description: Push token saved
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 message:
+ *                   type: string
+ *                 driverId:
+ *                   type: string
+ *                 totalTokens:
+ *                   type: integer
+ *       400:
+ *         description: Invalid Expo push token
+ *       404:
+ *         description: Driver not found
+ *       500:
+ *         description: Driver model is not available
+ */
 router.put('/drivers/:driverId/push-token', async (req, res) => {
   const Driver = getDriverModel(req);
   const { driverId } = req.params;

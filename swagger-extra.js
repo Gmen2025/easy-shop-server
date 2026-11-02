@@ -154,10 +154,43 @@ module.exports = {
     post: operation('Create a signed Cloudinary upload payload', 'Cloudinary', { requestBody: { required: false }, success: '200' }),
   },
   '/api/v1/notifications/drivers/{driverId}/push-token': {
-    put: operation('Register a push token for a driver', 'Notifications', { parameters: [pathParameter('driverId')], requestBody: { schema: { type: 'object', required: ['token'], properties: { token: { type: 'string' } } } } }),
-  },
-  '/api/v1/users/drivers/{driverId}/push-token': {
-    put: operation('Register a push token for a driver', 'Notifications', { parameters: [pathParameter('driverId')], requestBody: { schema: { type: 'object', required: ['token'], properties: { token: { type: 'string' } } } } }),
+    put: {
+      ...operation('Register an Expo push token for a driver', 'Notifications'),
+      parameters: [pathParameter('driverId')],
+      requestBody: {
+        required: true,
+        content: {
+          'application/json': {
+            schema: {
+              type: 'object',
+              required: ['pushToken'],
+              properties: { pushToken: { type: 'string', description: 'Expo push token' } },
+            },
+          },
+        },
+      },
+      responses: {
+        200: {
+          description: 'Push token saved',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  message: { type: 'string' },
+                  driverId: { type: 'string' },
+                  totalTokens: { type: 'integer' },
+                },
+              },
+            },
+          },
+        },
+        400: response('Invalid Expo push token'),
+        401: response('Authentication required'),
+        404: response('Driver not found'),
+        500: response('Driver model is not available'),
+      },
+    },
   },
   '/api/v1/drivers/{id}/approve': {
     put: operation('Approve a driver application', 'Drivers', { parameters: [pathParameter('id')], success: '200' }),
@@ -282,6 +315,317 @@ module.exports = {
   },
   '/api/v1/users/me': {
     get: operation('Get the authenticated user', 'Users'),
+  },
+  '/api/v1/settings/payment-methods': {
+    get: {
+      ...operation('Get enabled payment methods', 'Settings', { security: false }),
+      responses: {
+        200: {
+          description: 'Payment method availability',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  success: { type: 'boolean' },
+                  methods: {
+                    type: 'object',
+                    properties: {
+                      cash: { type: 'boolean' },
+                      bank: { type: 'boolean' },
+                      card: { type: 'boolean' },
+                      telebirr: { type: 'boolean' },
+                    },
+                  },
+                  enabled: { type: 'boolean' },
+                  updatedAt: { type: 'string', format: 'date-time', nullable: true },
+                },
+              },
+            },
+          },
+        },
+        503: response('Payment availability could not be loaded'),
+      },
+    },
+    put: {
+      ...operation('Update enabled payment methods', 'Settings', {
+        requestBody: {
+          schema: {
+            type: 'object',
+            required: ['methods'],
+            additionalProperties: false,
+            properties: {
+              methods: {
+                type: 'object',
+                minProperties: 1,
+                additionalProperties: false,
+                properties: {
+                  cash: { type: 'boolean' },
+                  bank: { type: 'boolean' },
+                  card: { type: 'boolean' },
+                  telebirr: { type: 'boolean' },
+                },
+              },
+            },
+          },
+        },
+      }),
+      description: 'Admin only. The methods object may update one or more supported payment methods.',
+      responses: {
+        200: response('Payment method availability updated'),
+        400: response('Methods must contain supported boolean switches'),
+        401: response('Authentication required'),
+        403: response('Admin access required'),
+        503: response('Payment method settings could not be saved'),
+      },
+    },
+  },
+  '/api/v1/drivers/me/available-deliveries': {
+    get: {
+      ...operation('List available delivery assignments for the authenticated driver', 'Drivers'),
+      description: 'Requires a driver profile. The response includes assignment eligibility and filters shared assignments by pickup proximity, vehicle, and remaining capacity.',
+      responses: {
+        200: {
+          description: 'Available delivery assignments and driver eligibility',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  success: { type: 'boolean' },
+                  orders: { type: 'array', items: { type: 'object', additionalProperties: true } },
+                  driverEligibility: {
+                    type: 'object',
+                    properties: {
+                      eligible: { type: 'boolean' },
+                      message: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        401: response('Authentication required'),
+        403: response('Driver profile required'),
+        500: response('Available assignments could not be loaded'),
+      },
+    },
+  },
+  '/api/v1/drivers/me/available-deliveries/{id}/claim': {
+    put: {
+      ...operation('Claim an available delivery assignment', 'Drivers', {
+        parameters: [pathParameter('id')],
+      }),
+      responses: {
+        200: {
+          description: 'Delivery assignment claimed',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  success: { type: 'boolean' },
+                  message: { type: 'string' },
+                  cartOrderIds: { type: 'array', items: { type: 'string' } },
+                },
+              },
+            },
+          },
+        },
+        400: response('Invalid order ID'),
+        401: response('Authentication required'),
+        403: response('Driver profile required'),
+        409: response('Assignment is no longer available or exceeds driver capacity'),
+        500: response('Delivery assignment could not be claimed'),
+      },
+    },
+  },
+  '/api/v1/stores/admin/assignments': {
+    get: {
+      ...operation('List store fulfillment assignments requiring admin attention', 'Store inventory'),
+      description: 'Admin only. Returns active fulfillment assignments, store-review requests, and eligible pending deliveries.',
+      responses: {
+        200: {
+          description: 'Assignments requiring review or fulfillment',
+          content: {
+            'application/json': {
+              schema: { type: 'array', items: { type: 'object', additionalProperties: true } },
+            },
+          },
+        },
+        401: response('Authentication required'),
+        403: response('Admin access required'),
+        500: response('Assignments could not be loaded'),
+      },
+    },
+  },
+  '/api/v1/stores/me/assignments/{id}/drivers/{decision}': {
+    post: {
+      ...operation('Reroute a store assignment to an eligible driver', 'Store inventory', {
+        parameters: [
+          pathParameter('id'),
+          { ...pathParameter('decision'), schema: { type: 'string', enum: ['reroute', 'assign'] } },
+        ],
+      }),
+      description: 'Store owner only. The assign decision is restricted to admins; store owners can use reroute.',
+      responses: {
+        200: response('Driver assignment updated'),
+        400: response('Invalid order, action, or driver ID'),
+        401: response('Authentication required'),
+        403: response('Store owner access required or action is admin-only'),
+        404: response('Assignment not found'),
+        409: response('Assignment cannot be rerouted'),
+        500: response('Driver assignment could not be updated'),
+      },
+    },
+  },
+  '/api/v1/stores/admin/assignments/{id}/drivers/{decision}': {
+    post: {
+      ...operation('Assign or reroute a store delivery to a driver', 'Store inventory', {
+        parameters: [
+          pathParameter('id'),
+          { ...pathParameter('decision'), schema: { type: 'string', enum: ['reroute', 'assign'] } },
+        ],
+        requestBody: {
+          required: false,
+          schema: {
+            type: 'object',
+            properties: { driverId: { type: 'string', description: 'Required when decision is assign' } },
+          },
+        },
+      }),
+      description: 'Admin only. Use assign with driverId to select a driver, or reroute to find an eligible driver.',
+      responses: {
+        200: response('Driver assignment updated'),
+        400: response('Invalid order, action, or driver ID'),
+        401: response('Authentication required'),
+        403: response('Admin access required'),
+        404: response('Assignment not found'),
+        409: response('Assignment cannot be rerouted or assigned'),
+        500: response('Driver assignment could not be updated'),
+      },
+    },
+  },
+  '/api/v1/stores/admin/assignments/{id}/{decision}': {
+    post: {
+      ...operation('Respond to a store fulfillment assignment as an admin', 'Store inventory', {
+        parameters: [
+          pathParameter('id'),
+          { ...pathParameter('decision'), schema: { type: 'string', enum: ['accept', 'reroute', 'ready', 'enable-preparation'] } },
+        ],
+        requestBody: {
+          required: false,
+          schema: {
+            type: 'object',
+            properties: {
+              storeId: { type: 'string', description: 'Target store ID when accepting an assignment' },
+              vehicle: { type: 'string', description: 'Vehicle type when enabling preparation' },
+            },
+          },
+        },
+      }),
+      description: 'Admin only. Decisions are accept, reroute, ready, or enable-preparation.',
+      responses: {
+        200: response('Assignment updated'),
+        400: response('Invalid assignment ID or decision'),
+        401: response('Authentication required'),
+        403: response('Admin access required'),
+        404: response('Assignment not found'),
+        409: response('Assignment cannot be updated in its current state'),
+        500: response('Assignment could not be updated'),
+      },
+    },
+  },
+  '/api/v1/stores/admin/dispatch-batches': {
+    post: {
+      ...operation('Create a delivery dispatch batch as an admin', 'Store inventory', {
+        success: '201',
+        requestBody: {
+          schema: {
+            type: 'object',
+            required: ['orderIds'],
+            properties: {
+              orderIds: {
+                type: 'array',
+                minItems: 1,
+                maxItems: 20,
+                uniqueItems: true,
+                items: { type: 'string' },
+              },
+            },
+          },
+        },
+      }),
+      description: 'Admin only. Select 1-20 distinct ready packages with the same required delivery vehicle. Driver assignment starts asynchronously.',
+      responses: {
+        201: {
+          description: 'Dispatch batch created',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  success: { type: 'boolean' },
+                  batchId: { type: 'string' },
+                  orderIds: { type: 'array', items: { type: 'string' } },
+                },
+              },
+            },
+          },
+        },
+        400: response('Select 1-20 distinct valid ready packages'),
+        401: response('Authentication required'),
+        403: response('Admin access required'),
+        409: response('Packages are not eligible for a dispatch batch'),
+        500: response('Dispatch batch could not be created'),
+      },
+    },
+  },
+  '/api/v1/stores/me/dispatch-batches': {
+    post: {
+      ...operation('Create a delivery dispatch batch for the authenticated store', 'Store inventory', {
+        success: '201',
+        requestBody: {
+          schema: {
+            type: 'object',
+            required: ['orderIds'],
+            properties: {
+              orderIds: {
+                type: 'array',
+                minItems: 1,
+                maxItems: 20,
+                uniqueItems: true,
+                items: { type: 'string' },
+              },
+            },
+          },
+        },
+      }),
+      description: 'Requires ownership of the selected store packages. Select 1-20 distinct ready packages with the same required delivery vehicle. Driver assignment starts asynchronously.',
+      responses: {
+        201: {
+          description: 'Dispatch batch created',
+          content: {
+            'application/json': {
+              schema: {
+                type: 'object',
+                properties: {
+                  success: { type: 'boolean' },
+                  batchId: { type: 'string' },
+                  orderIds: { type: 'array', items: { type: 'string' } },
+                },
+              },
+            },
+          },
+        },
+        400: response('Select 1-20 distinct valid ready packages'),
+        401: response('Authentication required'),
+        403: response('Store owner access required'),
+        409: response('Packages are not eligible for a dispatch batch'),
+        500: response('Dispatch batch could not be created'),
+      },
+    },
   },
   '/api/v1/service-requests': {
     get: operation('List service requests', 'Service Requests', { parameters: [queryParameter('customer', 'Filter by customer ID')] }),

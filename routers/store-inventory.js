@@ -227,8 +227,8 @@ router.get("/admin/assignments", endpoint(async (req, res) => {
   res.json(orders);
 }));
 
-for (const scope of ["me", "admin"]) {
-  router.post(`/${scope}/assignments/:id/drivers/:decision`, endpoint(async (req, res) => {
+function driverAssignmentHandler(scope) {
+  return endpoint(async (req, res) => {
     if (scope === "admin" && !req.auth?.isAdmin) throw Object.assign(new Error("Admin access required."), { status: 403 });
     if (!req.auth?.userId) throw Object.assign(new Error("Sign in to manage deliveries."), { status: 401 });
     if (!mongoose.isValidObjectId(req.params.id) || !["reroute", "assign"].includes(req.params.decision) ||
@@ -245,8 +245,10 @@ for (const scope of ["me", "admin"]) {
         req.dbModels, order, require("../service/dispatchService").MAX_ACTIVE_ORDERS_PER_DRIVER);
     }
     res.json(result);
-  }));
+  });
 }
+router.post("/me/assignments/:id/drivers/:decision", driverAssignmentHandler("me"));
+router.post("/admin/assignments/:id/drivers/:decision", driverAssignmentHandler("admin"));
 
 router.post("/admin/assignments/:id/:decision", endpoint(async (req, res) => {
   if (!req.auth?.isAdmin) throw Object.assign(new Error("Admin access required."), { status: 403 });
