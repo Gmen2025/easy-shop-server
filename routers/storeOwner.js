@@ -5,6 +5,7 @@ const bcrypt = require('bcryptjs');
 const { normalizeStoreLogo } = require('../helpers/store-logo');
 const authSecurity = require('../helpers/auth-security');
 const { inventoryEnabled, updateManagedOrder } = require("../helpers/store-inventory");
+const finance = require("../helpers/finance");
 
 router.use(async (req, res, next) => {
   if (/^\/[^/]+\/products(?:\/|$)/.test(req.path)) {
@@ -64,7 +65,7 @@ async function getOwnedStore(req, res) {
   }
 
   // Owners can only access their own store; admins can access any store.
-  if (!req.auth?.isAdmin && store.owner && String(store.owner) !== String(req.auth?.userId)) {
+  if (!req.auth?.isAdmin && (!req.auth?.userId || !store.owner || String(store.owner) !== String(req.auth.userId))) {
     res.status(403).json({ success: false, message: 'You do not own this store.' });
     return null;
   }
@@ -529,11 +530,12 @@ router.get('/:id/dashboard', async (req, res) => {
       ? reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length
       : 0;
 
-    const COMMISSION_RATE = 0.05;
-    const totalEarned = allStats.gross * (1 - COMMISSION_RATE);
-    const paidOut = payouts.filter((p) => p.status === 'paid').reduce((s, p) => s + p.amount, 0);
-    const pendingPayout = payouts.filter((p) => ['pending', 'processing'].includes(p.status)).reduce((s, p) => s + p.amount, 0);
-    const availableBalance = Math.max(0, totalEarned - paidOut - pendingPayout);
+    await finance.reconcileFinance(req.dbModels);
+    const financial = await finance.participantFinance(req.dbModels, "store", store._id);
+    const currency = /USA/i.test(req.dbName) ? "USD" : "ETB";
+    const balance = financial.balances.find((item) => item.currency === currency);
+    const pendingPayout = balance.pending;
+    const availableBalance = balance.available;
 
     return res.json({
       success: true,
@@ -609,14 +611,16 @@ router.get('/:id/sales', async (req, res) => {
 
     const rangeKey = resolveRange(req.query.range);
     const since = new Date(Date.now() - RANGE_MS[rangeKey]);
-    const { deliveredOrders, gross } = await getStoreOrderStats(req, store._id, since);
-
-    const COMMISSION_RATE = 0.05;
+    await finance.reconcileFinance(req.dbModels);
+    const financial = await finance.participantFinance(req.dbModels, "store", store._id);
+    const currency = /USA/i.test(req.dbName) ? "USD" : "ETB";
+    const entries = financial.entries.filter((entry) => !entry.voided && entry.currency === currency && new Date(entry.completedAt) >= since);
+    const gross = entries.reduce((sum, entry) => sum + entry.grossMinor, 0) / 100;
     const discounts = 0; // extend when a discount field exists on orders
     const refunds = 0;   // extend when refunds are tracked
-    const commission = gross * COMMISSION_RATE;
+    const commission = entries.reduce((sum, entry) => sum + entry.platformMinor, 0) / 100;
     const net = gross - discounts - refunds - commission;
-    const orders = deliveredOrders.length;
+    const orders = new Set(entries.map((entry) => String(entry.sourceId))).size;
 
     return res.json({
       success: true,
@@ -1371,35 +1375,28 @@ router.get('/:id/earnings', async (req, res) => {
     const store = await getOwnedStore(req, res);
     if (!store) return;
 
-    const { Payout } = req.dbModels;
-    const { deliveredOrders, gross } = await getStoreOrderStats(req, store._id);
-    const payouts = await Payout.find({ store: store._id }).sort({ dateRequested: -1 });
-
     const isUSA = String(req.dbName || '').toUpperCase().includes('USA');
     const currency = isUSA ? 'USD' : 'ETB';
-
-    const COMMISSION_RATE = 0.05;
-    const totalEarned = gross * (1 - COMMISSION_RATE);
-    const paidOut = payouts.filter((p) => p.status === 'paid').reduce((s, p) => s + p.amount, 0);
-    const pending = payouts.filter((p) => ['pending', 'processing'].includes(p.status)).reduce((s, p) => s + p.amount, 0);
-    const available = Math.max(0, totalEarned - paidOut - pending);
-
-    const transactions = deliveredOrders
-      .sort((a, b) => new Date(b.order.dateOrdered) - new Date(a.order.dateOrdered))
-      .slice(0, 100)
-      .map(({ order, storeTotal }) => ({
-        id: order.id,
-        date: order.dateOrdered,
-        order: `#${order.id.slice(-6)}`,
-        amount: Number(storeTotal.toFixed(2)),
-        commission: Number((storeTotal * COMMISSION_RATE).toFixed(2)),
-        net: Number((storeTotal * (1 - COMMISSION_RATE)).toFixed(2)),
+    await finance.reconcileFinance(req.dbModels);
+    const financial = await finance.participantFinance(req.dbModels, "store", store._id);
+    const { totalEarned, pending, available } = financial.balances.find((item) => item.currency === currency);
+    const payouts = financial.payouts;
+    const transactions = financial.entries.filter((entry) => !entry.voided && entry.currency === currency).slice(0, 100)
+      .map((entry) => ({
+        id: String(entry.sourceId),
+        date: entry.completedAt,
+        order: `#${String(entry.sourceId).slice(-6)}`,
+        amount: entry.grossMinor / 100,
+        commission: entry.platformMinor / 100,
+        net: entry.netMinor / 100,
       }));
 
     return res.json({
       success: true,
       currency,
-      payoutSchedule: 'Weekly settlement every Monday. Early payout available on-demand.',
+      payoutSchedule: 'Weekly requests on Monday (UTC). No automatic transfer provider is connected; admin pays manually.',
+      payoutsEnabled: store.payoutsEnabled,
+      balances: financial.balances,
       available: Number(available.toFixed(2)),
       pending: Number(pending.toFixed(2)),
       totalEarned: Number(totalEarned.toFixed(2)),
@@ -1467,41 +1464,12 @@ router.post('/:id/payouts', async (req, res) => {
     const store = await getOwnedStore(req, res);
     if (!store) return;
 
-    const { Payout } = req.dbModels;
-    const amount = toNum(req.body?.amount);
-
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ success: false, message: 'A positive payout amount is required.' });
-    }
-
-    // Recompute available balance to prevent over-withdrawal.
-    const { gross } = await getStoreOrderStats(req, store._id);
-    const payouts = await Payout.find({ store: store._id });
-    const totalEarned = gross * 0.95;
-    const committed = payouts
-      .filter((p) => ['paid', 'pending', 'processing'].includes(p.status))
-      .reduce((s, p) => s + p.amount, 0);
-    const available = Math.max(0, totalEarned - committed);
-
-    if (amount > available) {
-      return res.status(400).json({ success: false, message: `Insufficient balance. Available: ${available.toFixed(2)}` });
-    }
-
     const isUSA = String(req.dbName || '').toUpperCase().includes('USA');
     const currency = isUSA ? 'USD' : 'ETB';
-    const accountDetails = req.body?.accountDetails || store.bankAccount || store.phone || 'Standard Payout Account';
-
-    const payout = new Payout({
-      store: store._id,
-      amount: Number(amount.toFixed(2)),
-      currency,
-      payoutType: req.body?.payoutType || 'early_request',
-      method: req.body?.method || (isUSA ? 'stripe_or_wire' : 'telebirr_or_bank'),
-      accountDetails,
-      reference: `REQ-${Date.now()}`,
-      status: 'pending',
-    });
-    const saved = await payout.save();
+    await finance.reconcileFinance(req.dbModels);
+    const saved = await finance.reservePayout(req.dbModels, "store", store._id, {
+      ...req.body, currency, requestKey: req.body.requestKey || `legacy:${require("crypto").randomUUID()}`,
+    }, req.auth);
 
     return res.status(201).json({
       success: true,
@@ -1517,7 +1485,7 @@ router.post('/:id/payouts', async (req, res) => {
       },
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(err.status || 500).json({ success: false, message: err.message });
   }
 });
 

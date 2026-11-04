@@ -215,6 +215,7 @@ test("store dashboard returns pending scheduled orders and keeps completed-sales
       } },
       Review: { find: () => query([]) },
       Payout: { find: () => query([]) },
+      FinanceEntry: { find: () => query([]) },
     },
   };
   const res = response();
@@ -265,6 +266,7 @@ test("AdminStore dashboard immediately includes legacy USA orders after persisti
         },
       },
       Review: { find: () => query([]) }, Payout: { find: () => query([]) },
+      FinanceEntry: { find: () => query([]) },
     },
   };
   const res = response();
@@ -302,6 +304,7 @@ test("admin recent sales include schedule metadata selected from the database", 
     },
     Product: { find: () => query([]) },
     Payout: { find: () => query([]) },
+    FinanceEntry: { find: () => query([]) },
   } };
   const res = response();
   await handler(orderRouter, "/admin/dashboard", "get")(req, res);
@@ -388,6 +391,7 @@ test("store dashboard limits recent orders to twenty without adding pending orde
       } },
       Review: { find: () => query([]) },
       Payout: { find: () => query([]) },
+      FinanceEntry: { find: () => query([]) },
     },
   };
   const res = response();
@@ -457,6 +461,7 @@ test("company dashboard includes ready-product orders without crediting unrelate
       } },
       Review: { find: () => query([]) },
       Payout: { find: () => query([{ amount: 10, status: "paid" }, { amount: 5, status: "pending" }]) },
+      FinanceEntry: { find: () => query([]) },
     },
   };
   const res = response();
@@ -471,7 +476,8 @@ test("company dashboard includes ready-product orders without crediting unrelate
     assert.equal(period.averageOrder, 70 / 3);
   }
   assert.equal(res.body.orders.pending, 1);
-  assert.equal(res.body.payouts.available, 55);
+  assert.equal(res.body.payouts.available, 0);
+  assert.equal(res.body.payouts.shortfall, 15);
   assert.equal(res.body.products.total, 1);
   assert.equal(res.body.products.readyFulfillments, 1);
   assert.equal(res.body.recentOrders.length, 4);

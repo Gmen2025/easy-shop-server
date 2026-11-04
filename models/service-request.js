@@ -127,6 +127,7 @@ const serviceRequestSchema = new mongoose.Schema(
   }
 );
 
+serviceRequestSchema.plugin(require("../helpers/finance-hooks"), "service");
 serviceRequestSchema.virtual('id').get(function () {
   return this._id.toHexString();
 });

@@ -2,6 +2,75 @@
 
 A comprehensive REST API for an e-commerce platform built with Node.js, Express, and MongoDB. Features include JWT authentication, payment gateway integrations (Stripe & Telebirr), order management, and email notifications.
 
+## Ownership accounting and manual settlements
+
+The website and mobile app share `/api/v1/finance` (JWT and selected-database
+header required):
+
+- `GET /admin/report`: separate ETB/USD rolling-period reports with owned income,
+  independent platform fees/net income, service income and unallocated income.
+- `GET /admin/accounts`: stores and drivers; only safe account summary fields.
+- `GET /accounts/:kind/:accountId`: income, collected balances, fee settings,
+  transactions, payouts, and store products/inventory. `kind` is `store` or
+  `driver`; `me` resolves the signed-in account. Other IDs require ownership or
+  admin access. Store responses include the owner's locations for switching.
+- Admin `PUT /accounts/:kind/:accountId/settings`: `isCompanyOwned`,
+  `payoutsEnabled`, `financeFees` (category to `{ type: "percent"|"fixed", value }`).
+  Store categories: `products`; driver categories: `delivery`, `rides`.
+- `POST /accounts/:kind/:accountId/payouts`: `amount`, `currency`, `requestKey`.
+  Owners create early requests; admin creates manual requests. Use a unique
+  request key and reuse it for transport retries.
+- Admin `GET /admin/payouts`, `POST /admin/payouts/batch-weekly`, and
+  `PUT /admin/payouts/:payoutId`. Payment confirmation requires `status: "paid"`,
+  a real `reference` and `confirmedTransferred: true`; rejection uses
+  `status: "rejected"`. Finalized records cannot be reopened.
+- Admin `PUT /accounts/store/:accountId/inventory/:productId`: `price`,
+  `countInStock`, `minStock`; stock cannot go below reservations. Inventory
+  updates and shared catalog product edits notify affected linked store owners.
+
+Completed orders, rides (including reviewed terminated fares), and services post
+immutable ownership/fee allocations to `FinanceEntry`. Services belong entirely
+to AdduGenet. Fees are capped at gross; owned net income is zero. Defaults retain
+5% for independent products, the existing independent delivery rate (15% when
+unset), and zero for rides until configured. Fee and ownership updates affect
+future completed transactions. Source payment/refund changes update collection
+eligibility without rewriting allocations. Source deletion retains the ledger.
+Source mutations carry a durable synchronization key, cleared conditionally
+after ledger synchronization. Failed posting is retried on financial reads and
+weekly scans. Historical import runs once per database; subsequent reads scan
+only pending source updates.
+Unassigned income is not treated as company-owned and requires accounting review.
+Ledger amounts use integer minor units and original transaction currencies,
+not the checkout's optional converted payment currency.
+
+MongoDB transactions/replica-set support is required. Participant version writes
+serialize payout reservations, confirmations and ledger adjustments to prevent
+double withdrawal. Paid/pending payouts reduce availability; incomplete payments,
+cash already received directly, refunds and unassigned income cannot fund payouts.
+Cash platform fees remain part of the existing wallet/manual reconciliation
+workflow; digital delivery fees are deducted from earnings, not also from prepaid
+wallets. No wallet top-up is treated as earned income.
+
+There is **no automatic transfer provider**. All new payouts start pending.
+Weekly scans queue available balances once per account/currency/UTC Monday week;
+the first scan after a restart recovers the current week. The admin may also
+trigger the queue. No scan marks funds paid. Early requests use the same collected
+balance safeguards and require manual admin payment. Payout access defaults off.
+Above-balance requests are saved as `review_required` without reserving funds.
+Admin can reject them or confirm payment only after sufficient collected funds
+become available; manual review never permits an overdraw. Cash transaction totals
+are displayed for manual reconciliation and cannot fund these payout requests.
+Legacy store payout routes use the same reservation/confirmation safeguards.
+
+Before enabling payouts, review the first historical import: completed records
+are imported using saved subtotals/item amounts and current ownership/fee settings
+because old records did not snapshot those policies. Missing historical item
+prices require correction/review rather than inventing a payable balance. Keep
+the unique FinanceEntry and Payout request-key indexes enabled. Deploy this
+backend together with the shared website/mobile finance screens.
+
+Validate with `node --test tests/finance.test.js tests/order-dashboard.test.js`.
+
 ## Shared website notification inbox
 
 Business events sent through `helpers/push-notify.js` and the existing notification

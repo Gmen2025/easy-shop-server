@@ -189,6 +189,7 @@ app.use(`${api}/drivers`, driversRouter);
 app.use(`${api}/service-requests`, serviceRequestsRouter);
 app.use(`${api}/rides`, ridesRouter);
 app.use(`${api}/exchange-rate`, exchangeRouter);
+app.use(`${api}/finance`, require('./routers/finance'));
 // Notifications: push-token sub-routes live under /users, send/health under /notifications
 app.use(`${api}/notifications`, notificationsRouter);
 app.use(`${api}/users`, notificationsRouter);
@@ -211,6 +212,7 @@ function getConfiguredStripeEnvNames() {
 
 //Database connection
 connectDefaultDatabase().then(() => {
+  require('./service/financeScheduler').startFinanceScheduler();
   console.log('Database connection is ready...');
    // Bind to 0.0.0.0 to accept connections from any network interface
     const server = app.listen(PORT, '0.0.0.0', () => {

@@ -1720,8 +1720,11 @@ router.put("/:id", async (req, res) => {
     try {
       const { Driver, DriverWalletTransaction } = req.dbModels;
       const driverDoc = await Driver.findById(order.driver._id);
-      if (driverDoc) {
-        const commissionAmount = Math.round(Number(order.deliveryFee || 0) * getCommissionRate(driverDoc) * 100) / 100;
+      const cashPayment = /cash|cod|pay.?on.?delivery/i.test(String(order.paymentMethod || order.methodName || ""));
+      if (driverDoc && !driverDoc.isCompanyOwned && cashPayment) {
+        const entry = await req.dbModels.FinanceEntry.findOne({ sourceType: "order", sourceId: order._id, category: "delivery" });
+        const commissionAmount = entry ? entry.platformMinor / 100 :
+          Math.round(Number(order.deliveryFee || 0) * getCommissionRate(driverDoc) * 100) / 100;
         if (commissionAmount > 0) {
           await debitCommission({
             Driver,

@@ -4,8 +4,10 @@ const payoutSchema = new mongoose.Schema({
   store: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Store',
-    required: true,
+    default: null,
   },
+  driver: { type: mongoose.Schema.Types.ObjectId, ref: 'Driver', default: null },
+  requestKey: { type: String },
   amount: {
     type: Number,
     required: true,
@@ -17,12 +19,12 @@ const payoutSchema = new mongoose.Schema({
   },
   payoutType: {
     type: String,
-    enum: ['weekly', 'early_request'],
+    enum: ['weekly', 'early_request', 'manual'],
     default: 'early_request',
   },
   status: {
     type: String,
-    enum: ['pending', 'processing', 'paid', 'rejected'],
+    enum: ['pending', 'processing', 'review_required', 'paid', 'rejected'],
     default: 'pending',
   },
   method: {
@@ -56,6 +58,7 @@ const payoutSchema = new mongoose.Schema({
   },
 });
 
+payoutSchema.index({ requestKey: 1 }, { unique: true, sparse: true });
 payoutSchema.virtual('id').get(function () {
   return this._id.toHexString();
 });

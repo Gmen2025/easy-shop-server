@@ -19,6 +19,7 @@ const { rideSchema } = require('../models/ride');
 const { rideTripSchema } = require('../models/ride-trip');
 const { authRecordSchema, authIdentitySchema } = require('../models/auth-record');
 const { notificationSchema } = require('../models/notification');
+const { financeEntrySchema } = require('../models/finance-entry');
 
 const DEFAULT_DB_NAME = process.env.DEFAULT_DB_NAME || 'E_Shopping';
 const DEFAULT_ALLOWED_DBS = ['E_Shopping', 'E_Shopping_2', 'E_ShopUSA', 'E_ShoppingUSA'];
@@ -115,6 +116,7 @@ function getModelsForDb(dbName) {
     Driver: db.models.Driver || db.model('Driver', driverSchema),
     Review: db.models.Review || db.model('Review', reviewSchema),
     Payout: db.models.Payout || db.model('Payout', payoutSchema),
+    FinanceEntry: db.models.FinanceEntry || db.model('FinanceEntry', financeEntrySchema),
     ServiceRequest: db.models.ServiceRequest || db.model('ServiceRequest', serviceRequestSchema),
     DriverWalletTransaction:
       db.models.DriverWalletTransaction || db.model('DriverWalletTransaction', driverWalletTransactionSchema),

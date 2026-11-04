@@ -394,7 +394,28 @@ router.put('/:id', uploadOptions.single('image'), async(req, res) => {
     if(!updatedProduct)
     return res.status(404).send('the product cannot be updated!')
     
-    res.send(updatedProduct);
+    let notificationWarnings = [];
+    if (req.auth?.isAdmin) {
+        try {
+            const storeIds = [product.store, resolvedStore].filter(Boolean);
+            if (req.dbModels.StoreInventory) {
+                const inventory = await req.dbModels.StoreInventory.find({ product: product._id }).select("store").lean();
+                storeIds.push(...inventory.map((row) => row.store));
+            }
+            const stores = await Store.find({ _id: { $in: storeIds } }).select("owner").lean();
+            const owners = [...new Set(stores.filter((store) => store.owner).map((store) => String(store.owner)))];
+            const results = await Promise.all(owners.map((userId) => sendPushToUser({
+                User: req.dbModels.User, userId, title: "Product updated by Admin",
+                body: `${updatedProduct.name} was updated. Review the product details and your store inventory.`,
+                data: { type: "product_updated", productId: String(updatedProduct._id) },
+            })));
+            notificationWarnings = results.filter((result) => result.error).map((result) => result.error);
+        } catch (error) {
+            console.error("Product update notification failed:", error.message);
+            notificationWarnings = ["Product saved, but owner notifications failed."];
+        }
+    }
+    res.send(notificationWarnings.length ? { ...updatedProduct.toObject(), notificationWarnings } : updatedProduct);
 })
 
 /**

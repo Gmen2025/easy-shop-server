@@ -35,6 +35,7 @@ const rideSchema = new mongoose.Schema({
   bankReference: String,
   paymentPaidAt: Date,
 }, { timestamps: true });
+rideSchema.plugin(require("../helpers/finance-hooks"), "ride");
 rideSchema.index({ status: 1, offerDeadline: 1 });
 rideSchema.index({ user: 1, createdAt: -1 });
 rideSchema.index({ trip: 1, status: 1 });

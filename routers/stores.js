@@ -7,6 +7,7 @@ const { getDeliverySchedule } = require("../helpers/delivery");
 const { summarizeStoreOrder, buildStoreOrderSummary } = require("../helpers/store-order-view");
 const { reconcileUnassignedPickupStores } = require("../helpers/fulfillment-routing");
 const { inventoryEnabled } = require("../helpers/store-inventory");
+const finance = require("../helpers/finance");
 router.use(require("./store-inventory"));
 
 const requireAdmin = (req, res, next) => {
@@ -368,13 +369,10 @@ router.get("/me/dashboard", async (req, res) => {
       })
     );
 
-    const paidOut = payouts
-      .filter((payout) => payout.status === "paid")
-      .reduce((sum, payout) => sum + Number(payout.amount || 0), 0);
-    const pendingPayout = payouts
-      .filter((payout) => ["pending", "processing"].includes(payout.status))
-      .reduce((sum, payout) => sum + Number(payout.amount || 0), 0);
-    const lifetimeEarnings = delivered.reduce((sum, order) => sum + order.sales, 0);
+    const financial = await finance.participantFinance(req.dbModels, "store", store._id);
+    const balance = financial.balances.find((item) => item.currency === (/USA/i.test(req.dbName) ? "USD" : "ETB"));
+    const paidOut = balance.paidOut;
+    const pendingPayout = balance.pending;
     const lowStock = products.filter(
       (product) => product.countInStock > 0 && product.countInStock <= Number(product.minStock || 0)
     ).length;
@@ -404,7 +402,8 @@ router.get("/me/dashboard", async (req, res) => {
       payouts: {
         paidOut,
         pending: pendingPayout,
-        available: Math.max(0, lifetimeEarnings - paidOut - pendingPayout),
+        available: balance.available,
+        shortfall: balance.shortfall,
       },
       recentOrders: recentOrders.map((order) => buildStoreOrderSummary(order, store._id, productIds)),
       activeOrders: activeOrders.map((order) => buildStoreOrderSummary(order, store._id, productIds)),
@@ -424,40 +423,10 @@ router.get("/me/dashboard", async (req, res) => {
 
 // Helper to compute store delivered revenue & balances for admin payout settlements
 async function computeStoreBalance(models, storeId) {
-  const { Order, Payout } = models;
-  const match = {
-    store: new mongoose.Types.ObjectId(storeId),
-    $or: [{ status: { $in: ["3", "Delivered"] } }, { deliveryStatus: "Delivered" }],
-  };
-  const orders = await Order.find(match).populate({
-    path: 'orderItems',
-    populate: { path: 'product', select: 'name price store' }
-  });
-
-  let gross = 0;
-  for (const order of orders) {
-    if (order.inventoryManaged) {
-      gross += summarizeStoreOrder(order, storeId, new Set()).sales;
-      continue;
-    }
-    let storeTotal = 0;
-    for (const item of order.orderItems || []) {
-      if (item?.product && String(item.product.store) === String(storeId)) {
-        storeTotal += (item.product.price || 0) * (item.quantity || 0);
-      }
-    }
-    if (storeTotal === 0 && order.totalPrice) storeTotal = order.totalPrice;
-    gross += storeTotal;
-  }
-
-  const COMMISSION_RATE = 0.05;
-  const totalEarned = gross * (1 - COMMISSION_RATE);
-  const payouts = await Payout.find({ store: storeId });
-  const paidOut = payouts.filter((p) => p.status === 'paid').reduce((s, p) => s + p.amount, 0);
-  const pending = payouts.filter((p) => ['pending', 'processing'].includes(p.status)).reduce((s, p) => s + p.amount, 0);
-  const available = Math.max(0, totalEarned - paidOut - pending);
-
-  return { gross, totalEarned, paidOut, pending, available: Number(available.toFixed(2)) };
+  await finance.reconcileFinance(models);
+  const financial = await finance.participantFinance(models, "store", storeId);
+  const currency = /USA/i.test(models.Store.db.name) ? "USD" : "ETB";
+  return financial.balances.find((item) => item.currency === currency);
 }
 
 // ---------------------------------------------------------------------------
@@ -599,7 +568,7 @@ router.get("/admin/payouts/eligible-weekly", requireAdmin, async (req, res) => {
  * @swagger
  * /api/v1/stores/admin/payouts/batch-weekly:
  *   post:
- *     summary: Execute weekly batch settlement for all active stores
+ *     summary: Queue weekly manual payout requests for enabled stores and drivers
  *     tags: [Store Payouts]
  *     security:
  *       - bearerAuth: []
@@ -617,8 +586,8 @@ router.get("/admin/payouts/eligible-weekly", requireAdmin, async (req, res) => {
  *                 example: 0
  *               status:
  *                 type: string
- *                 enum: [paid, processing]
- *                 default: paid
+ *                 enum: [pending]
+ *                 default: pending
  *               adminNotes:
  *                 type: string
  *     responses:
@@ -629,56 +598,10 @@ router.get("/admin/payouts/eligible-weekly", requireAdmin, async (req, res) => {
  */
 router.post("/admin/payouts/batch-weekly", requireAdmin, async (req, res) => {
   try {
-    const rawDb = String(req.body?.databaseName || req.query?.databaseName || req.dbName || "").trim();
-    const targetDb = normalizeDatabaseName(rawDb);
-    const isUSA = targetDb.toUpperCase().includes("USA");
-    const currency = isUSA ? "USD" : "ETB";
-
-    const models = getModelsForDb(targetDb);
-    const { Store, Payout } = models;
-
-    const approvedStores = await Store.find({ approvalStatus: "approved" });
-    const processed = [];
-    const minAmount = Number(req.body?.minAmount) || 0;
-    const referencePrefix = req.body?.referencePrefix || `BATCH-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}`;
-    const autoPay = req.body?.status === "paid" || req.body?.markAsPaid !== false;
-
-    for (const store of approvedStores) {
-      const balance = await computeStoreBalance(models, store._id);
-      if (balance.available > minAmount) {
-        const payout = new Payout({
-          store: store._id,
-          amount: balance.available,
-          currency,
-          payoutType: "weekly",
-          status: autoPay ? "paid" : "processing",
-          method: isUSA ? "stripe_or_wire" : "telebirr_or_cbe",
-          accountDetails: store.bankAccount || store.phone || "Store registered payout account",
-          reference: `${referencePrefix}-${String(store._id).slice(-4)}`,
-          adminNotes: req.body?.adminNotes || `Weekly automatic platform settlement for period ending ${new Date().toLocaleDateString()}`,
-          processedBy: req.auth.userId,
-          dateProcessed: autoPay ? new Date() : null,
-        });
-        const saved = await payout.save();
-        processed.push({
-          id: saved.id,
-          storeName: store.name,
-          amount: saved.amount,
-          currency,
-          status: saved.status,
-          reference: saved.reference,
-        });
-      }
+    if (req.body.status === "paid" || req.body.markAsPaid === true) {
+      return res.status(400).json({ message: "No payout provider is connected. Weekly batches only queue manual payments." });
     }
-
-    return res.json({
-      success: true,
-      message: `Processed weekly payout for ${processed.length} stores in ${targetDb}.`,
-      databaseName: targetDb,
-      currency,
-      totalPayouts: processed.length,
-      payouts: processed,
-    });
+    return res.json(await require("../service/financeScheduler").queueWeekly(req.dbModels));
   } catch (error) {
     console.error("Admin batch weekly payout error:", error);
     return res.status(500).json({ success: false, message: "Unable to process weekly batch payout." });
@@ -754,20 +677,7 @@ router.put("/admin/payouts/:payoutId", requireAdmin, async (req, res) => {
       return res.status(404).json({ success: false, message: "Payout record not found." });
     }
 
-    const { status, reference, adminNotes } = req.body;
-    if (status && !["pending", "processing", "paid", "rejected"].includes(status)) {
-      return res.status(400).json({ success: false, message: "Invalid payout status." });
-    }
-
-    if (status) payout.status = status;
-    if (reference !== undefined) payout.reference = reference;
-    if (adminNotes !== undefined) payout.adminNotes = adminNotes;
-    if (status === "paid" || status === "rejected") {
-      payout.dateProcessed = new Date();
-      payout.processedBy = req.auth.userId;
-    }
-
-    const updated = await payout.save();
+    const updated = await finance.updatePayout(getModelsForDb(targetDb), payout._id, req.body, req.auth.userId);
 
     return res.json({
       success: true,
@@ -777,7 +687,7 @@ router.put("/admin/payouts/:payoutId", requireAdmin, async (req, res) => {
     });
   } catch (error) {
     console.error("Admin update payout error:", error);
-    return res.status(500).json({ success: false, message: "Unable to update payout record." });
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to update payout record." });
   }
 });
 

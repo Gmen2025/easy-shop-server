@@ -42,6 +42,9 @@ const storeSchema = new mongoose.Schema({
   isOpen: { type: Boolean, default: true },
   // true for company-run fulfillment locations created directly by an admin (not a partner-owned store).
   isCompanyOwned: { type: Boolean, default: false },
+  financeFees: { type: mongoose.Schema.Types.Mixed, default: {} },
+  payoutsEnabled: { type: Boolean, default: false },
+  financeVersion: { type: Number, default: 0 },
   location: {
     type: {
       type: String,

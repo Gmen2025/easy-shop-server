@@ -6,7 +6,7 @@ const DEFAULT_SUSPEND_THRESHOLD = 0;
 const LOW_BALANCE_RENOTIFY_MS = 6 * 60 * 60 * 1000;
 
 function getCommissionRate(driver) {
-  const override = Number(driver?.commissionRate);
+  const override = driver?.commissionRate == null ? NaN : Number(driver.commissionRate);
   if (Number.isFinite(override) && override >= 0 && override <= 1) {
     return override;
   }

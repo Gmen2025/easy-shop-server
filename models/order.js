@@ -274,6 +274,7 @@ const orderSchema = new mongoose.Schema({
     
 });
 
+orderSchema.plugin(require("../helpers/finance-hooks"), "order");
 orderSchema.index({ driver: 1, deliveryStatus: 1, deliveredAt: -1 });
 orderSchema.index({ store: 1, deliveredAt: -1 });
 orderSchema.index({ store: 1, dateOrdered: -1 });
