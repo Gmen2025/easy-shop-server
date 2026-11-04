@@ -1,4 +1,5 @@
 const router = require("express").Router();
+const { operatorScope, operatorGet } = require("../helpers/operator-read");
 const mongoose = require("mongoose");
 const { CONFIG_KEY, validateConfig } = require("../helpers/ride-routing");
 const { conflict } = require("../helpers/store-inventory");
@@ -136,9 +137,11 @@ router.post("/me/start-trip", endpoint(async (req, res) => {
   });
   res.json({ startedAt });
 }));
-router.get("/me/driver", endpoint(async (req, res) => {
-  const driver = await selfDriver(req);
-  await expireDriverOffer(req, driver);
+operatorGet(router, "/me/driver", "/admin/drivers/:accountId/dashboard", endpoint(async (req, res) => {
+  const driver = req.params?.accountId
+    ? await req.dbModels.Driver.findOne(operatorScope(req, "driver", {})) : await selfDriver(req);
+  if (!driver) throw Object.assign(new Error("Driver not found."), { status: 404 });
+  if (!req.params?.accountId) await expireDriverOffer(req, driver);
   const current = await req.dbModels.Driver.findById(driver._id).lean();
   const trip = current.activeRideTrip && await req.dbModels.RideTrip.findById(current.activeRideTrip).lean();
   const offer = current.pendingRideOffer && await req.dbModels.Ride.findOne({

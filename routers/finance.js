@@ -2,6 +2,8 @@ const router = require("express").Router();
 const mongoose = require("mongoose");
 const finance = require("../helpers/finance");
 const { sendPushToUser } = require("../helpers/push-notify");
+const { inventoryEnabled } = require("../helpers/store-inventory");
+const { stockInput, createStoreProduct, addStoreListing } = require("../helpers/operator-products");
 
 const handle = (action) => async (req, res) => {
   try { await action(req, res); }
@@ -53,12 +55,69 @@ router.get("/admin/report", requireAdmin, handle(async (req, res) => {
 }));
 
 router.get("/admin/accounts", requireAdmin, handle(async (req, res) => {
-  const fields = "_id name email phone isCompanyOwned payoutsEnabled financeFees commissionRate approvalStatus";
+  const fields = "_id name email phone owner user isCompanyOwned payoutsEnabled financeFees commissionRate approvalStatus";
   const [stores, drivers] = await Promise.all([
-    req.dbModels.Store.find({}).select(fields).sort({ name: 1 }).lean(),
-    req.dbModels.Driver.find({}).select(fields).sort({ name: 1 }).lean(),
+    req.dbModels.Store.find({}).select(fields).populate("owner", "name email").sort({ name: 1 }).lean(),
+    req.dbModels.Driver.find({}).select(fields).populate("user", "name email").sort({ name: 1 }).lean(),
   ]);
-  res.json([...stores.map((value) => publicAccount(value, "store")), ...drivers.map((value) => publicAccount(value, "driver"))]);
+  const entry = (value, kind) => ({ ...publicAccount(value, kind), owner: value[kind === "store" ? "owner" : "user"] });
+  res.json([...stores.map((value) => entry(value, "store")), ...drivers.map((value) => entry(value, "driver"))]);
+}));
+
+router.get("/admin/catalog", requireAdmin, handle(async (req, res) => {
+  const products = await req.dbModels.Product.find({ approvalStatus: "approved" })
+    .select("_id name price countInStock category").populate("category", "name").sort({ name: 1 }).lean();
+  res.json(products);
+}));
+
+router.get("/accounts/:kind/:accountId/profile", requireAdmin, handle(async (req, res) => {
+  const participant = await account(req);
+  const kind = req.params.kind;
+  const fields = kind === "store"
+    ? ["address", "description", "logo", "category", "city", "country", "openHour", "closeHour", "isOpen", "isVerified", "parentStore", "location"]
+    : ["address", "vehicleType", "vehicle", "passengerSeats", "carClass", "serviceModes", "sharedIntakeOpen", "isAvailable", "isSuspended", "suspensionReason", "location", "profilePhotoUrl"];
+  const userId = participant[kind === "store" ? "owner" : "user"];
+  const owner = userId ? await req.dbModels.User.findById(userId).select("_id name email phone").lean() : null;
+  const locations = kind === "store" && userId
+    ? await req.dbModels.Store.find({ owner: userId }).select("_id name isCompanyOwned").lean() : [];
+  res.json({ account: { ...publicAccount(participant, kind), ...Object.fromEntries(fields.map((field) => [field, participant[field]])) },
+    owner, locations, inventoryEnabled: kind === "store" ? await inventoryEnabled(req.dbModels) : false });
+}));
+
+async function notifyAccount(req, participant, title, body, type) {
+  const userId = participant[req.params.kind === "driver" ? "user" : "owner"];
+  if (!userId || !await req.dbModels.User.exists({ _id: userId })) {
+    return { sent: 0, error: "No linked user account exists to receive this notification." };
+  }
+  return sendPushToUser({ User: req.dbModels.User, userId, title, body,
+    data: { type, kind: req.params.kind || "store", accountId: String(participant._id) } });
+}
+
+router.post("/accounts/:kind/:accountId/notifications", requireAdmin, handle(async (req, res) => {
+  const participant = await account(req);
+  const title = typeof req.body.title === "string" ? req.body.title.trim() : "";
+  const body = typeof req.body.body === "string" ? req.body.body.trim() : "";
+  if (!title || title.length > 120 || !body || body.length > 2000) throw finance.fail("Enter a title (up to 120 characters) and message (up to 2000 characters).");
+  const notification = await notifyAccount(req, participant, title, body, "admin_account_message");
+  if (notification.error) throw finance.fail(notification.error, 502);
+  res.json({ notification, message: "Notification saved to the account inbox; mobile push attempted where available." });
+}));
+
+router.post("/accounts/store/:accountId/products", requireAdmin, handle(async (req, res) => {
+  req.params.kind = "store";
+  const participant = await account(req);
+  const product = await createStoreProduct(req.dbModels, participant, req.body, req.auth.userId, await inventoryEnabled(req.dbModels));
+  const notification = await notifyAccount(req, participant, "Product added by Admin", `Admin added ${product.name} to your store. Review your products and inventory.`, "product_added");
+  res.status(201).json({ product, notification });
+}));
+
+router.post("/accounts/store/:accountId/inventory/:productId", requireAdmin, handle(async (req, res) => {
+  req.params.kind = "store";
+  const participant = await account(req);
+  if (!await inventoryEnabled(req.dbModels)) throw finance.fail("Migrate store inventory before adding catalog listings.", 409);
+  const inventory = await addStoreListing(req.dbModels, participant._id, req.params.productId, req.body);
+  const notification = await notifyAccount(req, participant, "Product listing added", "Admin added a catalog product to your store inventory.", "product_added");
+  res.status(201).json({ inventory, notification });
 }));
 
 router.get("/accounts/:kind/:accountId", handle(async (req, res) => {
@@ -90,14 +149,7 @@ router.get("/accounts/:kind/:accountId", handle(async (req, res) => {
 router.put("/accounts/store/:accountId/inventory/:productId", requireAdmin, handle(async (req, res) => {
   const { accountId, productId } = req.params;
   if (!mongoose.isValidObjectId(accountId) || !mongoose.isValidObjectId(productId)) throw finance.fail("Invalid inventory id.");
-  const price = req.body.price;
-  const countInStock = req.body.countInStock;
-  const minStock = req.body.minStock;
-  if (typeof price !== "number" || price < 0 || !Number.isFinite(price) ||
-      Math.abs(price * 100 - Math.round(price * 100)) > 1e-7 ||
-      !Number.isSafeInteger(countInStock) || countInStock < 0 || !Number.isSafeInteger(minStock) || minStock < 0) {
-    throw finance.fail("Enter a nonnegative price (two decimals) and whole stock quantities.");
-  }
+  const { price, countInStock, minStock } = stockInput(req.body);
   const participant = await req.dbModels.Store.findById(accountId);
   if (!participant) throw finance.fail("Store not found.", 404);
   const row = await req.dbModels.StoreInventory.findOneAndUpdate({

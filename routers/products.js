@@ -7,6 +7,7 @@ const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const { sendPushToUser } = require('../helpers/push-notify');
 const { isCompanyFulfillableProduct, reconcileUnassignedPickupStores } = require('../helpers/fulfillment-routing');
 const { aggregateCatalog, inventoryEnabled } = require('../helpers/store-inventory');
+const { operatorScope, operatorGet } = require("../helpers/operator-read");
 router.use(async (req, res, next) => {
     if (["POST", "PUT", "DELETE", "PATCH"].includes(req.method) &&
         !req.path.startsWith("/admin/") && !req.path.includes("/company-") &&
@@ -668,7 +669,7 @@ router.get('/admin/company-fulfillable', requireAdmin, async (req, res) => {
  *     security:
  *       - bearerAuth: []
  */
-router.get('/company/my-products', async (req, res) => {
+operatorGet(router, '/company/my-products', '/admin/stores/:accountId/fulfillment-products', async (req, res) => {
     try {
         const { Product, Store, Order } = req.dbModels;
         const userId = req.auth?.userId;
@@ -676,10 +677,11 @@ router.get('/company/my-products', async (req, res) => {
             return res.status(401).json({ success: false, message: 'Unauthorized' });
         }
 
-        const store = await Store.findOne({ owner: userId, isCompanyOwned: true });
+        const store = await Store.findOne(operatorScope(req, "store", { owner: userId, isCompanyOwned: true }));
         if (!store) {
             return res.status(403).json({ success: false, message: 'Only company stores can access this list.' });
         }
+        if (req.params?.accountId && await inventoryEnabled(req.dbModels)) return res.json({ success: true, products: [] });
 
         await reconcileUnassignedPickupStores(req.dbModels);
 
@@ -708,7 +710,7 @@ router.get('/company/my-products', async (req, res) => {
         return res.status(200).json({ success: true, radiusKm, products: uncovered });
     } catch (error) {
         console.error('Company store my-products error:', error);
-        return res.status(500).json({ success: false, message: 'Unable to load products for your store.' });
+        return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : 'Unable to load products for your store.' });
     }
 });
 

@@ -27,6 +27,31 @@ header required):
 - Admin `PUT /accounts/store/:accountId/inventory/:productId`: `price`,
   `countInStock`, `minStock`; stock cannot go below reservations. Inventory
   updates and shared catalog product edits notify affected linked store owners.
+- Admin `GET /accounts/:kind/:accountId/profile`: safe business profile, linked
+  account-holder contact fields and owner locations; no sign-in credentials.
+- Admin `GET /admin/catalog`: approved catalog options for store listings.
+- Admin `POST /accounts/store/:accountId/products`: `name`, `description`,
+  `brand`, `category`, HTTPS `image`/optional `images`, `price`, `countInStock`,
+  `minStock`; creates an approved product linked to this store and, after
+  inventory migration, its initial inventory in one transaction.
+- Admin `POST /accounts/store/:accountId/inventory/:productId`: adds an approved
+  existing catalog product with `price`, `countInStock`, `minStock`. Duplicate
+  listings return 409 rather than changing stock or reservations.
+- Admin `POST /accounts/:kind/:accountId/notifications`: `title` (1-120 chars),
+  `body` (1-2000 chars). Recipient is resolved server-side from the selected
+  account, not the request body. Messages persist without push tokens. Product
+  additions notify the linked owner; saved-write notification failures are
+  returned separately, while failed standalone notifications return an error.
+
+Admin business inspection uses shared GET handlers at
+`/stores/admin/:accountId/dashboard`, `/stores/admin/:accountId/assignments`,
+`/products/admin/stores/:accountId/fulfillment-products`,
+`/drivers/admin/:accountId/{dashboard,queue,available-deliveries,completed-today,wallet}`
+and `/rides/admin/drivers/:accountId/dashboard`. These require an authenticated
+admin, validate explicit account IDs, work for independent and owned accounts,
+and keep the caller's identity. Store inspection is per location, not a merged
+owner total. Existing `/me` behavior is preserved. No scoped admin POST/PUT
+delivery, fulfillment or ride impersonation endpoints are introduced.
 
 Completed orders, rides (including reviewed terminated fares), and services post
 immutable ownership/fee allocations to `FinanceEntry`. Services belong entirely
@@ -69,7 +94,7 @@ prices require correction/review rather than inventing a payable balance. Keep
 the unique FinanceEntry and Payout request-key indexes enabled. Deploy this
 backend together with the shared website/mobile finance screens.
 
-Validate with `node --test tests/finance.test.js tests/order-dashboard.test.js`.
+Validate with `node --test tests/finance.test.js tests/order-dashboard.test.js tests/operator-workspace.test.js`.
 
 ## Shared website notification inbox
 

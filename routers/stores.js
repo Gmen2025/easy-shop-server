@@ -8,6 +8,7 @@ const { summarizeStoreOrder, buildStoreOrderSummary } = require("../helpers/stor
 const { reconcileUnassignedPickupStores } = require("../helpers/fulfillment-routing");
 const { inventoryEnabled } = require("../helpers/store-inventory");
 const finance = require("../helpers/finance");
+const { operatorScope, operatorGet } = require("../helpers/operator-read");
 router.use(require("./store-inventory"));
 
 const requireAdmin = (req, res, next) => {
@@ -248,7 +249,7 @@ router.put("/admin/company-stores/:id", requireAdmin, async (req, res) => {
   }
 });
 
-router.get("/me/dashboard", async (req, res) => {
+operatorGet(router, "/me/dashboard", "/admin/:accountId/dashboard", async (req, res) => {
   try {
     const userId = req.auth?.userId;
     const { Store, Product, Order, OrderItem, Review, Payout } = req.dbModels;
@@ -256,7 +257,7 @@ router.get("/me/dashboard", async (req, res) => {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
-    const store = await Store.findOne({ owner: userId, isCompanyOwned: true }).select("_id name");
+    const store = await Store.findOne(operatorScope(req, "store", { owner: userId, isCompanyOwned: true })).select("_id name");
     if (!store) {
       return res.status(404).json({ success: false, message: "Company store profile not found." });
     }
@@ -274,7 +275,7 @@ router.get("/me/dashboard", async (req, res) => {
     };
     const oldestPeriodStart = periodStarts.yearly;
     const managed = await inventoryEnabled(req.dbModels);
-    const locations = managed ? await Store.find({ owner: userId }).select("_id").lean() : [store];
+    const locations = managed && !req.params?.accountId ? await Store.find({ owner: userId }).select("_id").lean() : [store];
     const storeIds = locations.map((location) => location._id);
 
     const fulfillmentProducts = await Product.find({
@@ -417,7 +418,7 @@ router.get("/me/dashboard", async (req, res) => {
     });
   } catch (error) {
     console.error("Company store dashboard fetch error:", error);
-    return res.status(500).json({ success: false, message: "Unable to load company store dashboard." });
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to load company store dashboard." });
   }
 });
 

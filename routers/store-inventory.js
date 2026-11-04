@@ -8,6 +8,7 @@ const {
 } = require("../helpers/store-inventory");
 const { reconcileFallbackStores, respondToFallbackStore } = require("../helpers/fallback-assignments");
 const { reconcileUnassignedPickupStores } = require("../helpers/fulfillment-routing");
+const { operatorScope, operatorGet } = require("../helpers/operator-read");
 
 function endpoint(action) {
   return async (req, res) => {
@@ -195,10 +196,12 @@ router.delete("/me/locations/:id/inventory/:productId", endpoint(async (req, res
   res.json({ success: true });
 }));
 
-router.get("/me/assignments", endpoint(async (req, res) => {
+operatorGet(router, "/me/assignments", "/admin/:accountId/assignments", endpoint(async (req, res) => {
   if (!req.auth?.userId) throw Object.assign(new Error("Unauthorized"), { status: 401 });
+  const scope = operatorScope(req, "store", { owner: req.auth.userId });
   await reconcileFallbackStores(req.dbModels);
-  const stores = await req.dbModels.Store.find({ owner: req.auth?.userId }).lean();
+  const stores = await req.dbModels.Store.find(scope).lean();
+  if (req.params.accountId && !stores.length) throw Object.assign(new Error("Store not found."), { status: 404 });
   const orders = await req.dbModels.Order.find({
     adminReviewRequired: { $exists: false },
     status: { $nin: ["3", "4", "Delivered", "Cancelled"] },

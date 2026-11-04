@@ -1,4 +1,5 @@
 const router = require("express").Router();
+const { operatorScope, operatorGet } = require("../helpers/operator-read");
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const { getNearbyDrivers } = require("../helpers/driver-location");
@@ -25,14 +26,15 @@ const { assignDriverToOrder } = require("../service/dispatchService");
 
 router.post("/me/orders/:id/route", createDriverRouteHandler());
 
-router.get("/me/available-deliveries", async (req, res) => {
+operatorGet(router, "/me/available-deliveries", "/admin/:accountId/available-deliveries", async (req, res) => {
   try {
     if (!req.auth?.userId) return res.status(401).json({ success: false, message: "Unauthorized" });
-    let driver = await req.dbModels.Driver.findOne({ user: req.auth.userId });
+    const scope = operatorScope(req, "driver", { user: req.auth.userId });
+    let driver = await req.dbModels.Driver.findOne(scope);
     if (!driver) return res.status(403).json({ success: false, message: "A driver profile is required." });
-    if (driver.isCompanyOwned) {
+    if (driver.isCompanyOwned && !req.params?.accountId) {
       await restoreCompanyDriversSuspendedForBalance(req.dbModels.Driver);
-      driver = await req.dbModels.Driver.findOne({ user: req.auth.userId });
+      driver = await req.dbModels.Driver.findOne(scope);
       if (!driver) return res.status(403).json({ success: false, message: "A driver profile is required." });
     }
     const orders = await listAvailableDeliveries(req.dbModels, driver, MAX_ACTIVE_ORDERS_PER_DRIVER);
@@ -627,7 +629,7 @@ router.put("/me", async (req, res) => {
 // Driver's current delivery queue: every order assigned to them that isn't delivered yet,
 // ordered the way they should work it (batch, then sequence). Drop-off details are
 // sanitized per order until that specific order has been marked picked up.
-router.get("/me/queue", async (req, res) => {
+operatorGet(router, "/me/queue", "/admin/:accountId/queue", async (req, res) => {
   try {
     const userId = req.auth?.userId;
     const { Driver, Order } = req.dbModels;
@@ -635,7 +637,7 @@ router.get("/me/queue", async (req, res) => {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
-    const driver = await Driver.findOne({ user: userId }).select("_id isCompanyOwned location");
+    const driver = await Driver.findOne(operatorScope(req, "driver", { user: userId })).select("_id isCompanyOwned location");
     if (!driver) {
       return res.status(404).json({ success: false, message: "Driver profile not found." });
     }
@@ -683,7 +685,7 @@ router.get("/me/queue", async (req, res) => {
     });
   } catch (error) {
     console.error("Driver queue fetch error:", error);
-    return res.status(500).json({ success: false, message: "Unable to load delivery queue right now." });
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to load delivery queue right now." });
   }
 });
 
@@ -696,7 +698,7 @@ router.get("/me/queue", async (req, res) => {
  *     security:
  *       - bearerAuth: []
  */
-router.get("/me/completed-today", async (req, res) => {
+operatorGet(router, "/me/completed-today", "/admin/:accountId/completed-today", async (req, res) => {
   try {
     const userId = req.auth?.userId;
     const { Driver, Order } = req.dbModels;
@@ -704,7 +706,7 @@ router.get("/me/completed-today", async (req, res) => {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
-    const driver = await Driver.findOne({ user: userId }).select("_id");
+    const driver = await Driver.findOne(operatorScope(req, "driver", { user: userId })).select("_id");
     if (!driver) {
       return res.status(404).json({ success: false, message: "Driver profile not found." });
     }
@@ -732,11 +734,11 @@ router.get("/me/completed-today", async (req, res) => {
     });
   } catch (error) {
     console.error("Driver completed-today fetch error:", error);
-    return res.status(500).json({ success: false, message: "Unable to load today's completed deliveries." });
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to load today's completed deliveries." });
   }
 });
 
-router.get("/me/dashboard", async (req, res) => {
+operatorGet(router, "/me/dashboard", "/admin/:accountId/dashboard", async (req, res) => {
   try {
     const userId = req.auth?.userId;
     const { Driver, Order } = req.dbModels;
@@ -744,7 +746,7 @@ router.get("/me/dashboard", async (req, res) => {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
-    const driver = await Driver.findOne({ user: userId }).select("_id");
+    const driver = await Driver.findOne(operatorScope(req, "driver", { user: userId })).select("_id");
     if (!driver) {
       return res.status(404).json({ success: false, message: "Driver profile not found." });
     }
@@ -802,7 +804,7 @@ router.get("/me/dashboard", async (req, res) => {
     });
   } catch (error) {
     console.error("Driver dashboard fetch error:", error);
-    return res.status(500).json({ success: false, message: "Unable to load driver dashboard." });
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to load driver dashboard." });
   }
 });
 
@@ -810,7 +812,7 @@ router.get("/me/dashboard", async (req, res) => {
 // Driver wallet: deposits, commission balance, low-balance alerts, suspension.
 // ---------------------------------------------------------------------------
 
-router.get("/me/wallet", async (req, res) => {
+operatorGet(router, "/me/wallet", "/admin/:accountId/wallet", async (req, res) => {
   try {
     const userId = req.auth?.userId;
     const { Driver, DriverWalletTransaction } = req.dbModels;
@@ -818,7 +820,7 @@ router.get("/me/wallet", async (req, res) => {
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
-    const driver = await Driver.findOne({ user: userId });
+    const driver = await Driver.findOne(operatorScope(req, "driver", { user: userId }));
     if (!driver) {
       return res.status(404).json({ success: false, message: "Driver profile not found." });
     }
@@ -840,7 +842,7 @@ router.get("/me/wallet", async (req, res) => {
     });
   } catch (error) {
     console.error("Driver wallet fetch error:", error);
-    return res.status(500).json({ success: false, message: "Unable to load wallet right now." });
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to load wallet right now." });
   }
 });
 
