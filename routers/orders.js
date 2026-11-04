@@ -15,7 +15,10 @@ const { restoreCompanyDriversSuspendedForBalance } = require("../helpers/driver-
 const { getDriverLocation } = require("../helpers/driver-location");
 const { getCommissionRate, debitCommission } = require("../helpers/driver-wallet");
 const { buildDriverOrderSummary, isDropoffRevealed } = require("../helpers/driver-view");
-const { inventoryEnabled, normalizeLines, eligibleStores, reserve, assignStore, updateManagedOrder } = require("../helpers/store-inventory");
+const {
+  inventoryEnabled, nearestStorePricingEnabled, normalizeLines, eligibleStores,
+  reserve, assignStore, updateManagedOrder,
+} = require("../helpers/store-inventory");
 const { vehicleMatches } = require("../helpers/vehicle-delivery");
 const { orderReady, driverRejected } = require("../helpers/delivery-availability");
 
@@ -1104,6 +1107,13 @@ router.post(`/`, async (req, res) => {
     .lean();
 
   const inventoryManaged = await inventoryEnabled(req.dbModels);
+  const nearestPricing = await nearestStorePricingEnabled(req.dbModels);
+  if (nearestPricing && !inventoryManaged) {
+    return res.status(409).json({ success: false, message: "Nearest-store pricing requires migrated store inventory." });
+  }
+  if (nearestPricing && !req.body.storefrontId) {
+    return res.status(409).json({ success: false, message: "Resolve a storefront using the customer's location before checkout." });
+  }
   let inventoryLines = [];
   let inventoryStores = [];
   if (inventoryManaged) {

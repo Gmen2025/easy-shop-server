@@ -13,6 +13,11 @@ const categorySchema = new mongoose.Schema({
     },
     image: {
         type: String
+    },
+    createdByStore: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Store',
+        default: null
     }
 });
 

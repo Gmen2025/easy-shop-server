@@ -1,5 +1,17 @@
 const express = require('express');
 const router = require("express").Router();
+const { notifyStoreMutation } = require("../helpers/store-inventory");
+
+async function categoryStoreIds(models, categoryId) {
+    const products = await models.Product.find({ category: categoryId }).select("_id store createdByStore").lean();
+    const storeIds = products.flatMap((product) => [product.store, product.createdByStore]).filter(Boolean);
+    if (models.StoreInventory && products.length) {
+        const rows = await models.StoreInventory.find({ product: { $in: products.map((product) => product._id) } })
+            .select("store").lean();
+        storeIds.push(...rows.map((row) => row.store));
+    }
+    return [...new Set(storeIds.map(String))];
+}
 router.use((req, res, next) => {
     if (!["GET", "HEAD", "OPTIONS"].includes(req.method) && !req.auth?.isAdmin) {
         return res.status(403).json({ success: false, message: "Only Admin can manage categories." });
@@ -104,7 +116,12 @@ router.post(`/`, async (req, res) => {
     if(!category)
     return res.status(404).send('the category cannot be created!');
 
-    res.send(category);
+    const notificationWarnings = await notifyStoreMutation({
+        models: req.dbModels, title: "Category created by Admin",
+        body: `${category.name} was added to the shared catalog.`,
+        data: { type: "category_created", categoryId: String(category._id) },
+    });
+    res.send({ ...category.toObject({ virtuals: true }), notificationWarnings });
 })
 
 /**
@@ -155,7 +172,12 @@ router.put('/:id', async(req, res) => {
      if(!category) {
          return res.status(400).send('the category cannot be updated!')
      }
-        res.send(category);
+        const notificationWarnings = await notifyStoreMutation({
+            models: req.dbModels, storeIds: [category.createdByStore, ...await categoryStoreIds(req.dbModels, category._id)].filter(Boolean),
+            title: "Category updated by Admin", body: `${category.name} was updated.`,
+            data: { type: "category_updated", categoryId: String(category._id) },
+        });
+        res.send({ ...category.toObject({ virtuals: true }), notificationWarnings });
 })
 
 /**
@@ -181,18 +203,24 @@ router.put('/:id', async(req, res) => {
  *       400:
  *         description: Delete operation failed
  */
-router.delete('/:id', (req, res) => {
+router.delete('/:id', async (req, res) => {
     const { Category } = req.dbModels;
-    
-  Category.findByIdAndDelete(req.params.id).exec().then(category => {  
-      if(category) {
-          return res.status(200).json({success: true, message: 'the category is deleted!'})
-      } else {
-          return res.status(404).json({success: false, message: 'category not found!'})
-      }
-  }).catch(err => { 
-      return res.status(400).json({success: false, error: err})
-  })
+    try {
+        const category = await Category.findById(req.params.id);
+        if (!category) return res.status(404).json({ success: false, message: 'Category not found.' });
+        if (await req.dbModels.Product.countDocuments({ category: category._id })) {
+            return res.status(409).json({ success: false, message: 'Categories used by products cannot be deleted.' });
+        }
+        await category.deleteOne();
+        const notificationWarnings = await notifyStoreMutation({
+            models: req.dbModels, storeIds: [category.createdByStore].filter(Boolean), title: "Category deleted by Admin",
+            body: `${category.name} was removed from the shared catalog.`,
+            data: { type: "category_deleted", categoryId: String(category._id) },
+        });
+        return res.status(200).json({ success: true, notificationWarnings });
+    } catch (error) {
+        return res.status(400).json({ success: false, message: error.message });
+    }
 })
 
 module.exports = router;

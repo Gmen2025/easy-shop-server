@@ -3,6 +3,7 @@ const extraSwaggerPaths = require('./swagger-extra');
 const authSwagger = require('./swagger-auth');
 const commerceSwagger = require('./swagger-commerce');
 const ridesSwagger = require('./swagger-rides');
+const financialManagementSwagger = require('./swagger-financial-management');
 const path = require('node:path');
 
 const swaggerOptions = {
@@ -96,6 +97,7 @@ const swaggerOptions = {
                 { $ref: '#/components/schemas/Store' }
               ]
             },
+            createdByStore: { type: 'string', nullable: true, description: 'Store owner provenance; assigned by the server.' },
             countInStock: { type: 'number', minimum: 0, maximum: 255 },
             rating: { type: 'number', default: 0 },
             numReviews: { type: 'number', default: 0 },
@@ -216,7 +218,8 @@ const swaggerOptions = {
             name: { type: 'string' },
             color: { type: 'string' },
             icon: { type: 'string' },
-            image: { type: 'string' }
+            image: { type: 'string' },
+            createdByStore: { type: 'string', nullable: true, description: 'Store owner provenance; assigned by the server.' }
           }
         },
         Order: {
@@ -508,6 +511,7 @@ swaggerDocs.components.parameters = {
   ...(swaggerDocs.components.parameters || {}), ...authSwagger.parameters,
 };
 Object.assign(swaggerDocs.paths, authSwagger.paths, commerceSwagger.paths, ridesSwagger.paths);
+Object.assign(swaggerDocs.paths, financialManagementSwagger.paths);
 for (const endpoint of ['login', 'driver-login', 'store-owner-login']) {
   const operation = swaggerDocs.paths[`/api/v1/users/${endpoint}`].post;
   operation.security = [];

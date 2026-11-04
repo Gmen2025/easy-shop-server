@@ -1,10 +1,11 @@
 const router = require("express").Router();
 const mongoose = require("mongoose");
 const { normalizeStoreLogo } = require("../helpers/store-logo");
+const { createStoreProduct } = require("../helpers/operator-products");
 router.use(require("./multi-delivery"));
 const {
   CONFIG_KEY, inventoryEnabled, publicStore, conflict, normalizeLines,
-  eligibleStores, reroute,
+  eligibleStores, reroute, notifyStoreMutation, nearestStorePricingEnabled,
 } = require("../helpers/store-inventory");
 const { reconcileFallbackStores, respondToFallbackStore } = require("../helpers/fallback-assignments");
 const { reconcileUnassignedPickupStores } = require("../helpers/fulfillment-routing");
@@ -66,6 +67,118 @@ function profile(body, creating = false) {
   return result;
 }
 
+function badRequest(message) {
+  return Object.assign(new Error(message), { status: 400 });
+}
+
+function normalizedName(value) {
+  return typeof value === "string" ? value.trim().replace(/\s+/g, " ").toLocaleLowerCase() : "";
+}
+
+function imageList(value) {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      value = Array.isArray(parsed) ? parsed : [trimmed];
+    } catch { value = [trimmed]; }
+  }
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((url) => typeof url === "string").map((url) => url.trim()).filter(Boolean))].slice(0, 10);
+}
+
+function validateOwnerProductBody(body, creating) {
+  const protectedFields = [
+    "store", "storefrontId", "createdByStore", "approvalStatus", "submittedBy", "approvedAt",
+    "approvedBy", "rating", "numReviews", "isFeatured", "soldCount", "rejectionReason",
+  ];
+  if (protectedFields.some((field) => body[field] !== undefined)) {
+    throw badRequest("Store owners cannot change product ownership, approval, rating, reviews or featured status.");
+  }
+  const images = imageList(body.images);
+  const image = typeof body.image === "string" ? body.image.trim() : "";
+  const resolvedImage = image || images[0] || "";
+  if ((creating || body.name !== undefined) &&
+      (typeof body.name !== "string" || !body.name.trim() || body.name.trim().length > 200)) {
+    throw badRequest("A valid product name is required.");
+  }
+  if ((creating || body.description !== undefined) &&
+      (typeof body.description !== "string" || !body.description.trim())) {
+    throw badRequest("A product description is required.");
+  }
+  if ((creating || body.category !== undefined) && !body.category) throw badRequest("A valid category is required.");
+  if (creating || body.price !== undefined) {
+    const price = Number(body.price);
+    if (body.price == null || body.price === "" || !Number.isFinite(price) || price < 0 ||
+        Math.abs(price * 100 - Math.round(price * 100)) > 0.000001) {
+      throw badRequest("Enter a non-negative price with up to 2 decimals.");
+    }
+  }
+  if (creating && !resolvedImage) throw badRequest("At least one product image is required.");
+  if (creating || body.countInStock !== undefined) {
+    const stock = Number(body.countInStock);
+    if (body.countInStock == null || body.countInStock === "" || !Number.isSafeInteger(stock) || stock < 0 || stock > 100000) {
+      throw badRequest("Enter a whole stock quantity from 0 to 100000.");
+    }
+  }
+  if (body.minStock !== undefined) {
+    const minStock = Number(body.minStock);
+    if (body.minStock === "" || !Number.isSafeInteger(minStock) || minStock < 0 || minStock > 100000) {
+      throw badRequest("Enter a whole low-stock threshold from 0 to 100000.");
+    }
+  }
+  for (const field of ["name", "brand", "description", "richDescription"]) {
+    if (body[field] !== undefined && (typeof body[field] !== "string" ||
+        body[field].trim().length > (field === "description" || field === "richDescription" ? 5000 : 200))) {
+      throw badRequest(`Invalid ${field}.`);
+    }
+  }
+  const changes = {};
+  for (const field of ["name", "brand", "description", "richDescription"]) {
+    if (body[field] !== undefined) changes[field] = body[field].trim();
+  }
+  if (body.category !== undefined) changes.category = body.category;
+  if (body.price !== undefined) changes.price = Number(body.price);
+  if (body.countInStock !== undefined) changes.countInStock = Number(body.countInStock);
+  if (body.minStock !== undefined) changes.minStock = Number(body.minStock);
+  if (body.image !== undefined || body.images !== undefined || creating) {
+    changes.image = resolvedImage;
+    changes.images = imageList([resolvedImage, ...images]);
+  }
+  if (creating && !changes.description) changes.description = changes.name;
+  if (creating && changes.brand === undefined) changes.brand = "";
+  return changes;
+}
+
+async function resolveCategory(Category, value) {
+  const raw = typeof value === "object" && value ? (value._id || value.id || value.name) : value;
+  if (mongoose.isValidObjectId(raw)) {
+    const category = await Category.findById(raw);
+    if (!category) throw badRequest("Invalid category.");
+    return category;
+  }
+  const normalized = normalizedName(raw);
+  if (!normalized) throw badRequest("A valid category is required.");
+  const categories = await Category.find({}).lean();
+  const category = categories.find((entry) => normalizedName(entry.name) === normalized);
+  if (!category) throw badRequest("Choose a category from the shared category list.");
+  return category;
+}
+
+function productResponse(product, inventory, storeId, notificationWarnings = []) {
+  const value = product.toObject ? product.toObject({ virtuals: true }) : { ...product };
+  return {
+    ...value,
+    price: inventory.price,
+    countInStock: inventory.countInStock,
+    minStock: inventory.minStock,
+    inventoryManaged: true,
+    storefrontId: storeId,
+    notificationWarnings,
+  };
+}
+
 router.get("/directory", endpoint(async (req, res) => {
   const stores = await req.dbModels.Store.find({ approvalStatus: "approved", isOpen: { $ne: false } }).sort({ name: 1 }).lean();
   res.json(stores.map(publicStore));
@@ -101,9 +214,15 @@ router.get("/directory/:id/products", endpoint(async (req, res) => {
 }));
 
 router.post("/checkout-availability", endpoint(async (req, res) => {
-  if (!await inventoryEnabled(req.dbModels)) return res.json({ inventoryManaged: false });
+  const nearestPricing = await nearestStorePricingEnabled(req.dbModels);
+  const enabled = await inventoryEnabled(req.dbModels);
+  if (nearestPricing && !enabled) throw conflict("Nearest-store pricing requires migrated store inventory.");
+  if (!enabled) return res.json({ inventoryManaged: false });
   const lines = normalizeLines(req.body.orderItems);
   if (req.body.storefrontId && !mongoose.isValidObjectId(req.body.storefrontId)) throw conflict("Invalid storefront ID.");
+  if (nearestPricing && !req.body.storefrontId) {
+    throw conflict("Resolve a storefront using the customer's location before quoting this cart.");
+  }
   const products = await req.dbModels.Product.find({ _id: { $in: lines.map((line) => line.product) } }).lean();
   for (const line of lines) {
     const product = products.find((entry) => String(entry._id) === line.product);
@@ -137,7 +256,12 @@ router.put("/me/locations/:id", endpoint(async (req, res) => {
   const store = await ownedStore(req, req.params.id);
   store.set(profile(req.body));
   await store.save();
-  res.json(publicStore(store));
+  const notificationWarnings = await notifyStoreMutation({
+    models: req.dbModels, storeIds: [store._id], title: "Store profile updated",
+    body: `${store.name} updated its store profile.`,
+    data: { type: "store_profile_updated", storeId: String(store._id) },
+  });
+  res.json({ ...publicStore(store), notificationWarnings });
 }));
 
 router.post("/me/locations/:id/branches", endpoint(async (req, res) => {
@@ -157,8 +281,174 @@ router.get("/me/locations/:id/inventory", endpoint(async (req, res) => {
   res.json(rows);
 }));
 
+router.post("/me/locations/:id/products", endpoint(async (req, res) => {
+  const store = await ownedStore(req, req.params.id);
+  if (!await inventoryEnabled(req.dbModels)) throw conflict("Admin must migrate inventory before stores can create products.");
+  const changes = validateOwnerProductBody(req.body || {}, true);
+  const category = await resolveCategory(req.dbModels.Category, changes.category);
+  const product = await createStoreProduct(
+    req.dbModels,
+    store,
+    { ...changes, category: category._id },
+    null,
+    true,
+    { sharedCatalog: true, createdByStore: true, allowFeatured: false, includeApprovedBy: false },
+  );
+  const notificationWarnings = await notifyStoreMutation({
+    models: req.dbModels, storeIds: [store._id], title: "Product created",
+    body: `${product.name} was added to ${store.name}.`,
+    data: { type: "product_created", productId: String(product._id), storeId: String(store._id) },
+  });
+  res.status(201).json(productResponse(product, {
+    price: changes.price, countInStock: changes.countInStock, minStock: changes.minStock ?? 0,
+  }, store._id, notificationWarnings));
+}));
+
+router.put("/me/locations/:id/products/:productId", endpoint(async (req, res) => {
+  const store = await ownedStore(req, req.params.id);
+  if (!await inventoryEnabled(req.dbModels)) throw conflict("Store inventory has not been migrated.");
+  if (!mongoose.isValidObjectId(req.params.productId)) throw badRequest("Invalid product ID.");
+  const changes = validateOwnerProductBody(req.body || {}, false);
+  if (!Object.keys(changes).length) throw badRequest("Provide at least one product or inventory field to update.");
+  if (changes.category !== undefined) changes.category = (await resolveCategory(req.dbModels.Category, changes.category))._id;
+  const updated = await req.dbModels.Product.db.transaction(async (session) => {
+    const product = await req.dbModels.Product.findOne({
+      _id: req.params.productId, createdByStore: store._id,
+    }).session(session);
+    if (!product) throw Object.assign(new Error("Product not found in this store."), { status: 404 });
+    const inventory = await req.dbModels.StoreInventory.findOne({
+      store: store._id, product: product._id,
+    }).session(session);
+    if (!inventory) throw conflict("This store does not have inventory for the product.");
+    if (changes.countInStock !== undefined && changes.countInStock < inventory.reserved) {
+      throw conflict(`At least ${inventory.reserved} units are reserved for orders.`);
+    }
+    if (changes.price !== undefined && changes.price !== inventory.price && inventory.reserved > 0) {
+      throw conflict("Complete or cancel reserved orders before changing this store's price.");
+    }
+    const { price, countInStock, minStock, ...catalogChanges } = changes;
+    product.set(catalogChanges);
+    if (price !== undefined) inventory.price = price;
+    if (countInStock !== undefined) inventory.countInStock = countInStock;
+    if (minStock !== undefined) inventory.minStock = minStock;
+    await product.save({ session });
+    await inventory.save({ session });
+    return { product, inventory };
+  });
+  const notificationWarnings = await notifyStoreMutation({
+    models: req.dbModels, storeIds: [store._id], title: "Product updated",
+    body: `${updated.product.name} was updated in ${store.name}.`,
+    data: { type: "product_updated", productId: String(updated.product._id), storeId: String(store._id) },
+  });
+  res.json(productResponse(updated.product, updated.inventory, store._id, notificationWarnings));
+}));
+
+router.delete("/me/locations/:id/products/:productId", endpoint(async (req, res) => {
+  const store = await ownedStore(req, req.params.id);
+  if (!mongoose.isValidObjectId(req.params.productId)) throw badRequest("Invalid product ID.");
+  const deleted = await req.dbModels.Product.db.transaction(async (session) => {
+    const product = await req.dbModels.Product.findOne({
+      _id: req.params.productId, createdByStore: store._id,
+    }).session(session);
+    if (!product) throw Object.assign(new Error("Product not found in this store."), { status: 404 });
+    const inventory = await req.dbModels.StoreInventory.findOne({
+      store: store._id, product: product._id,
+    }).session(session);
+    if (inventory?.reserved > 0) throw conflict("Complete or cancel reserved orders before deleting this product.");
+    if (await req.dbModels.StoreInventory.countDocuments({
+      product: product._id, store: { $ne: store._id },
+    }).session(session)) {
+      throw conflict("This shared product is listed by another store. Remove your inventory listing instead of deleting the product.");
+    }
+    if (req.dbModels.OrderItem && await req.dbModels.OrderItem.exists({ product: product._id }).session(session)) {
+      throw conflict("Products referenced by orders cannot be deleted.");
+    }
+    if (inventory) {
+      const removed = await req.dbModels.StoreInventory.deleteOne({ _id: inventory._id, reserved: 0 }, { session });
+      if (removed.deletedCount !== 1) throw conflict("Inventory changed while deleting this product. Refresh and retry.");
+    }
+    await product.deleteOne({ session });
+    return product;
+  });
+  const notificationWarnings = await notifyStoreMutation({
+    models: req.dbModels, storeIds: [store._id], title: "Product deleted",
+    body: `${deleted.name} was removed from ${store.name}.`,
+    data: { type: "product_deleted", productId: String(deleted._id), storeId: String(store._id) },
+  });
+  res.json({ success: true, notificationWarnings });
+}));
+
+router.post("/me/locations/:id/categories", endpoint(async (req, res) => {
+  const store = await ownedStore(req, req.params.id);
+  const name = typeof req.body?.name === "string" ? req.body.name.trim().replace(/\s+/g, " ") : "";
+  if (!name || name.length > 100) throw badRequest("A valid category name is required.");
+  const categories = await req.dbModels.Category.find({}).lean();
+  const existing = categories.find((category) => normalizedName(category.name) === normalizedName(name));
+  if (existing) return res.json({ ...existing, reused: true, notificationWarnings: [] });
+  const category = await req.dbModels.Category.create({
+    name,
+    icon: typeof req.body.icon === "string" ? req.body.icon.trim() : "",
+    color: typeof req.body.color === "string" ? req.body.color.trim() : "",
+    image: typeof req.body.image === "string" ? req.body.image.trim() : "",
+    createdByStore: store._id,
+  });
+  const notificationWarnings = await notifyStoreMutation({
+    models: req.dbModels, storeIds: [store._id], title: "Category created",
+    body: `${store.name} added the shared category ${category.name}.`,
+    data: { type: "category_created", categoryId: String(category._id), storeId: String(store._id) },
+  });
+  res.status(201).json({ ...category.toObject({ virtuals: true }), notificationWarnings });
+}));
+
+router.put("/me/locations/:id/categories/:categoryId", endpoint(async (req, res) => {
+  const store = await ownedStore(req, req.params.id);
+  if (!mongoose.isValidObjectId(req.params.categoryId)) throw badRequest("Invalid category ID.");
+  const category = await req.dbModels.Category.findOne({ _id: req.params.categoryId, createdByStore: store._id });
+  if (!category) throw Object.assign(new Error("Category not found in this store."), { status: 404 });
+  if (req.body?.name !== undefined) {
+    const name = typeof req.body.name === "string" ? req.body.name.trim().replace(/\s+/g, " ") : "";
+    if (!name || name.length > 100) throw badRequest("A valid category name is required.");
+    const all = await req.dbModels.Category.find({}).lean();
+    if (all.some((item) => String(item._id) !== String(category._id) &&
+        normalizedName(item.name) === normalizedName(name))) {
+      throw conflict("A category with this name already exists.");
+    }
+    category.name = name;
+  }
+  for (const field of ["icon", "color", "image"]) {
+    if (req.body?.[field] !== undefined) {
+      if (typeof req.body[field] !== "string" || req.body[field].length > 500) throw badRequest(`Invalid ${field}.`);
+      category[field] = req.body[field].trim();
+    }
+  }
+  await category.save();
+  const notificationWarnings = await notifyStoreMutation({
+    models: req.dbModels, storeIds: [store._id], title: "Category updated",
+    body: `${category.name} was updated by ${store.name}.`,
+    data: { type: "category_updated", categoryId: String(category._id), storeId: String(store._id) },
+  });
+  res.json({ ...category.toObject({ virtuals: true }), notificationWarnings });
+}));
+
+router.delete("/me/locations/:id/categories/:categoryId", endpoint(async (req, res) => {
+  const store = await ownedStore(req, req.params.id);
+  if (!mongoose.isValidObjectId(req.params.categoryId)) throw badRequest("Invalid category ID.");
+  const category = await req.dbModels.Category.findOne({ _id: req.params.categoryId, createdByStore: store._id });
+  if (!category) throw Object.assign(new Error("Category not found in this store."), { status: 404 });
+  if (await req.dbModels.Product.countDocuments({ category: category._id })) {
+    throw conflict("Categories used by products cannot be deleted. Reassign or remove those products first.");
+  }
+  await category.deleteOne();
+  const notificationWarnings = await notifyStoreMutation({
+    models: req.dbModels, storeIds: [store._id], title: "Category deleted",
+    body: `${category.name} was removed by ${store.name}.`,
+    data: { type: "category_deleted", categoryId: String(category._id), storeId: String(store._id) },
+  });
+  res.json({ success: true, notificationWarnings });
+}));
+
 router.put("/me/locations/:id/inventory/:productId", endpoint(async (req, res) => {
-  await ownedStore(req, req.params.id);
+  const store = await ownedStore(req, req.params.id);
   if (!await inventoryEnabled(req.dbModels)) throw conflict("Admin must migrate inventory before stores can edit it.");
   if (!mongoose.isValidObjectId(req.params.productId)) throw conflict("Invalid product ID.");
   const product = await req.dbModels.Product.findById(req.params.productId).lean();
@@ -174,6 +464,9 @@ router.put("/me/locations/:id/inventory/:productId", endpoint(async (req, res) =
   const row = await req.dbModels.StoreInventory.db.transaction(async (session) => {
     const existing = await req.dbModels.StoreInventory.findOne({ store: req.params.id, product: req.params.productId }).session(session);
     if (existing && countInStock < existing.reserved) throw conflict(`At least ${existing.reserved} units are reserved for orders.`);
+    if (existing && price !== existing.price && existing.reserved > 0) {
+      throw conflict("Complete or cancel reserved orders before changing this store's price.");
+    }
     if (existing) {
       existing.set({ price, countInStock, minStock });
       return existing.save({ session });
@@ -183,17 +476,27 @@ router.put("/me/locations/:id/inventory/:productId", endpoint(async (req, res) =
     }], { session });
     return created;
   });
-  res.json(row);
+  const notificationWarnings = await notifyStoreMutation({
+    models: req.dbModels, storeIds: [store._id], title: "Inventory updated",
+    body: `Inventory was updated in ${store.name}.`,
+    data: { type: "inventory_updated", productId: String(req.params.productId), storeId: String(store._id) },
+  });
+  res.json({ ...row.toObject(), notificationWarnings });
 }));
 
 router.delete("/me/locations/:id/inventory/:productId", endpoint(async (req, res) => {
-  await ownedStore(req, req.params.id);
+  const store = await ownedStore(req, req.params.id);
   if (!mongoose.isValidObjectId(req.params.productId)) throw conflict("Invalid product ID.");
   const row = await req.dbModels.StoreInventory.findOneAndDelete({
     store: req.params.id, product: req.params.productId, reserved: 0,
   });
   if (!row) throw conflict("This listing is missing or has reserved orders. Complete or cancel those orders first.");
-  res.json({ success: true });
+  const notificationWarnings = await notifyStoreMutation({
+    models: req.dbModels, storeIds: [store._id], title: "Inventory listing removed",
+    body: `A product listing was removed from ${store.name}.`,
+    data: { type: "inventory_deleted", productId: String(req.params.productId), storeId: String(store._id) },
+  });
+  res.json({ success: true, notificationWarnings });
 }));
 
 operatorGet(router, "/me/assignments", "/admin/:accountId/assignments", endpoint(async (req, res) => {
@@ -201,7 +504,7 @@ operatorGet(router, "/me/assignments", "/admin/:accountId/assignments", endpoint
   const scope = operatorScope(req, "store", { owner: req.auth.userId });
   await reconcileFallbackStores(req.dbModels);
   const stores = await req.dbModels.Store.find(scope).lean();
-  if (req.params.accountId && !stores.length) throw Object.assign(new Error("Store not found."), { status: 404 });
+  if (req.params?.accountId && !stores.length) throw Object.assign(new Error("Store not found."), { status: 404 });
   const orders = await req.dbModels.Order.find({
     adminReviewRequired: { $exists: false },
     status: { $nin: ["3", "4", "Delivered", "Cancelled"] },

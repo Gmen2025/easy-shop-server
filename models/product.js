@@ -46,6 +46,11 @@ const productSchema = new mongoose.Schema({
     ref: 'Store',
     default: null
   },
+  createdByStore: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Store',
+    default: null
+  },
   countInStock: {
     type: Number,
     required: true,

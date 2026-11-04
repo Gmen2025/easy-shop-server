@@ -2,6 +2,49 @@
 
 A comprehensive REST API for an e-commerce platform built with Node.js, Express, and MongoDB. Features include JWT authentication, payment gateway integrations (Stripe & Telebirr), order management, and email notifications.
 
+## Store product publishing and nearest-store pricing
+
+Store owners manage their linked locations under `/api/v1/stores/me/locations`.
+`GET /{storeId}/inventory` returns populated full product documents, including
+`createdByStore`, category, brand, descriptions, and image gallery fields.
+After inventory migration, owners can:
+
+- `POST /{storeId}/products` to atomically create an approved shared-catalog
+  product and its store inventory; `PUT /{storeId}/products/{productId}` edits
+  only products created by that store and atomically updates its `price`,
+  `countInStock`, and `minStock`. Responses are the product document at top
+  level with `notificationWarnings: string[]`.
+- `DELETE /{storeId}/products/{productId}` to remove only their own unreserved
+  product with no order history. It never removes another store's inventory.
+- `POST`, `PUT`, and `DELETE /{storeId}/categories[/{categoryId}]` to create
+  or edit owned shared categories. Creation reuses an existing category whose
+  name matches after case/spacing normalization; categories referenced by
+  products cannot be deleted. Responses are top-level category documents with
+  `createdByStore` provenance and `notificationWarnings`.
+- Existing inventory and store-profile mutations also notify admins and the
+  linked owner. Failed notification delivery is returned in a warning array
+  without rolling back a saved mutation.
+
+`GET /api/v1/products/catalog-settings` reports
+`{ nearestStorePricingEnabled: boolean }` (false by default). Admins can update
+it with `PUT` and the same boolean field; enabling it requires completed store
+inventory migration. The flag does not rewrite catalog prices. With the flag
+on, clients hide home/search catalog prices and request
+`GET /api/v1/products/{productId}/nearest-store?latitude={lat}&longitude={lng}`
+for detail pricing. Coordinates must be supplied and valid; the response
+includes the nearest approved/open store with unreserved stock, its own
+inventory price and `storefrontId`. No eligible stock returns 404, never a
+catalog-price fallback. Checkout and `/stores/checkout-availability` require
+that resolved storefront context and customer coordinates while this mode is
+enabled; inventory reservation rechecks the selected store's current price and
+stock.
+
+Product image signing at `/api/v1/cloudinary/sign` (and legacy `/sign`) now
+requires an authenticated admin or approved linked store owner. Store owners
+may sign only `eshop/products` uploads. The signed upload still happens
+directly from the client to Cloudinary; send its `secure_url` in product
+`image`/`images`.
+
 ## Ownership accounting and manual settlements
 
 The website and mobile app share `/api/v1/finance` (JWT and selected-database
@@ -1583,3 +1626,11 @@ Validate with `node --test tests/driver-route.test.js`.
 See [social sign-in and optional two-factor authentication](docs/authentication.md)
 for API contracts, provider console setup, deployment secrets, required MongoDB
 indexes, recovery behavior, and focused tests.
+
+## Private revenue and expense tracking
+
+The admin-only `/api/v1/financial-management` module provides owner-private
+personal/business accrual ledgers, integer-minor-unit journals, transfers, savings
+goals, statements and audited period locks. It is manual accounting, separate
+from store/driver earnings and payouts. MongoDB replica-set transactions are
+required. See the [API contract and rollout guide](docs/financial-management.md).

@@ -6,7 +6,10 @@ const cloudinary = require('cloudinary').v2;
 const { CloudinaryStorage } = require('multer-storage-cloudinary');
 const { sendPushToUser } = require('../helpers/push-notify');
 const { isCompanyFulfillableProduct, reconcileUnassignedPickupStores } = require('../helpers/fulfillment-routing');
-const { aggregateCatalog, inventoryEnabled } = require('../helpers/store-inventory');
+const {
+    CONFIG_KEY, aggregateCatalog, inventoryEnabled, nearestStorePricingEnabled,
+    customerCoordinates, nearestInventoryForProduct, notifyStoreMutation,
+} = require('../helpers/store-inventory');
 const { operatorScope, operatorGet } = require("../helpers/operator-read");
 router.use(async (req, res, next) => {
     if (["POST", "PUT", "DELETE", "PATCH"].includes(req.method) &&
@@ -89,6 +92,75 @@ const normalizeImageInput = (value) => {
     return normalized;
 };
 
+router.get('/catalog-settings', async (req, res) => {
+    try {
+        res.set('Cache-Control', 'no-store');
+        return res.json({ nearestStorePricingEnabled: await nearestStorePricingEnabled(req.dbModels) });
+    } catch (error) {
+        return res.status(500).json({ success: false, message: 'Unable to load catalog settings.' });
+    }
+});
+
+router.put('/catalog-settings', async (req, res) => {
+    if (!req.auth?.isAdmin) return res.status(403).json({ success: false, message: 'Admin access required.' });
+    if (!req.body || typeof req.body.nearestStorePricingEnabled !== 'boolean') {
+        return res.status(400).json({ success: false, message: 'nearestStorePricingEnabled must be a boolean.' });
+    }
+    try {
+        if (req.body.nearestStorePricingEnabled && !await inventoryEnabled(req.dbModels)) {
+            return res.status(409).json({ success: false, message: 'Migrate store inventory before enabling nearest-store pricing.' });
+        }
+        await req.dbModels.SiteSetting.updateOne({ key: CONFIG_KEY }, {
+            $set: {
+                'inventoryConfig.nearestStorePricingEnabled': req.body.nearestStorePricingEnabled,
+                updatedBy: req.auth.userId,
+            },
+        }, { upsert: true });
+        res.set('Cache-Control', 'no-store');
+        return res.json({ nearestStorePricingEnabled: req.body.nearestStorePricingEnabled });
+    } catch (error) {
+        console.error('Catalog settings update failed:', error.message);
+        return res.status(500).json({ success: false, message: 'Unable to update catalog settings.' });
+    }
+});
+
+router.get('/:id/nearest-store', async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) {
+        return res.status(400).json({ success: false, message: 'Invalid product ID.' });
+    }
+    const coordinates = customerCoordinates(req.query.latitude, req.query.longitude);
+    if (!coordinates) {
+        return res.status(400).json({ success: false, message: 'Valid latitude and longitude are required.' });
+    }
+    try {
+        if (!await inventoryEnabled(req.dbModels)) {
+            return res.status(409).json({ success: false, message: 'Store inventory has not been migrated.' });
+        }
+        const product = await req.dbModels.Product.findById(req.params.id).populate('category').lean();
+        if (!product || (product.approvalStatus && product.approvalStatus !== 'approved')) {
+            return res.status(404).json({ success: false, message: 'Product not found.' });
+        }
+        const nearest = await nearestInventoryForProduct(req.dbModels, product._id, coordinates);
+        if (!nearest) {
+            return res.status(404).json({ success: false, message: 'No eligible store has this product in stock.' });
+        }
+        return res.json({
+            product: {
+                ...product,
+                price: nearest.inventory.price,
+                countInStock: nearest.inventory.countInStock - nearest.inventory.reserved,
+                storefrontId: nearest.store._id,
+                inventoryManaged: true,
+            },
+            store: { _id: nearest.store._id, name: nearest.store.name },
+            distanceKm: nearest.distanceKm,
+        });
+    } catch (error) {
+        console.error('Nearest store product lookup failed:', error.message);
+        return res.status(500).json({ success: false, message: 'Unable to resolve product availability.' });
+    }
+});
+
 /**
  * @swagger
  * /api/v1/products:
@@ -169,7 +241,7 @@ router.get(`/`, async(req, res) => {
             .populate('store', 'name address location owner');
  
     if(!product) {
-        res.status(500).json({message: 'The product with the given ID was not found.'})
+        return res.status(404).json({message: 'The product with the given ID was not found.'})
     }
 
     // Non-approved listings are only visible to admins and the submitting store's owner.
@@ -284,7 +356,12 @@ if (req.body.store) {
     if(!prod){
         return res.status(404).send('the product cannot be created!');
     }
-    res.send(prod);
+    const notificationWarnings = await notifyStoreMutation({
+        models: req.dbModels, storeIds: prod.store ? [prod.store] : [],
+        title: "Product created by Admin", body: `${prod.name} was added to the catalog.`,
+        data: { type: "product_created", productId: String(prod._id) },
+    });
+    res.send({ ...(prod.toObject ? prod.toObject() : prod), notificationWarnings });
 })
 
 /**
@@ -395,28 +472,17 @@ router.put('/:id', uploadOptions.single('image'), async(req, res) => {
     if(!updatedProduct)
     return res.status(404).send('the product cannot be updated!')
     
-    let notificationWarnings = [];
-    if (req.auth?.isAdmin) {
-        try {
-            const storeIds = [product.store, resolvedStore].filter(Boolean);
-            if (req.dbModels.StoreInventory) {
-                const inventory = await req.dbModels.StoreInventory.find({ product: product._id }).select("store").lean();
-                storeIds.push(...inventory.map((row) => row.store));
-            }
-            const stores = await Store.find({ _id: { $in: storeIds } }).select("owner").lean();
-            const owners = [...new Set(stores.filter((store) => store.owner).map((store) => String(store.owner)))];
-            const results = await Promise.all(owners.map((userId) => sendPushToUser({
-                User: req.dbModels.User, userId, title: "Product updated by Admin",
-                body: `${updatedProduct.name} was updated. Review the product details and your store inventory.`,
-                data: { type: "product_updated", productId: String(updatedProduct._id) },
-            })));
-            notificationWarnings = results.filter((result) => result.error).map((result) => result.error);
-        } catch (error) {
-            console.error("Product update notification failed:", error.message);
-            notificationWarnings = ["Product saved, but owner notifications failed."];
-        }
+    const storeIds = [product.store, product.createdByStore, resolvedStore].filter(Boolean);
+    if (req.dbModels.StoreInventory) {
+        const inventory = await req.dbModels.StoreInventory.find({ product: product._id }).select("store").lean();
+        storeIds.push(...inventory.map((row) => row.store));
     }
-    res.send(notificationWarnings.length ? { ...updatedProduct.toObject(), notificationWarnings } : updatedProduct);
+    const notificationWarnings = await notifyStoreMutation({
+        models: req.dbModels, storeIds, title: "Product updated by Admin",
+        body: `${updatedProduct.name} was updated. Review the product details and your store inventory.`,
+        data: { type: "product_updated", productId: String(updatedProduct._id) },
+    });
+    res.send({ ...(updatedProduct.toObject ? updatedProduct.toObject() : updatedProduct), notificationWarnings });
 })
 
 /**
@@ -443,18 +509,42 @@ router.put('/:id', uploadOptions.single('image'), async(req, res) => {
  *         description: Delete operation failed
  */
 //Delete a product
-router.delete('/:id', (req, res) => {
-    const { Product } = req.dbModels;
-    
-    Product.findByIdAndDelete(req.params.id).exec().then(product => {  
-        if(product) {
-            return res.status(200).json({success: true, message: 'the category is deleted!'})
-        } else {
-            return res.status(404).json({success: false, message: 'category not found!'})
-        }
-    }).catch(err => { 
-        return res.status(400).json({success: false, error: err})
-    })
+router.delete('/:id', async (req, res) => {
+    const { Product, StoreInventory, OrderItem } = req.dbModels;
+    if (!mongoose.isValidObjectId(req.params.id)) return res.status(400).json({ success: false, message: 'Invalid product ID.' });
+    try {
+        const deleted = await Product.db.transaction(async (session) => {
+            const product = await Product.findById(req.params.id).session(session);
+            if (!product) return null;
+            const inventory = StoreInventory
+                ? await StoreInventory.find({ product: product._id }).session(session).lean()
+                : [];
+            if (inventory.some((row) => row.reserved > 0)) {
+                throw Object.assign(new Error('Complete or cancel reserved orders before deleting this product.'), { status: 409 });
+            }
+            if (OrderItem && await OrderItem.exists({ product: product._id }).session(session)) {
+                throw Object.assign(new Error('Products referenced by orders cannot be deleted.'), { status: 409 });
+            }
+            const storeIds = [product.store, product.createdByStore, ...inventory.map((row) => row.store)].filter(Boolean);
+            if (StoreInventory && inventory.length) {
+                const removed = await StoreInventory.deleteMany({ product: product._id, reserved: 0 }, { session });
+                if (removed.deletedCount !== inventory.length) {
+                    throw Object.assign(new Error('Inventory changed while deleting this product. Refresh and retry.'), { status: 409 });
+                }
+            }
+            await product.deleteOne({ session });
+            return { product, storeIds };
+        });
+        if (!deleted) return res.status(404).json({ success: false, message: 'Product not found.' });
+        const notificationWarnings = await notifyStoreMutation({
+            models: req.dbModels, storeIds: deleted.storeIds, title: 'Product deleted by Admin',
+            body: `${deleted.product.name} was removed from the catalog.`,
+            data: { type: 'product_deleted', productId: String(deleted.product._id) },
+        });
+        return res.status(200).json({ success: true, notificationWarnings });
+    } catch (error) {
+        return res.status(error.status || 400).json({ success: false, message: error.message });
+    }
 })
 
 /**

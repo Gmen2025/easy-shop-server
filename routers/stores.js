@@ -6,7 +6,7 @@ const { normalizeDatabaseName, getAllowedDatabaseNames, getModelsForDb } = requi
 const { getDeliverySchedule } = require("../helpers/delivery");
 const { summarizeStoreOrder, buildStoreOrderSummary } = require("../helpers/store-order-view");
 const { reconcileUnassignedPickupStores } = require("../helpers/fulfillment-routing");
-const { inventoryEnabled } = require("../helpers/store-inventory");
+const { inventoryEnabled, notifyStoreMutation } = require("../helpers/store-inventory");
 const finance = require("../helpers/finance");
 const { operatorScope, operatorGet } = require("../helpers/operator-read");
 router.use(require("./store-inventory"));
@@ -181,7 +181,12 @@ router.post("/admin/company-stores", requireAdmin, async (req, res) => {
     });
 
     const saved = await store.save();
-    return res.status(201).json({ success: true, message: "Company store created.", store: saved });
+    const notificationWarnings = await notifyStoreMutation({
+      models: req.dbModels, storeIds: [saved._id], title: "Store profile created by Admin",
+      body: `Admin created the ${saved.name} store profile.`,
+      data: { type: "store_profile_created", storeId: String(saved._id) },
+    });
+    return res.status(201).json({ success: true, message: "Company store created.", store: saved, notificationWarnings });
   } catch (error) {
     console.error("Company store creation error:", error);
     return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to create the company store." });
@@ -241,8 +246,13 @@ router.put("/admin/company-stores/:id", requireAdmin, async (req, res) => {
 
     if (user) await user.save();
     const saved = await store.save();
+    const notificationWarnings = await notifyStoreMutation({
+      models: req.dbModels, storeIds: [saved._id], title: "Store profile updated by Admin",
+      body: `Admin updated the profile for ${saved.name}.`,
+      data: { type: "store_profile_updated", storeId: String(saved._id) },
+    });
 
-    return res.status(200).json({ success: true, message: "Company store updated.", store: saved });
+    return res.status(200).json({ success: true, message: "Company store updated.", store: saved, notificationWarnings });
   } catch (error) {
     console.error("Company store update error:", error);
     return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to update the company store." });

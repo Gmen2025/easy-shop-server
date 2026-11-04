@@ -1,5 +1,8 @@
 const mongoose = require("mongoose");
-const { conflict, inventoryEnabled, normalizeLines, eligibleStores, defaultPickupStore, reserve, release, assignStore, ACCEPTANCE_MS } = require("./store-inventory");
+const {
+  CONFIG_KEY, conflict, inventoryEnabled, normalizeLines, eligibleStores, defaultPickupStore,
+  reserve, release, assignStore, ACCEPTANCE_MS,
+} = require("./store-inventory");
 const { getCoordinates, distanceMeters } = require("./fulfillment-routing");
 const { getDrivingDistanceKm } = require("./google-distance");
 const { VEHICLE_CONFIG_KEY, cargoFor, suitableVehicles, cents } = require("./vehicle-delivery");
@@ -239,6 +242,10 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
   const config = (await models.SiteSetting.findOne({ key: VEHICLE_CONFIG_KEY }).lean())?.vehicleDeliveryConfig;
   if (!config?.enabled) throw conflict("Multi-delivery vehicle checkout is not enabled. Ask Admin to configure vehicle capacities and pricing.");
   const allocations = normalizeAllocations(body.cart, body.allocations, body.addresses);
+  const nearestPricing = Boolean((await models.SiteSetting.findOne({ key: CONFIG_KEY }).lean())?.inventoryConfig?.nearestStorePricingEnabled);
+  if (nearestPricing && allocations.some((allocation) => !allocation.storefrontId)) {
+    throw conflict("Resolve a storefront using each customer's location before quoting this cart.");
+  }
   const addresses = await Promise.all(body.addresses.map(async (entry) => {
     const address = { ...addressInput(entry), id: entry.id };
     if (countryCode(address.country) !== (/usa/i.test(databaseName) ? "US" : "ET")) throw conflict("Each delivery address must match the selected shopping region's country.");
@@ -256,7 +263,7 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
       customerLocation: addresses.find((address) => address.id === allocation.addressId).location,
       storefrontId: allocation.storefrontId,
     });
-    const fallback = await defaultPickupStore(models, [{ ...allocation, quantity: 1 }]);
+    const fallback = nearestPricing ? null : await defaultPickupStore(models, [{ ...allocation, quantity: 1 }]);
     return fallback && !stores.some((store) => id(store) === id(fallback))
       ? [...stores, { ...fallback, defaultFallback: true }] : stores;
   }));
@@ -346,6 +353,16 @@ async function prepare(models, groupId, user, databaseName, body) {
       if (group.paymentMethod !== body.method) throw conflict("This checkout already uses a different payment method.");
       if (group.status === "cancelled") throw conflict("This checkout was cancelled. Request a new quote.");
       return group;
+    }
+    const catalogMode = await models.SiteSetting.findOne({ key: CONFIG_KEY }).session(session).lean();
+    const nearestPricing = Boolean(catalogMode?.inventoryConfig?.nearestStorePricingEnabled);
+    const productCheckout = group.kind !== "service" && group.deliveries?.some((delivery) => delivery.lines?.length);
+    if (nearestPricing && productCheckout &&
+        group.deliveries.some((delivery) => !delivery.storefrontId || delivery.defaultFallback)) {
+      throw conflict("This quote has no resolved storefront context. Request a new quote from the current product price.");
+    }
+    if (nearestPricing) {
+      await models.SiteSetting.updateOne({ key: CONFIG_KEY }, { $inc: { reservationVersion: 1 } }, { session });
     }
     await require("./payment-settings").requirePaymentMethod(models, body.method);
     if (body.deliveryMode !== undefined && body.deliveryMode !== group.deliveryMode) {

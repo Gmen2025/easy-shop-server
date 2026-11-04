@@ -84,7 +84,8 @@ const schemas = {
     _id: objectId, id: text, name: text, description: text, richDescription: text, image: text,
     images: array(text), brand: text, price: number,
     category: { oneOf: [objectId, ref("Category")] },
-    store: { ...objectId, nullable: true }, countInStock: whole, minStock: whole,
+    store: { ...objectId, nullable: true }, createdByStore: { ...objectId, nullable: true },
+    countInStock: whole, minStock: whole,
     sku: text, soldCount: whole, rating: number, numReviews: whole, isFeatured: boolean,
     approvalStatus: { type: "string", enum: ["pending", "approved", "denied"] },
     packageSize: ref("CommercePackageSize"), exportToEthiopia: boolean, dateCreated: date,
@@ -98,6 +99,10 @@ const schemas = {
   CommerceInventoryInput: object({
     price: money, countInStock: whole, minStock: whole,
   }, ["price", "countInStock", "minStock"]),
+  CommerceCategory: object({
+    _id: objectId, id: text, name: text, color: text, icon: text, image: text,
+    createdByStore: { ...objectId, nullable: true }, notificationWarnings: array(text),
+  }),
   CommerceLine: {
     ...object(lineProperties, ["product", "quantity", "price"]),
     description: "Quoted price is mandatory. The normalizer also accepts product._id or top-level _id/id aliases and numeric strings for quantity/price. Duplicate products are combined only when quoted prices agree.",
@@ -282,7 +287,7 @@ const query = (name, schema, description) => ({ name, in: "query", description, 
 const paths = {};
 function add(method, suffix, summary, schema, options = {}) {
   const inventory = options.inventory === true;
-  const prefix = options.exchange ? "/api/v1/exchange-rate" : "/api/v1/stores";
+  const prefix = options.prefix || (options.exchange ? "/api/v1/exchange-rate" : "/api/v1/stores");
   const code = options.created ? "201" : "200";
   const errorSchema = ref(inventory ? "CommerceInventoryError" : "CommerceMessage");
   const parameters = [...suffix.matchAll(/\{([^}]+)\}/g)].map((match) =>
@@ -371,7 +376,7 @@ add("post", "/me/locations/{id}/branches", "Create an owned main store's branch"
   description: "Parent must be a main store, not a branch. New branch inherits owner, isCompanyOwned and approvalStatus; location is stored as [longitude, latitude].",
 });
 add("get", "/me/locations/{id}/inventory", "List an owned location's inventory", array(ref("CommerceInventory")), {
-  ...owner, description: "Product and its category are populated. Does not require inventory migration to have been enabled.",
+  ...owner, description: "Full product (including owner provenance, brand, description, richDescription, category and image gallery) and its category are populated for editing. Does not require inventory migration to have been enabled.",
 });
 add("put", "/me/locations/{id}/inventory/{productId}", "Upsert owned per-store inventory", ref("CommerceInventory"), {
   ...owner, body: ref("CommerceInventoryInput"),
@@ -379,6 +384,70 @@ add("put", "/me/locations/{id}/inventory/{productId}", "Upsert owned per-store i
 });
 add("delete", "/me/locations/{id}/inventory/{productId}", "Delete an unreserved owned inventory listing", ref("CommerceSuccess"), {
   ...owner, conflict: "Invalid identifier, missing listing, or listing has reserved orders; finish/cancel those orders first.",
+});
+const ownerProductResponse = {
+  ...schemas.CommerceProduct,
+  properties: { ...schemas.CommerceProduct.properties, notificationWarnings: array(text) },
+};
+const ownerProductInput = object({
+  name: text, brand: text, description: text, richDescription: text, category: { oneOf: [objectId, text] },
+  image: text, images: array(text), price: money, countInStock: whole, minStock: whole,
+});
+add("post", "/me/locations/{id}/products", "Create an approved shared product and owned inventory", ownerProductResponse, {
+  ...owner, inventory: true, created: true, body: ownerProductInput,
+  description: "Creates an approved shared-catalog product and its initial StoreInventory row atomically. Requires migrated inventory. Category must exist in the shared list; image/images accept uploaded HTTPS URLs. createdByStore is assigned from the authenticated location, never the body. Response is the product document at top level; notificationWarnings is an array of warning strings.",
+  forbidden: "The authenticated user does not own this store.",
+});
+add("put", "/me/locations/{id}/products/{productId}", "Edit an owned product and its store inventory", ownerProductResponse, {
+  ...owner, inventory: true, body: ownerProductInput,
+  description: "Only products with createdByStore matching this location can be edited. Catalog fields and this store's price/countInStock/minStock are saved in one transaction. Other stores' inventory is unchanged; stock cannot go below reservations and a price change is blocked while any units are reserved. Admin-only approval, rating, review and featured fields are rejected. Returns the product document at top level plus notificationWarnings.",
+  forbidden: "The authenticated user does not own this store.",
+});
+add("delete", "/me/locations/{id}/products/{productId}", "Delete an owned product", ref("CommerceSuccess"), {
+  ...owner, inventory: true,
+  description: "Deletes only a product created by this location and its own inventory row. Products with reserved stock or order history cannot be deleted. Other stores' inventory is never removed.",
+  forbidden: "The authenticated user does not own this store.",
+});
+add("post", "/me/locations/{id}/categories", "Create or reuse a shared category", ref("CommerceCategory"), {
+  ...owner, inventory: true, created: true, body: object({ name: text, icon: text, color: text, image: text }, ["name"]),
+  description: "Reuses an existing category when name comparison matches after case-folding and whitespace normalization; otherwise creates a shared category with createdByStore set server-side. The category document is top-level; notificationWarnings is an array.",
+  forbidden: "The authenticated user does not own this store.",
+});
+add("put", "/me/locations/{id}/categories/{categoryId}", "Edit an owned category", ref("CommerceCategory"), {
+  ...owner, inventory: true, body: object({ name: text, icon: text, color: text, image: text }),
+  description: "Only categories with createdByStore matching this location can be edited. Name changes cannot duplicate another normalized category name.",
+  forbidden: "The authenticated user does not own this store.",
+});
+add("delete", "/me/locations/{id}/categories/{categoryId}", "Delete an unused owned category", ref("CommerceSuccess"), {
+  ...owner, inventory: true, description: "Only categories created by this location can be deleted, and only while no product references the category.",
+  forbidden: "The authenticated user does not own this store.",
+});
+add("get", "/catalog-settings", "Read catalog pricing mode", object({
+  nearestStorePricingEnabled: boolean,
+}, ["nearestStorePricingEnabled"]), {
+  prefix: "/api/v1/products", public: true, inventory: true,
+  description: "Returns false by default. When true, storefront clients must hide catalog prices and resolve product prices using customer coordinates.",
+});
+add("put", "/catalog-settings", "Set nearest-store catalog pricing mode", object({
+  nearestStorePricingEnabled: boolean,
+}, ["nearestStorePricingEnabled"]), {
+  prefix: "/api/v1/products", inventory: true, scope: "Authenticated admin required.",
+  body: object({ nearestStorePricingEnabled: boolean }, ["nearestStorePricingEnabled"]),
+  description: "Enabling requires migrated store inventory. Disabling restores existing catalog-pricing behavior without changing stored prices.",
+  forbidden: "Admin access required.",
+});
+add("get", "/{id}/nearest-store", "Resolve nearest in-stock product and price", object({
+  product: ref("CommerceProduct"),
+  store: object({ _id: objectId, name: text }, ["_id", "name"]),
+  distanceKm: number,
+}, ["product", "store", "distanceKm"]), {
+  prefix: "/api/v1/products", public: true, inventory: true,
+  query: [
+    query("latitude", { type: "number", minimum: -90, maximum: 90 }, "Required customer latitude; blank/missing values are invalid."),
+    query("longitude", { type: "number", minimum: -180, maximum: 180 }, "Required customer longitude; blank/missing values are invalid."),
+  ],
+  description: "Returns a product with price and countInStock overridden by the nearest approved/open store's own unreserved inventory, inventoryManaged=true and storefrontId equal to store._id. No location or no eligible stock never falls back to catalog pricing.",
+  notFound: "Product not found or no eligible store has available stock.",
 });
 add("get", "/me/assignments", "List pending store-owner assignments", array(ref("CommerceOrder")), {
   inventory: true, scope: "Bearer authentication required; only assignments for stores owned by the authenticated user.",

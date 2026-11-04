@@ -68,8 +68,15 @@ function buildParamsToSign(body, timestamp) {
 
 // POST /api/v1/cloudinary/sign
 // Body (optional): object containing the params that should be signed (e.g. { public_id })
-router.post('/sign', (req, res) => {
+router.post('/sign', async (req, res) => {
   try {
+    const isAdmin = Boolean(req.auth?.isAdmin);
+    const isStoreOwner = req.auth?.role === 'store_owner' || Boolean(req.auth?.isStoreOwner);
+    if (!isAdmin && !isStoreOwner) {
+      return res.status(req.auth?.userId ? 403 : 401).json({
+        message: 'Admin or store-owner access required to sign product images.',
+      });
+    }
     const credentials = getCloudinaryCredentials();
     if (!credentials) {
       const missing = getMissingCloudinaryKeys();
@@ -81,6 +88,13 @@ router.post('/sign', (req, res) => {
 
     const timestamp = Math.round(Date.now() / 1000);
     const paramsToSign = buildParamsToSign(req.body || {}, timestamp);
+    if (isStoreOwner && !isAdmin) {
+      if (paramsToSign.folder !== 'eshop/products' || !req.auth?.userId) {
+        return res.status(403).json({ message: 'Store owners may only sign uploads to eshop/products.' });
+      }
+      const store = await req.dbModels.Store.findOne({ owner: req.auth.userId, approvalStatus: 'approved' }).select('_id');
+      if (!store) return res.status(403).json({ message: 'An approved linked store is required to sign product images.' });
+    }
 
     // Create signature using cloudinary utility
     const signature = cloudinary.utils.api_sign_request(paramsToSign, credentials.apiSecret);

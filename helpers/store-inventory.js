@@ -17,6 +17,72 @@ async function inventoryEnabled(models) {
   return Boolean((await models.SiteSetting.findOne({ key: CONFIG_KEY }).lean())?.inventoryConfig?.enabled);
 }
 
+async function nearestStorePricingEnabled(models) {
+  if (!models.SiteSetting) return false;
+  return Boolean((await models.SiteSetting.findOne({ key: CONFIG_KEY }).lean())?.inventoryConfig?.nearestStorePricingEnabled);
+}
+
+function customerCoordinates(latitude, longitude) {
+  if (typeof latitude !== "string" && typeof latitude !== "number" ||
+      typeof longitude !== "string" && typeof longitude !== "number" ||
+      String(latitude).trim() === "" || String(longitude).trim() === "") return null;
+  const lat = Number(latitude), lng = Number(longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
+  return [lng, lat];
+}
+
+async function nearestInventoryForProduct(models, productId, coordinates) {
+  const stores = await models.Store.find({ approvalStatus: "approved", isOpen: { $ne: false } }).lean();
+  const inventory = await models.StoreInventory.find({
+    product: productId,
+    store: { $in: stores.map((store) => store._id) },
+  }).lean();
+  const stockByStore = new Map(inventory.map((row) => [String(row.store), row]));
+  const eligible = stores.filter((store) => {
+    const row = stockByStore.get(String(store._id));
+    return row && Number.isFinite(row.price) && row.price >= 0 &&
+      Number.isSafeInteger(row.countInStock) && Number.isSafeInteger(row.reserved) &&
+      row.countInStock - row.reserved > 0 && getCoordinates(store.location);
+  }).sort((left, right) =>
+    distanceMeters(coordinates, getCoordinates(left.location)) -
+      distanceMeters(coordinates, getCoordinates(right.location)) ||
+    String(left._id).localeCompare(String(right._id)));
+  if (!eligible.length) return null;
+  return {
+    store: eligible[0],
+    inventory: stockByStore.get(String(eligible[0]._id)),
+    distanceKm: distanceMeters(coordinates, getCoordinates(eligible[0].location)) / 1000,
+  };
+}
+
+async function notifyStoreMutation({
+  models, storeIds = [], title, body, data = {}, includeAdmins = true, includeStoreOwners = true,
+}) {
+  const warnings = [];
+  const recipients = new Set();
+  if (includeAdmins) {
+    try {
+      const admins = await models.User.find({ isAdmin: true }).select("_id").lean();
+      for (const admin of admins || []) if (admin._id) recipients.add(String(admin._id));
+    } catch (error) {
+      warnings.push("Admin notifications could not be loaded.");
+    }
+  }
+  if (includeStoreOwners && storeIds.length) {
+    try {
+      const stores = await models.Store.find({ _id: { $in: [...new Set(storeIds.filter(Boolean).map(String))] } })
+        .select("owner").lean();
+      for (const store of stores || []) if (store.owner) recipients.add(String(store.owner));
+    } catch (error) {
+      warnings.push("Store owner notifications could not be loaded.");
+    }
+  }
+  const results = await Promise.all([...recipients].map((userId) =>
+    sendPushToUser({ User: models.User, userId, title, body, data })));
+  if (results.some((result) => result.error)) warnings.push("One or more notifications could not be delivered.");
+  return warnings;
+}
+
 function normalizeLines(lines) {
   if (!Array.isArray(lines) || !lines.length) throw conflict("Your cart is empty.");
   const combined = new Map();
@@ -337,5 +403,6 @@ async function aggregateCatalog(models, products) {
 
 module.exports = {
   CONFIG_KEY, ACCEPTANCE_MS, inventoryEnabled, publicStore, conflict, normalizeLines,
+  nearestStorePricingEnabled, customerCoordinates, nearestInventoryForProduct, notifyStoreMutation,
   eligibleStores, defaultPickupStore, reserve, release, assignStore, reroute, notifyStoreAssignment, updateManagedOrder, aggregateCatalog,
 };

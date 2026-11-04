@@ -2,6 +2,7 @@ const router = require("express").Router();
 const mongoose = require("mongoose");
 const finance = require("../helpers/finance");
 const { sendPushToUser } = require("../helpers/push-notify");
+const { notifyStoreMutation } = require("../helpers/store-inventory");
 const { inventoryEnabled } = require("../helpers/store-inventory");
 const { stockInput, createStoreProduct, addStoreListing } = require("../helpers/operator-products");
 
@@ -108,7 +109,12 @@ router.post("/accounts/store/:accountId/products", requireAdmin, handle(async (r
   const participant = await account(req);
   const product = await createStoreProduct(req.dbModels, participant, req.body, req.auth.userId, await inventoryEnabled(req.dbModels));
   const notification = await notifyAccount(req, participant, "Product added by Admin", `Admin added ${product.name} to your store. Review your products and inventory.`, "product_added");
-  res.status(201).json({ product, notification });
+  const notificationWarnings = await notifyStoreMutation({
+    models: req.dbModels, storeIds: [participant._id], includeStoreOwners: false,
+    title: "Product added by Admin", body: `Admin added ${product.name} to ${participant.name}.`,
+    data: { type: "product_added", productId: String(product._id), storeId: String(participant._id) },
+  });
+  res.status(201).json({ product, notification, notificationWarnings });
 }));
 
 router.post("/accounts/store/:accountId/inventory/:productId", requireAdmin, handle(async (req, res) => {
@@ -117,7 +123,12 @@ router.post("/accounts/store/:accountId/inventory/:productId", requireAdmin, han
   if (!await inventoryEnabled(req.dbModels)) throw finance.fail("Migrate store inventory before adding catalog listings.", 409);
   const inventory = await addStoreListing(req.dbModels, participant._id, req.params.productId, req.body);
   const notification = await notifyAccount(req, participant, "Product listing added", "Admin added a catalog product to your store inventory.", "product_added");
-  res.status(201).json({ inventory, notification });
+  const notificationWarnings = await notifyStoreMutation({
+    models: req.dbModels, storeIds: [participant._id], includeStoreOwners: false,
+    title: "Inventory listing added by Admin", body: "Admin added a catalog product to your store inventory.",
+    data: { type: "inventory_added", productId: String(req.params.productId), storeId: String(participant._id) },
+  });
+  res.status(201).json({ inventory, notification, notificationWarnings });
 }));
 
 router.get("/accounts/:kind/:accountId", handle(async (req, res) => {
@@ -154,12 +165,18 @@ router.put("/accounts/store/:accountId/inventory/:productId", requireAdmin, hand
   if (!participant) throw finance.fail("Store not found.", 404);
   const row = await req.dbModels.StoreInventory.findOneAndUpdate({
     store: accountId, product: productId, reserved: { $lte: countInStock },
+    $or: [{ price }, { reserved: 0 }],
   }, { $set: { price, countInStock, minStock } }, { new: true, runValidators: true });
-  if (!row) throw finance.fail("Inventory not found or stock is below the reserved quantity.", 409);
+  if (!row) throw finance.fail("Inventory not found, stock is below the reserved quantity, or price cannot change while orders are reserved.", 409);
   const notification = await sendPushToUser({ User: req.dbModels.User, userId: participant.owner,
     title: "Store inventory updated", body: "Admin updated your product price or stock. Review your store inventory.",
     data: { type: "product_updated", storeId: accountId, productId } });
-  res.json({ inventory: row, notification });
+  const notificationWarnings = await notifyStoreMutation({
+    models: req.dbModels, storeIds: [participant._id], includeStoreOwners: false,
+    title: "Store inventory updated by Admin", body: `Admin updated ${participant.name}'s inventory.`,
+    data: { type: "inventory_updated", storeId: accountId, productId },
+  });
+  res.json({ inventory: row, notification, notificationWarnings });
 }));
 
 router.put("/accounts/:kind/:accountId/settings", requireAdmin, handle(async (req, res) => {

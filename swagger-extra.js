@@ -148,10 +148,30 @@ module.exports = {
     get: operation('Get the OpenAPI document', 'System', { security: false, success: '200', successDescription: 'OpenAPI JSON document' }),
   },
   '/sign': {
-    post: operation('Create a signed Cloudinary upload payload', 'Cloudinary', { requestBody: { required: false }, success: '200' }),
+    post: {
+      ...operation('Create a signed Cloudinary upload payload', 'Cloudinary', {
+        requestBody: { required: false }, success: '200',
+        errorResponses: {
+          401: response('Authentication required'),
+          403: response('Admin or approved linked store-owner access required; store owners may sign only product-folder uploads.'),
+          500: response('Cloudinary is not configured'),
+        },
+      }),
+      description: 'Requires an authenticated admin or approved linked store owner. Store owners are limited to the eshop/products folder.',
+    },
   },
   '/api/v1/cloudinary/sign': {
-    post: operation('Create a signed Cloudinary upload payload', 'Cloudinary', { requestBody: { required: false }, success: '200' }),
+    post: {
+      ...operation('Create a signed Cloudinary upload payload', 'Cloudinary', {
+        requestBody: { required: false }, success: '200',
+        errorResponses: {
+          401: response('Authentication required'),
+          403: response('Admin or approved linked store-owner access required; store owners may sign only product-folder uploads.'),
+          500: response('Cloudinary is not configured'),
+        },
+      }),
+      description: 'Requires an authenticated admin or approved linked store owner. Store owners are limited to the eshop/products folder.',
+    },
   },
   '/api/v1/notifications/drivers/{driverId}/push-token': {
     put: {

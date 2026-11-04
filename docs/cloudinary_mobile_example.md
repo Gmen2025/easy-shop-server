@@ -7,6 +7,11 @@ This file shows a minimal React Native example that:
 - Uploads the image directly to Cloudinary using the returned signature
 - Returns the uploaded image `secure_url` which you can save on your product
 
+The signing request must include the signed-in user's bearer token. Admins may
+sign their existing upload parameters; an approved linked store owner may sign
+only uploads in the `eshop/products` folder. This applies to both the current
+`/api/v1/cloudinary/sign` path and legacy `/sign` path.
+
 Prerequisites
 - Server reachable from device/emulator (use LAN IP or ngrok)
 - `CLOUDINARY_*` env vars configured on the server
@@ -27,7 +32,10 @@ async function pickAndUpload() {
   // 1) Ask backend for a signature
   const signResp = await fetch('http://<BACKEND_HOST>:3001/api/v1/cloudinary/sign', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
     body: JSON.stringify({ params_to_sign: { public_id: publicId, folder } })
   });
   const { signature, api_key, timestamp, cloud_name } = await signResp.json();
@@ -56,7 +64,11 @@ Notes
 - You can skip server signing by using an unsigned `upload_preset` configured in Cloudinary, but this is less secure.
 
 Saving to product
-- After successful upload, call your products API (`POST /api/v1/products`) and set the `image` field to the returned `secure_url`.
+- Admin catalog publishing may call `POST /api/v1/products`.
+- Store owners create a shared approved product and initial store inventory at
+  `POST /api/v1/stores/me/locations/{storeId}/products`. Send `image` and/or
+  `images` with the returned `secure_url` values, plus `name`, `description`,
+  `brand`, `category`, `price`, and `countInStock`.
 
 Frontend payload format (Cloudinary `secure_url`)
 

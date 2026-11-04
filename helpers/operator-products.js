@@ -13,7 +13,7 @@ function stockInput(body) {
   return { price, countInStock, minStock };
 }
 
-async function createStoreProduct(models, store, body, actor, managed) {
+async function createStoreProduct(models, store, body, actor, managed, options = {}) {
   const stock = stockInput(body);
   if (stock.countInStock > 100000) throw fail("New product stock cannot exceed 100000.");
   const name = typeof body.name === "string" ? body.name.trim() : "";
@@ -24,13 +24,17 @@ async function createStoreProduct(models, store, body, actor, managed) {
   const images = body.images === undefined ? [body.image] : body.images;
   if (!Array.isArray(images) || !images.length || images.some((image) => typeof image !== "string" || !/^https:\/\/\S+$/i.test(image))) throw fail("Product images must be HTTPS URLs.");
   return models.Product.db.transaction(async (session) => {
-    const [product] = await models.Product.create([{
+    const productFields = {
       name, description, brand: typeof body.brand === "string" ? body.brand.trim() : "",
-      image: body.image, images, category: body.category, store: store._id,
+      image: body.image, images, category: body.category,
+      store: options.sharedCatalog ? null : store._id,
       richDescription: typeof body.richDescription === "string" ? body.richDescription : "",
-      isFeatured: body.isFeatured === true,
-      ...stock, approvalStatus: "approved", approvedBy: actor, approvedAt: new Date(),
-    }], { session });
+      isFeatured: options.allowFeatured === false ? false : body.isFeatured === true,
+      ...stock, approvalStatus: "approved", approvedAt: new Date(),
+    };
+    if (options.createdByStore) productFields.createdByStore = store._id;
+    if (options.includeApprovedBy !== false) productFields.approvedBy = actor;
+    const [product] = await models.Product.create([productFields], { session });
     if (managed) await models.StoreInventory.create([{
       store: store._id, product: product._id, ...stock,
     }], { session });

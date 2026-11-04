@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const { normalizeStoreLogo } = require('../helpers/store-logo');
 const authSecurity = require('../helpers/auth-security');
-const { inventoryEnabled, updateManagedOrder } = require("../helpers/store-inventory");
+const { inventoryEnabled, updateManagedOrder, notifyStoreMutation } = require("../helpers/store-inventory");
 const finance = require("../helpers/finance");
 
 router.use(async (req, res, next) => {
@@ -426,10 +426,16 @@ router.put('/mine/update', async (req, res) => {
     }
 
     await store.save();
+    const notificationWarnings = await notifyStoreMutation({
+      models: req.dbModels, storeIds: [store._id], title: "Store profile updated",
+      body: `${store.name} updated its store profile.`,
+      data: { type: "store_profile_updated", storeId: String(store._id) },
+    });
 
     return res.json({
       success: true,
       message: 'Store profile updated.',
+      notificationWarnings,
       store: {
         id: store.id,
         name: store.name,
