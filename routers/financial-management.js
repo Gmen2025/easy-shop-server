@@ -1,6 +1,6 @@
-const router = require("express").Router();
 const engine = require("../helpers/financial-management");
 const { workspace } = require("../helpers/financial-management-report");
+const { readFinancialHealthSetting } = require("../helpers/financial-health");
 
 const handle = (action) => async (req, res) => {
   try { await action(req, res); }
@@ -13,17 +13,6 @@ const handle = (action) => async (req, res) => {
     });
   }
 };
-router.use((req, res, next) => {
-  if (!req.auth?.userId) return res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Sign in required." } });
-  return handle(async () => {
-    const userId = engine.identifier(req.auth.userId, "authenticated user");
-    const user = await req.dbModels.User.findOne({ _id: userId, isAdmin: true }).select("_id").lean();
-    engine.check(user, "Administrator access required.", "FORBIDDEN", 403);
-    req.financialOwnerId = userId;
-    next();
-  })(req, res);
-});
-
 async function load(Model, owner, session) {
   let query = Model.findOne({ _id: owner, owner });
   if (session) query = query.session(session);
@@ -75,27 +64,48 @@ async function initialized(Model, owner) {
     } finally { await session.endSession(); }
   }
 }
-router.get("/workspace", handle(async (req, res) => {
-  const state = await initialized(req.dbModels.FinancialWorkspace, req.financialOwnerId);
-  res.set("Cache-Control", "private, no-store");
-  res.json(workspace(state, req.query));
-}));
-const routes = [
-  ["post", "/entities", "entity"], ["post", "/accounts", "account"],
-  ["put", "/accounts/:id", "account-update"], ["post", "/categories", "category"],
-  ["post", "/accounts/:id/adjustments", "adjustment"],
-  ["post", "/transactions", "transaction"], ["post", "/transactions/:id/payments", "payment"],
-  ["post", "/transactions/:id/reverse", "reverse"], ["post", "/transfers", "transfer"],
-  ["post", "/goals", "goal"], ["put", "/goals/:id", "goal-update"], ["put", "/settings", "settings"],
-];
-for (const [method, path, operation] of routes) {
-  router[method](path, handle(async (req, res) => {
-    if (req.params.id) engine.identifier(req.params.id);
-    const result = await mutate(req.dbModels.FinancialWorkspace, req.financialOwnerId, operation, req.body, req.params.id, req.body?.requestKey || req.get("Idempotency-Key"));
+function createRouter(customer = false) {
+  const router = require("express").Router();
+  const modelName = customer ? "CustomerFinancialWorkspace" : "FinancialWorkspace";
+  router.use((req, res, next) => {
     res.set("Cache-Control", "private, no-store");
-    res.status(method === "post" && !result.replayed ? 201 : 200).json(result);
+    if (!req.auth?.userId) return res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Sign in required." } });
+    return handle(async () => {
+      const userId = engine.identifier(req.auth.userId, "authenticated user");
+      const user = await req.dbModels.User.findOne(customer ? { _id: userId } : { _id: userId, isAdmin: true }).select("_id").lean();
+      engine.check(user, customer ? "Account access required." : "Administrator access required.", "FORBIDDEN", 403);
+      if (customer) {
+        const setting = await readFinancialHealthSetting(req.dbModels);
+        engine.check(setting.enabled, "Financial Health is currently disabled by the administrator.", "SERVICE_DISABLED", 403);
+      }
+      req.financialOwnerId = userId;
+      next();
+    })(req, res);
+  });
+  router.get("/workspace", handle(async (req, res) => {
+    const state = await initialized(req.dbModels[modelName], req.financialOwnerId);
+    res.set("Cache-Control", "private, no-store");
+    res.json(workspace(state, req.query));
   }));
+  const routes = [
+    ["post", "/entities", "entity"], ["post", "/accounts", "account"],
+    ["put", "/accounts/:id", "account-update"], ["post", "/categories", "category"],
+    ["post", "/accounts/:id/adjustments", "adjustment"],
+    ["post", "/transactions", "transaction"], ["post", "/transactions/:id/payments", "payment"],
+    ["post", "/transactions/:id/reverse", "reverse"], ["post", "/transfers", "transfer"],
+    ["post", "/goals", "goal"], ["put", "/goals/:id", "goal-update"], ["put", "/settings", "settings"],
+  ];
+  for (const [method, path, operation] of routes) {
+    router[method](path, handle(async (req, res) => {
+      if (req.params.id) engine.identifier(req.params.id);
+      const result = await mutate(req.dbModels[modelName], req.financialOwnerId, operation, req.body, req.params.id, req.body?.requestKey || req.get("Idempotency-Key"));
+      res.set("Cache-Control", "private, no-store");
+      res.status(method === "post" && !result.replayed ? 201 : 200).json(result);
+    }));
+  }
+  return router;
 }
-module.exports = router;
+module.exports = createRouter();
+module.exports.createRouter = createRouter;
 module.exports.mutate = mutate;
 module.exports.initialized = initialized;

@@ -7,10 +7,36 @@ const { isGoogleDistanceApiConfigured, getDrivingDistanceKm } = require('../help
 const { getCoordinates, resolvePickupStore } = require('../helpers/fulfillment-routing');
 const { PROVIDERS, readSocialLoginSetting, updateSocialLoginSetting } = require('../helpers/social-login-settings');
 const { METHODS, readPaymentSettings, updatePaymentSettings } = require('../helpers/payment-settings');
+const { readFinancialHealthSetting, updateFinancialHealthSetting } = require('../helpers/financial-health');
 
 const MAINTENANCE_SETTING_KEY = 'maintenance-mode';
 const BANK_ACCOUNT_SETTING_KEY = 'bank-account-info';
 const DELIVERY_SETTING_KEY = 'delivery-config';
+
+router.get('/financial-health', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try { res.json(await readFinancialHealthSetting(req.dbModels)); }
+  catch (error) {
+    console.error('Failed to read Financial Health availability:', error);
+    res.status(503).json({ message: 'Unable to load Financial Health availability. Please retry.' });
+  }
+});
+
+router.put('/financial-health', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!req.auth?.userId) return res.status(401).json({ message: 'Sign in required.' });
+  if (typeof req.body?.enabled !== 'boolean' || Object.keys(req.body).some((key) => key !== 'enabled')) {
+    return res.status(400).json({ message: 'enabled must be a boolean.' });
+  }
+  try {
+    const admin = await req.dbModels.User.findOne({ _id: req.auth.userId, isAdmin: true }).select('_id').lean();
+    if (!admin) return res.status(403).json({ message: 'Admin access required.' });
+    res.json(await updateFinancialHealthSetting(req.dbModels, req.body.enabled, req.auth.userId));
+  } catch (error) {
+    console.error('Failed to save Financial Health availability:', error);
+    res.status(503).json({ message: 'Unable to save Financial Health availability.' });
+  }
+});
 
 router.get('/payment-methods', async (req, res) => {
   res.set('Cache-Control', 'no-store');

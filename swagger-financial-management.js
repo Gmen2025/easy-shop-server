@@ -62,4 +62,31 @@ paths["/api/v1/financial-management/workspace"] = { get: {
     { in: "query", name: "combinedNetWorth", schema: { type: "boolean" } },
   ], responses,
 } };
-module.exports = { paths };
+const financialHealthPaths = Object.fromEntries(Object.entries(paths).map(([path, operations]) => [
+  path.replace("/financial-management", "/financial-health"),
+  Object.fromEntries(Object.entries(operations).map(([method, operation]) => [method, {
+    ...operation, tags: ["Customer Financial Health"],
+    description: "Signed-in regional account required and Financial Health must be enabled. Records are owner-private and stored separately from admin accounting. Same accounting contract: docs/financial-management.md.",
+    responses: { ...operation.responses, 403: { description: "Account access denied or SERVICE_DISABLED by admin" } },
+  }])),
+]));
+const availabilityResponse = {
+  description: "Regional Financial Health availability; defaults false",
+  content: { "application/json": { schema: { type: "object", required: ["enabled"], properties: { enabled: { type: "boolean" } } } } },
+};
+financialHealthPaths["/api/v1/settings/financial-health"] = {
+  get: {
+    tags: ["Customer Financial Health"], summary: "Read uncached Financial Health availability", security: [],
+    responses: { 200: availabilityResponse, 503: { description: "Availability lookup failed" } },
+  },
+  put: {
+    tags: ["Customer Financial Health"], summary: "Admin: enable or disable customer Financial Health for this region",
+    security: [{ bearerAuth: [] }],
+    requestBody: { required: true, content: { "application/json": { schema: {
+      type: "object", additionalProperties: false, required: ["enabled"], properties: { enabled: { type: "boolean" } },
+    } } } },
+    responses: { 200: availabilityResponse, 400: { description: "Invalid boolean setting" },
+      401: { description: "JWT required" }, 403: { description: "Current regional admin required" }, 503: { description: "Saving availability failed" } },
+  },
+};
+module.exports = { paths, financialHealthPaths };

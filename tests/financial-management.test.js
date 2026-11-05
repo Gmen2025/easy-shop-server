@@ -452,11 +452,143 @@ test("router rechecks regional admin and scopes both PERSONAL/BUSINESS against o
     assert.equal(otherWorkspace.accounts.length, 0);
   } finally { await new Promise((resolve) => server.close(resolve)); }
 });
+
+test("Financial Health is OFF by default, admin-controlled by region, owner-private and isolated from admin accounting", async (t) => {
+  const jwt = require("jsonwebtoken");
+  const authJwt = require("../helpers/jwt");
+  const settingsRouter = require("../routers/settings");
+  const secret = "financial-health-test-secret";
+  const oldSecret = process.env.secret;
+  process.env.secret = secret;
+  t.after(() => { if (oldSecret === undefined) delete process.env.secret; else process.env.secret = oldSecret; });
+  const regions = new Map(["E_Shopping", "E_ShopUSA"].map((name) => [name, {
+    FinancialWorkspace: memoryModel(), CustomerFinancialWorkspace: memoryModel(), setting: null,
+  }]));
+  let unavailable = false;
+  const app = express(); app.use(express.json());
+  app.use((req, res, next) => {
+    const region = regions.get(req.get("x-database-name") || "E_Shopping");
+    req.dbModels = {
+      ...region,
+      User: { findOne(filter) { return { select() { return this; }, async lean() {
+        return [OWNER, OTHER].includes(filter._id) && (!filter.isAdmin || filter._id === OWNER) ? { _id: filter._id } : null;
+      } }; } },
+      SiteSetting: {
+        findOne({ key }) { assert.equal(key, "financial-health"); return { lean: async () => {
+          if (unavailable) throw new Error("Availability database unavailable");
+          return region.setting;
+        } }; },
+        findOneAndUpdate({ key }, update, options) {
+          assert.equal(key, "financial-health"); assert.equal(options.upsert, true);
+          if (unavailable) throw new Error("Availability database unavailable");
+          region.setting = { ...region.setting, ...update.$set };
+          return { lean: async () => region.setting };
+        },
+      },
+    };
+    next();
+  });
+  app.use(authJwt());
+  app.use("/api/v1/settings", settingsRouter);
+  app.use("/api/v1/financial-management", router);
+  app.use("/api/v1/financial-health", router.createRouter(true));
+  app.use((error, req, res, next) => res.status(error.status || 500).json({ message: error.message }));
+  const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const request = (path, { owner = OTHER, database = "E_Shopping", method = "GET", body } = {}) =>
+    fetch(`http://127.0.0.1:${server.address().port}/api/v1${path}`, {
+      method, headers: { "Content-Type": "application/json", "x-database-name": database,
+        ...(owner ? { Authorization: `Bearer ${jwt.sign({ userId: owner, isAdmin: true }, secret)}` } : {}) },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  const settings = "/settings/financial-health";
+  const initial = await request(settings, { owner: null });
+  assert.equal(initial.status, 200);
+  assert.equal(initial.headers.get("cache-control"), "no-store");
+  assert.deepEqual(await initial.json(), { enabled: false });
+  assert.equal((await request("/financial-health/workspace", { owner: null })).status, 401);
+  const blocked = await request("/financial-health/workspace");
+  assert.equal(blocked.status, 403);
+  assert.equal((await blocked.json()).error.code, "SERVICE_DISABLED");
+  assert.equal((await request(settings, { owner: null, method: "PUT", body: { enabled: true } })).status, 401);
+  assert.equal((await request(settings, { method: "PUT", body: { enabled: true } })).status, 403);
+  for (const body of [{}, { enabled: "true" }, { enabled: 1 }, { enabled: true, owner: OTHER }]) {
+    assert.equal((await request(settings, { owner: OWNER, method: "PUT", body })).status, 400);
+  }
+  assert.equal((await request(settings, { owner: OWNER, method: "PUT", body: { enabled: true } })).status, 200);
+  assert.equal(regions.get("E_Shopping").setting.updatedBy, OWNER);
+  assert.deepEqual(await (await request(settings, { database: "E_ShopUSA" })).json(), { enabled: false });
+  assert.equal((await request("/financial-health/workspace", { owner: "333333333333333333333333" })).status, 403);
+  assert.equal((await request("/financial-management/workspace")).status, 403);
+
+  const own = await (await request("/financial-health/workspace")).json();
+  const personalId = own.entity._id;
+  assert.equal(own.entity.ownerType, "PERSONAL");
+  const post = async (path, body) => {
+    const response = await request(`/financial-health${path}`, { method: "POST", body });
+    assert.equal(response.status, 201);
+    return response.json();
+  };
+  const business = (await post("/entities", { name: "Customer shop" })).entity;
+  const cash = (await post("/accounts", { entityId: business._id, name: "Shop cash", type: "ASSET", subtype: "CASH",
+    currency: "ETB", openingBalance: "100", date: "2026-01-01", requestKey: "opening-customer" })).account;
+  const businessWorkspace = await (await request(`/financial-health/workspace?entityId=${business._id}&currency=ETB`)).json();
+  const incomeBody = { entityId: business._id, type: "INCOME", categoryId: businessWorkspace.categories.find((c) => c.type === "INCOME")._id,
+    accountId: cash._id, amount: "20", paidAmount: "20", currency: "ETB", date: "2026-01-02", requestKey: "income-customer" };
+  await post("/transactions", incomeBody);
+  const replay = await request("/financial-health/transactions", { method: "POST", body: incomeBody });
+  assert.equal(replay.status, 200);
+  assert.equal((await replay.json()).replayed, true);
+  const statementPath = `/financial-health/workspace?entityId=${business._id}&currency=ETB&period=custom&from=2026-01-01&to=2026-01-31`;
+  const statement = await (await request(statementPath)).json();
+  assert.equal(statement.entity.ownerType, "BUSINESS");
+  assert.equal(statement.report.incomeStatement.incomeMinor, 2000);
+  assert.equal(statement.report.balanceSheet.assetsMinor, 12000);
+  assert.equal(statement.report.trialBalance.balanced, true);
+  const personalStatement = await (await request(`/financial-health/workspace?entityId=${personalId}`)).json();
+  assert.equal(personalStatement.accounts.length, 0);
+  assert.equal(personalStatement.report.totals.incomeMinor, 0);
+  assert.equal((await request(statementPath, { owner: OWNER })).status, 404);
+  assert.equal((await request(`/financial-health/accounts/${cash._id}`, { owner: OWNER, method: "PUT", body: { name: "Takeover" } })).status, 404);
+  const adminTracker = await (await request("/financial-management/workspace", { owner: OWNER })).json();
+  const adminCustomer = await (await request("/financial-health/workspace", { owner: OWNER })).json();
+  assert.notEqual(adminTracker.entity._id, adminCustomer.entity._id);
+  assert.equal(regions.get("E_Shopping").FinancialWorkspace.documents.has(OTHER), false);
+  const snapshot = structuredClone(regions.get("E_Shopping").CustomerFinancialWorkspace.documents.get(OTHER));
+  await request(settings, { owner: OWNER, method: "PUT", body: { enabled: false } });
+  for (const [method, suffix] of [["GET", "/workspace"], ["POST", "/entities"], ["POST", "/accounts"],
+    ["PUT", `/accounts/${cash._id}`], ["POST", `/accounts/${cash._id}/adjustments`], ["POST", "/categories"],
+    ["POST", "/transactions"], ["POST", `/transactions/${cash._id}/payments`], ["POST", `/transactions/${cash._id}/reverse`],
+    ["POST", "/transfers"], ["POST", "/goals"], ["PUT", `/goals/${cash._id}`], ["PUT", "/settings"]]) {
+    const response = await request(`/financial-health${suffix}`, { method, ...(method === "GET" ? {} : { body: {} }) });
+    assert.equal(response.status, 403, suffix);
+    assert.equal((await response.json()).error.code, "SERVICE_DISABLED", suffix);
+  }
+  assert.equal((await request("/financial-management/workspace", { owner: OWNER })).status, 200);
+  assert.deepEqual(regions.get("E_Shopping").CustomerFinancialWorkspace.documents.get(OTHER), snapshot);
+  await request(settings, { owner: OWNER, method: "PUT", body: { enabled: true } });
+  assert.equal((await (await request(statementPath)).json()).report.incomeStatement.incomeMinor, 2000);
+  const { readFinancialHealthSetting } = require("../helpers/financial-health");
+  regions.get("E_Shopping").setting.financialHealthEnabled = "true";
+  await assert.rejects(readFinancialHealthSetting({ SiteSetting: {
+    findOne: () => ({ lean: async () => regions.get("E_Shopping").setting }),
+  } }), /Invalid/);
+  unavailable = true;
+  assert.equal((await request(settings, { owner: null })).status, 503);
+  assert.equal((await request(settings, { owner: OWNER, method: "PUT", body: { enabled: false } })).status, 503);
+  assert.equal((await request("/financial-health/workspace")).status, 500);
+  assert.deepEqual(regions.get("E_Shopping").CustomerFinancialWorkspace.documents.get(OTHER), snapshot);
+});
 test("Swagger declares every private endpoint as bearer-authenticated", () => {
   const paths = require("../swagger-financial-management").paths;
   assert.equal(Object.keys(paths).length, 13);
   for (const operations of Object.values(paths)) for (const operation of Object.values(operations)) {
     assert.deepEqual(operation.security, [{ bearerAuth: [] }]);
+  }
+  const health = require("../swagger-financial-management").financialHealthPaths;
+  assert.equal(Object.keys(health).length, 14);
+  for (const [path, operations] of Object.entries(health)) for (const [method, operation] of Object.entries(operations)) {
+    assert.deepEqual(operation.security, path.endsWith("/settings/financial-health") && method === "get" ? [] : [{ bearerAuth: [] }]);
   }
 });
 test("actual regional model registration and app route mount bind the private workspace", () => {
@@ -468,6 +600,9 @@ test("actual regional model registration and app route mount bind the private wo
   assert.equal(first.FinancialWorkspace.db.name, "E_Shopping");
   assert.equal(other.FinancialWorkspace.db.name, "E_ShopUSA");
   assert.notEqual(first.FinancialWorkspace, other.FinancialWorkspace);
+  assert.equal(first.CustomerFinancialWorkspace.modelName, "CustomerFinancialWorkspace");
+  assert.notEqual(first.CustomerFinancialWorkspace.collection.name, first.FinancialWorkspace.collection.name);
+  assert.notEqual(first.CustomerFinancialWorkspace, other.CustomerFinancialWorkspace);
   assert.ok(first.FinancialWorkspace.schema.path("owner").options.immutable);
   const appSource = fs.readFileSync(path.join(__dirname, "..", "app.js"), "utf8");
   const mount = 'app.use(`${api}/financial-management`, require(\'./routers/financial-management\'));';

@@ -20,6 +20,9 @@ function fixture({ configured = true, store, stores, hub = "", compute } = {}) {
       getDrivingDistanceKm: compute || (async () => 12.5),
     },
     "../helpers/fulfillment-routing": { getCoordinates, resolvePickupStore },
+    "../helpers/financial-health": {},
+    "../helpers/social-login-settings": { PROVIDERS: [] },
+    "../helpers/payment-settings": { METHODS: [] },
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../routers/settings.js"), "utf8"), {
     module: { exports: {} }, require: (name) => {

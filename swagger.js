@@ -511,7 +511,7 @@ swaggerDocs.components.parameters = {
   ...(swaggerDocs.components.parameters || {}), ...authSwagger.parameters,
 };
 Object.assign(swaggerDocs.paths, authSwagger.paths, commerceSwagger.paths, ridesSwagger.paths);
-Object.assign(swaggerDocs.paths, financialManagementSwagger.paths);
+Object.assign(swaggerDocs.paths, financialManagementSwagger.paths, financialManagementSwagger.financialHealthPaths);
 for (const endpoint of ['login', 'driver-login', 'store-owner-login']) {
   const operation = swaggerDocs.paths[`/api/v1/users/${endpoint}`].post;
   operation.security = [];

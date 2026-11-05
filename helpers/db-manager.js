@@ -119,6 +119,7 @@ function getModelsForDb(dbName) {
     Payout: db.models.Payout || db.model('Payout', payoutSchema),
     FinanceEntry: db.models.FinanceEntry || db.model('FinanceEntry', financeEntrySchema),
     FinancialWorkspace: db.models.FinancialWorkspace || db.model('FinancialWorkspace', financialWorkspaceSchema),
+    CustomerFinancialWorkspace: db.models.CustomerFinancialWorkspace || db.model('CustomerFinancialWorkspace', financialWorkspaceSchema),
     ServiceRequest: db.models.ServiceRequest || db.model('ServiceRequest', serviceRequestSchema),
     DriverWalletTransaction:
       db.models.DriverWalletTransaction || db.model('DriverWalletTransaction', driverWalletTransactionSchema),

@@ -29,6 +29,36 @@ be zero. Negative amounts are accepted only by the explicit adjustment endpoint.
 
 ## Requests, responses and errors
 
+### Customer Financial Health branch
+
+The same accounting contract is available at `/api/v1/financial-health`, but
+requires an existing signed-in regional user rather than an admin. It stores
+records in the separate `CustomerFinancialWorkspace` model/collection, keyed
+only by the authenticated owner. No request-body owner or admin role can select
+another user's workspace. An admin using both branches has two independent
+workspaces; entity/account IDs cannot cross branches. No existing records are
+moved, imported or shared. Back up the customer collection separately alongside
+regional user data. The same replica-set transactions and accounting limits apply.
+
+Public, uncached `GET /api/v1/settings/financial-health` returns
+`{enabled:false}` until configured. `PUT` at the same path accepts only
+`{enabled:boolean}` and checks the current regional User's admin role in the
+database, not merely JWT claims. Settings are persisted under the regional
+`SiteSetting` key `financial-health` with `updatedBy`.
+
+Every customer read and mutation checks availability server-side. Off returns
+403 `{error:{code:"SERVICE_DISABLED",message:...}}`; records remain intact.
+Re-enabling restores access. This switch never affects `/financial-management`
+or its admin authorization. Clients hide the mobile shopping badge and website
+Financial Health dropdown entry while off. Deploy the backend before clients
+and enable explicitly in Admin > Financial Health service after testing.
+
+The PERSONAL/BUSINESS selector supplies `entityId` to account creation and
+statement queries. PERSONAL is initialized on first use; create additional
+businesses with `POST /entities`. Statements never combine their income.
+
+### Shared accounting behavior
+
 All mutation bodies are JSON objects. Financial postings require `requestKey`,
 8–100 characters matching `[A-Za-z0-9_.:-]`; the `Idempotency-Key` header is an
 alternative. Optional on entities/categories/goals/settings/metadata updates.

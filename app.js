@@ -191,6 +191,7 @@ app.use(`${api}/rides`, ridesRouter);
 app.use(`${api}/exchange-rate`, exchangeRouter);
 app.use(`${api}/finance`, require('./routers/finance'));
 app.use(`${api}/financial-management`, require('./routers/financial-management'));
+app.use(`${api}/financial-health`, require('./routers/financial-management').createRouter(true));
 // Notifications: push-token sub-routes live under /users, send/health under /notifications
 app.use(`${api}/notifications`, notificationsRouter);
 app.use(`${api}/users`, notificationsRouter);
