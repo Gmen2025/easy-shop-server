@@ -8,6 +8,7 @@ const { summarizeStoreOrder, buildStoreOrderSummary } = require("../helpers/stor
 const { reconcileUnassignedPickupStores } = require("../helpers/fulfillment-routing");
 const { inventoryEnabled, notifyStoreMutation } = require("../helpers/store-inventory");
 const finance = require("../helpers/finance");
+const { reviewSettings } = require("../helpers/reviews");
 const { operatorScope, operatorGet } = require("../helpers/operator-read");
 router.use(require("./store-inventory"));
 
@@ -328,9 +329,10 @@ operatorGet(router, "/me/dashboard", "/admin/:accountId/dashboard", async (req, 
       Order.find({ ...orderScope, dateOrdered: { $gte: oldestPeriodStart, $lte: now } })
         .select("_id status deliveryStatus dateOrdered")
         .lean(),
-      Review.find({ store: store._id, dateCreated: { $gte: oldestPeriodStart, $lte: now } })
+      (await reviewSettings(req.dbModels)).products ?
+        Review.find({ store: store._id, $or: [{ kind: 'product' }, { kind: { $exists: false } }], dateCreated: { $gte: oldestPeriodStart, $lte: now } })
         .select("rating dateCreated")
-        .lean(),
+        .lean() : [],
       Payout.find({ store: store._id }).select("amount status").lean(),
       Order.find(orderScope)
         .select("_id store orderItems itemsSubtotal totalPrice deliveryFee status deliveryStatus dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd assignedStoreSnapshot fulfillmentStatus inventoryManaged checkoutGroup requiredVehicle")

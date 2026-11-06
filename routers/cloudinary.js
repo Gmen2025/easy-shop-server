@@ -72,7 +72,9 @@ router.post('/sign', async (req, res) => {
   try {
     const isAdmin = Boolean(req.auth?.isAdmin);
     const isStoreOwner = req.auth?.role === 'store_owner' || Boolean(req.auth?.isStoreOwner);
-    if (!isAdmin && !isStoreOwner) {
+    const folder = req.body?.folder;
+    const isRidePhoto = ['customer_profiles', 'driver_profiles'].includes(folder) && Boolean(req.auth?.userId);
+    if (!isAdmin && !isStoreOwner && !isRidePhoto) {
       return res.status(req.auth?.userId ? 403 : 401).json({
         message: 'Admin or store-owner access required to sign product images.',
       });
@@ -88,7 +90,14 @@ router.post('/sign', async (req, res) => {
 
     const timestamp = Math.round(Date.now() / 1000);
     const paramsToSign = buildParamsToSign(req.body || {}, timestamp);
-    if (isStoreOwner && !isAdmin) {
+    if (isRidePhoto) {
+      if (Object.keys(req.body).some((key) => key !== 'folder')) {
+        return res.status(400).json({ message: 'Ride photo uploads only accept a folder.' });
+      }
+      if (folder === 'driver_profiles' && !isAdmin && !await req.dbModels.Driver.exists({ user: req.auth.userId, isCompanyOwned: true })) {
+        return res.status(403).json({ message: 'A linked company driver is required.' });
+      }
+    } else if (isStoreOwner && !isAdmin) {
       if (paramsToSign.folder !== 'eshop/products' || !req.auth?.userId) {
         return res.status(403).json({ message: 'Store owners may only sign uploads to eshop/products.' });
       }

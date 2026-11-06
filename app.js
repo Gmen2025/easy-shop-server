@@ -188,6 +188,7 @@ app.use(`${api}/stores`, storeOwnerRouter);
 app.use(`${api}/drivers`, driversRouter);
 app.use(`${api}/service-requests`, serviceRequestsRouter);
 app.use(`${api}/rides`, ridesRouter);
+app.use(`${api}/reviews`, require('./routers/reviews'));
 app.use(`${api}/exchange-rate`, exchangeRouter);
 app.use(`${api}/finance`, require('./routers/finance'));
 app.use(`${api}/financial-management`, require('./routers/financial-management'));

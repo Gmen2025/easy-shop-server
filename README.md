@@ -1634,3 +1634,42 @@ personal/business accrual ledgers, integer-minor-unit journals, transfers, savin
 goals, statements and audited period locks. It is manual accounting, separate
 from store/driver earnings and payouts. MongoDB replica-set transactions are
 required. See the [API contract and rollout guide](docs/financial-management.md).
+## Verified reviews and ride participant photos
+
+`GET /reviews/settings` returns regional boolean `products`, `deliveries`,
+`rides`, `services` switches, all off by default. Current database admins can
+`PUT /reviews/settings` with one or more of these booleans. Disabled features
+block public review reads and all submissions without deleting records.
+Deploy both clients before enabling switches. Build the regional Review partial
+unique index (`kind`, `transaction`, `author`, `subject`) before accepting writes.
+Enabling a switch explicitly builds these indexes and fails without enabling it
+if index creation fails.
+MongoDB replica-set transactions are required: switch changes and submissions
+serialize through the regional settings record; product aggregates update within
+the same transaction. First verified product feedback supersedes manual catalog
+rating/count values. Existing untyped store reviews remain intact.
+
+`POST /reviews` accepts `{ kind, transaction, product?, rating, comment? }`.
+Kinds: `product`, `delivery`, `rideDriver`, `rideCustomer`, `service`.
+Ratings are whole numbers 1-5; comments are at most 2000 trimmed characters.
+The server derives author, subject and ownership. Delivered purchases are needed
+for products/delivery; completed owned requests for services; completed rides
+and the actual assigned participants for reciprocal ride feedback. Reviews are
+immutable and unique per author/transaction/product or subject.
+`GET /reviews/context?kind=&transaction=&product=` returns the author's existing
+review. `GET /reviews/products/:id` publicly returns aggregate `{ average, count }`
+and the latest 50 comments without author identity. Current admins can inspect
+the latest 100 records using `GET /reviews/admin?kind=`.
+
+`GET /rides/me/customer-profile` returns the caller's optional photo and prompt
+state. `PUT` accepts `{ profilePhotoUrl: HTTPS_Cloudinary_URL }` or `{ skip: true }`;
+skip never blocks booking. `/cloudinary/sign` authorizes customer photo uploads
+to `customer_profiles`, company-driver uploads to `driver_profiles`, and restricts
+these requests to a folder-only body. Customer photo fields are excluded from
+generic user queries and serialization. Assigned driver dashboards receive
+customer photo/joined date/ride feedback; authorized customer ride details receive
+driver feedback and car make/model/type/color/plate. Ride ratings/comments are
+omitted while disabled. Older joined dates derive from the profile ObjectId's
+creation timestamp, not an invented date.
+
+Validation: `node --test tests/reviews.test.js tests/rides.test.js tests/order-dashboard.test.js`.

@@ -15,6 +15,7 @@ function authJwt() {
       "/api/v1/users/driver-login",
       "/api/v1/users/store-owner-login",
       "/api/v1/users/register",
+      { url: /^\/api\/v1\/reviews\/(?:settings|products\/[a-f\d]{24})$/, methods: ["GET", "OPTIONS"] },
       "/api/v1/stores/register-owner",
       "/api/v1/users/resend-verification",
       "/api/v1/users/forgot-password",

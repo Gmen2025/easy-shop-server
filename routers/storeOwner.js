@@ -6,6 +6,7 @@ const { normalizeStoreLogo } = require('../helpers/store-logo');
 const authSecurity = require('../helpers/auth-security');
 const { inventoryEnabled, updateManagedOrder, notifyStoreMutation } = require("../helpers/store-inventory");
 const finance = require("../helpers/finance");
+const { reviewSettings } = require('../helpers/reviews');
 
 router.use(async (req, res, next) => {
   if (/^\/[^/]+\/products(?:\/|$)/.test(req.path)) {
@@ -518,7 +519,8 @@ router.get('/:id/dashboard', async (req, res) => {
 
     const [products, reviews, payouts, todayStats, monthStats, allStats] = await Promise.all([
       Product.find({ store: storeId }),
-      Review.find({ store: storeId }),
+      (await reviewSettings(req.dbModels)).products
+        ? Review.find({ store: storeId, $or: [{ kind: 'product' }, { kind: { $exists: false } }] }) : [],
       Payout.find({ store: storeId }),
       getStoreOrderStats(req, storeId, startOfToday),
       getStoreOrderStats(req, storeId, thirtyDaysAgo),
@@ -1322,7 +1324,10 @@ router.get('/:id/reviews', async (req, res) => {
     if (!store) return;
 
     const { Review } = req.dbModels;
-    const reviews = await Review.find({ store: store._id })
+    if (!(await reviewSettings(req.dbModels)).products) {
+      return res.status(403).json({ message: 'Product reviews are disabled.' });
+    }
+    const reviews = await Review.find({ store: store._id, $or: [{ kind: 'product' }, { kind: { $exists: false } }] })
       .populate('customer', 'name')
       .populate('product', 'name')
       .sort({ dateCreated: -1 });

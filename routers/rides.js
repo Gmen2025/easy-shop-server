@@ -9,6 +9,7 @@ const service = require("../service/rideService");
 const places = require("../helpers/places");
 const { hasCurrentRideProfilePhoto, isCloudinaryPhotoUrl } = require("../helpers/ride-driver-profile");
 const { rideArrivalEta } = require("../helpers/ride-arrival");
+const { participantProfile } = require("../helpers/reviews");
 
 const endpoint = (action) => async (req, res) => {
   try {
@@ -143,15 +144,18 @@ operatorGet(router, "/me/driver", "/admin/drivers/:accountId/dashboard", endpoin
   if (!driver) throw Object.assign(new Error("Driver not found."), { status: 404 });
   if (!req.params?.accountId) await expireDriverOffer(req, driver);
   const current = await req.dbModels.Driver.findById(driver._id).lean();
-  const trip = current.activeRideTrip && await req.dbModels.RideTrip.findById(current.activeRideTrip).lean();
+  const trip = current.activeRideTrip && await req.dbModels.RideTrip.findOne({ _id: current.activeRideTrip, driver: current._id }).lean();
   const offer = current.pendingRideOffer && await req.dbModels.Ride.findOne({
     _id: current.pendingRideOffer, status: "offered", offerDriver: current._id, offerDeadline: { $gt: new Date() },
   }).lean();
-  const riders = trip ? await req.dbModels.Ride.find({ trip: trip._id, status: { $in: ["assigned", "onboard"] } })
+  const riders = trip ? await req.dbModels.Ride.find({ trip: trip._id, driver: current._id, status: { $in: ["assigned", "onboard"] } })
     .select("stops seats status user mode vehicleOption estimate").lean() : [];
-  const customers = riders.length ? await req.dbModels.User.find({ _id: { $in: riders.map((rider) => rider.user) } }).select("name").lean() : [];
-  const namedRiders = riders.map((rider) => ({
-    ...rider, customerName: customers.find((customer) => String(customer._id) === String(rider.user))?.name || "Customer",
+  const customers = riders.length ? await req.dbModels.User.find({ _id: { $in: riders.map((rider) => rider.user) } })
+    .select("name rideProfilePhotoUrl joinedAt").lean() : [];
+  const namedRiders = await Promise.all(riders.map(async (rider) => {
+    const customer = customers.find((person) => String(person._id) === String(rider.user));
+    return { ...rider, customerName: customer?.name || "Customer",
+      customerProfile: await participantProfile(req.dbModels, "rideCustomer", customer) };
   }));
   const payments = await req.dbModels.Ride.find({ driver: current._id, status: { $in: ["completed", "terminated"] } })
     .select("stops currency vehicleOption finalFare estimate status termination paymentStatus paymentMethod bankReference completedAt").sort({ updatedAt: -1 }).limit(20).lean();
@@ -164,6 +168,23 @@ operatorGet(router, "/me/driver", "/admin/drivers/:accountId/dashboard", endpoin
     profilePhotoUrl: current.profilePhotoUrl || "", rideProfilePhotoUpdatedAt: current.rideProfilePhotoUpdatedAt || null,
     rideProfilePhotoRequired: !hasCurrentRideProfilePhoto(current) },
     trip: trip || null, offer: offer ? publicRide(offer) : null, riders: namedRiders, payments });
+}));
+router.get("/me/customer-profile", endpoint(async (req, res) => {
+  const user = await req.dbModels.User.findById(req.auth.userId).select("name rideProfilePhotoUrl ridePhotoPromptedAt joinedAt").lean();
+  if (!user) throw Object.assign(new Error("Customer account not found."), { status: 404 });
+  res.json({ ...await participantProfile(req.dbModels, "rideCustomer", user), prompted: Boolean(user.ridePhotoPromptedAt) });
+}));
+router.put("/me/customer-profile", endpoint(async (req, res) => {
+  const body = req.body || {};
+  if (Object.keys(body).some((key) => !["profilePhotoUrl", "skip"].includes(key)) ||
+      (body.skip !== true && !isCloudinaryPhotoUrl(body.profilePhotoUrl)) ||
+      (body.skip === true && body.profilePhotoUrl !== undefined)) throw conflict("Upload a valid profile photo or choose skip.");
+  const update = body.skip === true ? { ridePhotoPromptedAt: new Date() } :
+    { ridePhotoPromptedAt: new Date(), rideProfilePhotoUpdatedAt: new Date(), rideProfilePhotoUrl: body.profilePhotoUrl };
+  const user = await req.dbModels.User.findByIdAndUpdate(req.auth.userId, { $set: update }, { new: true })
+    .select("name rideProfilePhotoUrl joinedAt").lean();
+  if (!user) throw Object.assign(new Error("Customer account not found."), { status: 404 });
+  res.json({ ...await participantProfile(req.dbModels, "rideCustomer", user), prompted: true });
 }));
 router.put("/me/profile-photo", endpoint(async (req, res) => {
   const driver = await selfDriver(req);
@@ -323,7 +344,8 @@ router.get("/:id", endpoint(async (req, res) => {
   const driver = current.driver && ["assigned", "onboard", "completed"].includes(current.status)
     ? await req.dbModels.Driver.findById(current.driver).select("name phone vehicleType vehicle profilePhotoUrl location rideLocationUpdatedAt").lean() : null;
   const pickupEta = current.status === "assigned" ? await rideArrivalEta(req.dbModels, current._id) : null;
-  res.json({ ...publicRide(current), pickupEta, assignedDriver: driver ? { name: driver.name, phone: driver.phone,
+  res.json({ ...publicRide(current), pickupEta, assignedDriver: driver ? { ...await participantProfile(req.dbModels, "rideDriver", driver), phone: driver.phone,
+    vehicleMake: driver.vehicle?.make || "", vehicleModel: driver.vehicle?.model || "", vehicleColor: driver.vehicle?.color || "",
     vehicleType: vehicleName(driver), plateNumber: driver.vehicle?.plateNumber, profilePhotoUrl: driver.profilePhotoUrl || "",
     ...(live ? { location: driver.location, locationUpdatedAt: driver.rideLocationUpdatedAt || null } : {}) } : null });
 }));

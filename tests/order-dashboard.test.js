@@ -214,6 +214,7 @@ test("store dashboard returns pending scheduled orders and keeps completed-sales
         });
       } },
       Review: { find: () => query([]) },
+      SiteSetting: { findOne: () => query(null) },
       Payout: { find: () => query([]) },
       FinanceEntry: { find: () => query([]) },
     },
@@ -266,6 +267,7 @@ test("AdminStore dashboard immediately includes legacy USA orders after persisti
         },
       },
       Review: { find: () => query([]) }, Payout: { find: () => query([]) },
+      SiteSetting: { findOne: () => query(null) },
       FinanceEntry: { find: () => query([]) },
     },
   };
@@ -390,6 +392,7 @@ test("store dashboard limits recent orders to twenty without adding pending orde
         return query(filter.$and ? [] : filter.dateOrdered ? orders.slice(0, 24) : orders);
       } },
       Review: { find: () => query([]) },
+      SiteSetting: { findOne: () => query(null) },
       Payout: { find: () => query([]) },
       FinanceEntry: { find: () => query([]) },
     },
@@ -460,6 +463,7 @@ test("company dashboard includes ready-product orders without crediting unrelate
           filter.deliveryStatus?.$ne ? scoped.filter((order) => order.deliveryStatus !== "Delivered") : scoped);
       } },
       Review: { find: () => query([]) },
+      SiteSetting: { findOne: () => query(null) },
       Payout: { find: () => query([{ amount: 10, status: "paid" }, { amount: 5, status: "pending" }]) },
       FinanceEntry: { find: () => query([]) },
     },

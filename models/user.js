@@ -40,6 +40,10 @@ const userSchema = new mongoose.Schema({
     type: String,
     default: "customer",
   },
+  rideProfilePhotoUrl: { type: String, default: "", select: false },
+  rideProfilePhotoUpdatedAt: { type: Date, select: false },
+  ridePhotoPromptedAt: { type: Date, select: false },
+  joinedAt: { type: Date, default: function () { return this._id.getTimestamp(); } },
   street: {
     type: String,
     default: "",
@@ -101,6 +105,7 @@ userSchema.set("toJSON", {
 userSchema.set("toObject", { virtuals: true, transform: sanitizeUser });
 
 function sanitizeUser(doc, ret) {
+  for (const key of ["rideProfilePhotoUrl", "rideProfilePhotoUpdatedAt", "ridePhotoPromptedAt"]) delete ret[key];
   for (const key of ["passwordHash", "authSecurity", "socialAccount", "passwordResetToken", "passwordResetTokenExpiry", "emailVerificationToken"]) {
     delete ret[key];
   }

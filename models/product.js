@@ -73,6 +73,8 @@ const productSchema = new mongoose.Schema({
     type: Number,
     default: 0
   },
+  verifiedRating: { type: Number, min: 1, max: 5 },
+  verifiedReviewCount: { type: Number, min: 1 },
   numReviews: {
     type: Number,
     default: 0
