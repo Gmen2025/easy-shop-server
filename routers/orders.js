@@ -131,6 +131,7 @@ const buildDeliveryDetailsEmailLines = (order) => {
 
 const shouldAutoDispatchOrder = (order) => {
   if (!order) return false;
+  if (require("../helpers/customer-pickup").isStorePickup(order)) return false;
   if (order.inventoryManaged && order.fulfillmentStatus !== "accepted") return false;
 
   const hasDriver = Boolean(order.driver);
@@ -512,6 +513,7 @@ router.get("/admin/company-fulfillable", requireAdmin, async (req, res) => {
     const { Order, Driver, Store } = req.dbModels;
     const orders = await Order.find({
       driver: null,
+      $nor: [{ fulfillmentMethod: "pickup", internationalShipping: null }],
       adminReviewRequired: { $exists: false },
       fallbackStore: null,
       deliveryStatus: "Pending",
@@ -767,7 +769,7 @@ router.put("/:id/company-claim", async (req, res) => {
         order: await Order.findById(order._id) });
     }
     if (order.storeRouteVersion) return res.status(409).json({ success: false, message: "The store must prepare and dispatch this package first." });
-    if (order.deliveryStatus !== "Pending" ||
+    if (require("../helpers/customer-pickup").isStorePickup(order) || order.deliveryStatus !== "Pending" ||
       order.adminReviewRequired || order.fallbackStore ||
       (order.inventoryManaged && order.fulfillmentStatus !== "accepted") ||
       !["pending_assignment", "assignment_failed"].includes(order.dispatchStatus) ||

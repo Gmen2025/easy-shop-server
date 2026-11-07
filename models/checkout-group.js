@@ -21,6 +21,7 @@ const checkoutGroupSchema = new mongoose.Schema({
   kind: { type: String, enum: ["products", "service"], default: "products" },
   serviceRequest: { type: mongoose.Schema.Types.ObjectId, ref: "ServiceRequest" },
   international: mongoose.Schema.Types.Mixed,
+  finalDeliveryFee: Number,
   cartRoute: mongoose.Schema.Types.Mixed,
   storeRoutes: [mongoose.Schema.Types.Mixed],
   routeDriver: { type: mongoose.Schema.Types.ObjectId, ref: "Driver", default: null },

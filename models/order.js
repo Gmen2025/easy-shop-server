@@ -132,6 +132,9 @@ const orderSchema = new mongoose.Schema({
         enum: ['EXPRESS', 'STANDARD', 'SAME_DAY', 'NEXT_DAY', 'SCHEDULED'],
         default: 'SAME_DAY'
     },
+    fulfillmentMethod: { type: String, enum: ['delivery', 'pickup'], default: 'delivery' },
+    pickupAddress: mongoose.Schema.Types.Mixed,
+    pickupConfirmation: mongoose.Schema.Types.Mixed,
     deliveryFee: {
         type: Number,
         default: 0

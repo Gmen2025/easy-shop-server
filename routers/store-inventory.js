@@ -507,10 +507,14 @@ operatorGet(router, "/me/assignments", "/admin/:accountId/assignments", endpoint
   if (req.params?.accountId && !stores.length) throw Object.assign(new Error("Store not found."), { status: 404 });
   const orders = await req.dbModels.Order.find({
     adminReviewRequired: { $exists: false },
-    status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
     $or: [
-      { inventoryManaged: true, store: { $in: stores.map((store) => store._id) }, fulfillmentStatus: { $in: ["pending", "accepted"] } },
-      { fallbackStore: { $in: stores.map((store) => store._id) }, store: null, driver: null, deliveryStatus: "Pending" },
+      { inventoryManaged: true, store: { $in: stores.map((store) => store._id) }, fulfillmentStatus: { $in: ["pending", "accepted"] },
+        status: { $nin: ["3", "4", "Delivered", "Cancelled"] } },
+      { fallbackStore: { $in: stores.map((store) => store._id) }, store: null, driver: null, deliveryStatus: "Pending",
+        status: { $nin: ["3", "4", "Delivered", "Cancelled"] } },
+      { store: { $in: stores.map((store) => store._id) }, fulfillmentMethod: "pickup",
+        "internationalShipping.status": { $in: ["arrived_ethiopia", "delivered"] },
+        "pickupConfirmation.operatorAt": { $exists: false }, fulfillmentStatus: { $ne: "cancelled" } },
     ],
   }).populate("fallbackStore", "name address logo").populate({ path: "orderItems", populate: { path: "product", select: "name image price" } }).sort({ dateOrdered: 1 }).lean();
   res.json(orders);
@@ -521,6 +525,8 @@ router.get("/admin/assignments", endpoint(async (req, res) => {
   await reconcileFallbackStores(req.dbModels);
   const orders = await req.dbModels.Order.find({
     $or: [
+      { fulfillmentMethod: "pickup", "internationalShipping.status": { $in: ["arrived_ethiopia", "delivered"] },
+        "pickupConfirmation.operatorAt": { $exists: false }, fulfillmentStatus: { $ne: "cancelled" } },
       { fulfillmentStatus: { $in: ["pending", "accepted", "unassigned"] }, status: { $nin: ["3", "4", "Delivered", "Cancelled"] } },
       { adminReviewRequired: "store" },
       { companyDriverResponses: { $elemMatch: { status: "rejected", action: { $ne: "reroute" } } } },

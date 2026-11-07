@@ -2,7 +2,7 @@ const { conflict, inventoryEnabled } = require("./store-inventory");
 const { cents, cargoFor } = require("./vehicle-delivery");
 const fx = require("./exchange-rate");
 const KEY = "usa-ethiopia-shipping";
-const CUSTOMS_NOTICE = "Shipping includes delivery to the Ethiopian recipient address. Import duties, customs charges and clearance requirements are excluded and are the recipient's responsibility.";
+const CUSTOMS_NOTICE = "International shipping charges apply to pickup and delivery. A separate configured Ethiopia final-delivery fee applies only to delivery. Import duties, customs charges and clearance requirements are excluded and are the recipient's responsibility.";
 const STAGES = ["awaiting_hub", "at_hub", "shipped", "arrived_ethiopia", "delivered"];
 
 function validateConfig(body) {
@@ -11,6 +11,17 @@ function validateConfig(body) {
   const hub = addressInput(body.hub);
   if (countryCode(hub.country) !== "US") throw conflict("The consolidation hub must be in the USA.");
   const result = { enabled: body.enabled, hub };
+  if (body.ethiopiaPickup) {
+    result.ethiopiaPickup = addressInput(body.ethiopiaPickup);
+    if (countryCode(result.ethiopiaPickup.country) !== "ET") throw conflict("The international collection address must be in Ethiopia.");
+  }
+  const finalDeliveryUsd = Number(body.finalDeliveryUsd ?? 0);
+  if (!["number", "string"].includes(typeof (body.finalDeliveryUsd ?? 0)) ||
+      !Number.isFinite(finalDeliveryUsd) || finalDeliveryUsd < 0 || finalDeliveryUsd > 1000000 ||
+      String(body.finalDeliveryUsd ?? 0).trim() === "" || Math.abs(finalDeliveryUsd * 100 - cents(finalDeliveryUsd)) > 0.000001) {
+    throw conflict("Enter a non-negative Ethiopia final-delivery fee in USD with at most two decimals.");
+  }
+  result.finalDeliveryUsd = finalDeliveryUsd;
   for (const field of ["baseUsd", "perKgUsd", "minimumUsd", "volumetricDivisor", "maxWeightKg", "maxDimensionCm"]) {
     const value = Number(body[field]);
     if (!["number", "string"].includes(typeof body[field]) || String(body[field]).trim() === "" ||
@@ -60,12 +71,22 @@ function splitFee(deliveries, amount) {
 }
 function recalculate(group) {
   for (const shipment of group.international.shipments) {
-    splitFee(group.deliveries.filter((delivery) => delivery.address.id === shipment.id), shipment.shippingUsd);
+    const members = group.deliveries.filter((delivery) => delivery.address.id === shipment.id);
+    splitFee(members, shipment.shippingUsd);
+    const deliveryMembers = members.filter((delivery) => delivery.fulfillmentMethod !== "pickup");
+    const finalFee = deliveryMembers.length ? cents(group.international.tariff.finalDeliveryUsd || 0) : 0;
+    for (const delivery of members) delivery.finalDeliveryFee = 0;
+    deliveryMembers.forEach((delivery, index) => {
+      delivery.finalDeliveryFee = (Math.floor(finalFee / deliveryMembers.length) + (index < finalFee % deliveryMembers.length ? 1 : 0)) / 100;
+      delivery.totalPrice = (cents(delivery.totalPrice) + cents(delivery.finalDeliveryFee)) / 100;
+    });
+    shipment.finalDeliveryUsd = finalFee / 100;
   }
   const shippingFee = group.international.shipments.reduce((sum, shipment) => sum + cents(shipment.shippingUsd), 0) / 100;
   const itemsSubtotal = group.deliveries.reduce((sum, delivery) => sum + cents(delivery.itemsSubtotal), 0) / 100;
   const deliveryFee = group.deliveries.reduce((sum, delivery) => sum + cents(delivery.deliveryFee), 0) / 100;
-  Object.assign(group, { itemsSubtotal, deliveryFee, totalPrice: (cents(itemsSubtotal) + cents(deliveryFee) + cents(shippingFee)) / 100 });
+  const finalDeliveryFee = group.deliveries.reduce((sum, delivery) => sum + cents(delivery.finalDeliveryFee), 0) / 100;
+  Object.assign(group, { itemsSubtotal, deliveryFee, finalDeliveryFee, totalPrice: (cents(itemsSubtotal) + cents(deliveryFee) + cents(shippingFee) + cents(finalDeliveryFee)) / 100 });
   group.international.shippingFee = shippingFee;
   group.paymentAmount = fx.allocatePayment(group.deliveries, group.exchangeRate, "usd-to-etb");
   group.markModified("deliveries"); group.markModified("international");
@@ -127,6 +148,10 @@ async function updateShipment(models, groupId, shipmentId, body, user) {
     const text = (value) => typeof value === "string" && value.trim().length <= 300 ? value.trim() : "";
     if (body.status === "shipped" && (!text(body.carrier) || !text(body.trackingNumber))) throw conflict("Enter a carrier and tracking number before exporting.");
     if (body.status === "delivered" && !text(body.note)) throw conflict("Enter proof of final delivery / recipient confirmation.");
+    if (body.status === "delivered" && active.some((order) => order.fulfillmentMethod === "pickup" &&
+        !(order.pickupConfirmation?.customerAt && order.pickupConfirmation?.operatorAt))) {
+      throw conflict("Both customer and store/Admin must confirm collected packages before final shipment completion.");
+    }
     Object.assign(shipment, { status: body.status, ...(body.status === "shipped" ? { carrier: text(body.carrier), trackingNumber: text(body.trackingNumber) } : {}) });
     shipment.history.push({ status: body.status, at: new Date(), note: text(body.note), user });
     group.markModified("international");

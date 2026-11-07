@@ -14,6 +14,15 @@ async function respondAsAdmin(models, orderId, decision, { storeId } = {}) {
         order.adminReviewRequired && order.adminReviewRequired !== "store") {
       throw conflict("Only active, undispatched store requests can be claimed or rerouted.");
     }
+    if (require("./customer-pickup").isStorePickup(order)) {
+      if (decision !== "accept" || storeId && String(storeId) !== String(order.store)) {
+        throw conflict("Customer pickup is pinned to its collection store. Use checkout cancellation/refund instead of rerouting.");
+      }
+      order.fulfillmentStatus = "accepted";
+      order.fulfillmentDeadline = null;
+      await order.save({ session });
+      return order;
+    }
     if (order.cartRouteVersion === 1) {
       const group = await models.CheckoutGroup.findById(order.checkoutGroup).session(session);
       if (!group || group.routeDriver) throw conflict("This cart is already assigned to a driver.");

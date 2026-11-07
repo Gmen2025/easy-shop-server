@@ -197,6 +197,9 @@ async function reroute(models, orderId, { storeId, decision, now = new Date() } 
       throw conflict("This assignment is no longer awaiting a store response.");
     }
     if (storeId && String(order.store) !== String(storeId)) throw conflict("This assignment belongs to another store.");
+    if (require("./customer-pickup").isStorePickup(order) && decision !== "accept") {
+      throw conflict("Customer pickup is pinned to this store. Use checkout cancellation/refund instead of rerouting.");
+    }
     if (order.cartRouteVersion === 1) {
       const group = await models.CheckoutGroup.findById(order.checkoutGroup).session(session);
       if (!group || group.routeDriver) throw conflict("This cart is already assigned to its driver.");
@@ -205,7 +208,7 @@ async function reroute(models, orderId, { storeId, decision, now = new Date() } 
     }
     if (!decision && order.fulfillmentStatus === "pending" && order.fulfillmentDeadline > now) return order;
     if (decision === "accept") {
-      if (!order.fulfillmentDeadline || order.fulfillmentDeadline <= now) {
+      if (!require("./customer-pickup").isStorePickup(order) && (!order.fulfillmentDeadline || order.fulfillmentDeadline <= now)) {
         throw conflict("The response deadline has passed. Refresh your assignments.");
       }
       order.fulfillmentStatus = "accepted";
@@ -252,7 +255,9 @@ async function notifyStoreAssignment(models, order) {
     const store = await models.Store.findById(order.store).lean();
     if (store?.owner) await sendPushToUser({
       User: models.User, userId: store.owner, title: "Store assignment",
-      body: `Order #${order._id} needs a response within 5 minutes.`,
+      body: require("./customer-pickup").isStorePickup(order)
+        ? `Order #${order._id} is for customer collection at your store. Confirm handover after collection.`
+        : `Order #${order._id} needs a response within 5 minutes.`,
       data: { type: "store_order_assigned", orderId: String(order._id) },
     });
   } catch (error) { console.error("Store assignment notification failed:", error.message); }
@@ -262,6 +267,10 @@ async function updateManagedOrder(models, orderId, fields, { deleting = false } 
   return models.Order.db.transaction(async (session) => {
     const order = await models.Order.findById(orderId).session(session);
     if (!order) return null;
+    if (deleting && order.fulfillmentMethod === "pickup" && order.fulfillmentStatus !== "cancelled" &&
+        !(order.pickupConfirmation?.customerAt && order.pickupConfirmation?.operatorAt)) {
+      throw conflict("Complete both collection confirmations or cancel through the checkout before deleting pickup orders.");
+    }
     if (deleting && order.storeDispatchBatch) {
       const batch = await models.StoreDispatch.findById(order.storeDispatchBatch).session(session);
       if (!batch) throw conflict("Store dispatch record is missing. Contact support.");
@@ -293,6 +302,7 @@ async function updateManagedOrder(models, orderId, fields, { deleting = false } 
     if (order.checkoutGroup && (order.fulfillmentStatus === "payment_pending" ||
         ["totalPrice", "itemsSubtotal", "deliveryFee", "paymentStatus", "paymentTransactionId", "paymentMethod",
           "paymentCurrency", "paymentAmount", "exchangeRate", "internationalShipping", "internationalShippingFee",
+          "fulfillmentMethod", "pickupAddress", "pickupConfirmation", "fulfillmentStatus", "reservedItems",
           "shippingAddress1", "shippingAddress2", "city", "zip", "country", "phone", "customerLocation", "orderItems",
           "customer", "paymentProvider", "methodName", "cardType", "bankName", "senderName", "transferReference", "paymentNote"]
           .some((key) => fields[key] !== undefined))) {
@@ -302,6 +312,10 @@ async function updateManagedOrder(models, orderId, fields, { deleting = false } 
       throw conflict("Inventory-managed assignments cannot be reassigned manually.");
     }
     const completed = fields.deliveryStatus === "Delivered" || ["3", "Delivered"].includes(String(fields.status));
+    if (require("./customer-pickup").isStorePickup(order) &&
+        (completed || fields.deliveryStatus !== undefined || fields.pickupConfirmation !== undefined || fields.fulfillmentMethod !== undefined)) {
+      throw conflict("Customer pickup requires separate customer and store/Admin collection confirmations.");
+    }
     if (order.storeRouteVersion && !deleting && fields.deliveryStatus &&
         !["Picked Up", "Delivered"].includes(fields.deliveryStatus)) {
       throw conflict("Store batch progress cannot be reset through an individual order.");

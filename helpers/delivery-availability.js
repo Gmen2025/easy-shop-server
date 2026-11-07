@@ -15,7 +15,8 @@ function pickupEligible(driver, location) {
 }
 
 function orderReady(order, now = new Date(), { includeScheduled = false } = {}) {
-  return !order.driver && !order.adminReviewRequired && !order.fallbackStore &&
+  return !(order.fulfillmentMethod === "pickup" && !order.internationalShipping) &&
+    !order.driver && !order.adminReviewRequired && !order.fallbackStore &&
     (!order.storeRouteVersion || Boolean(order.storeReadyAt && order.storeDispatchBatch)) &&
     order.deliveryStatus === "Pending" && !["3", "4", "Delivered", "Cancelled"].includes(String(order.status)) &&
     (!order.inventoryManaged || order.fulfillmentStatus === "accepted") &&

@@ -7,6 +7,7 @@ const id = (value) => String(value?._id || value || "");
 
 function validatePackages(orders, storeId) {
   if (!orders.length || orders.some((order) => id(order.store) !== id(storeId) ||
+      order.fulfillmentMethod === "pickup" && !order.internationalShipping ||
       order.storeRouteVersion !== 1 || order.fulfillmentStatus !== "accepted" || !order.storeReadyAt ||
       order.storeDispatchBatch || order.driver || order.fallbackStore || order.adminReviewRequired ||
       order.deliveryStatus !== "Pending" || ["3", "4", "Delivered", "Cancelled"].includes(String(order.status)))) {
@@ -20,6 +21,7 @@ function validatePackages(orders, storeId) {
 async function markReady(models, orderId, storeId) {
   const order = await models.Order.findOneAndUpdate({
     _id: orderId, store: storeId, storeRouteVersion: 1, fulfillmentStatus: "accepted",
+    $nor: [{ fulfillmentMethod: "pickup", internationalShipping: null }],
     driver: null, storeDispatchBatch: null, fallbackStore: null, adminReviewRequired: { $exists: false },
     deliveryStatus: "Pending", status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
   }, { $set: { storeReadyAt: new Date() } }, { new: true });
@@ -71,6 +73,7 @@ async function enablePreparation(models, userId, orderId, { admin = false, vehic
   return models.Order.db.transaction(async (session) => {
     const order = await models.Order.findById(orderId).session(session);
     if (!order) throw conflict("Assignment not found.");
+    if (order.fulfillmentMethod === "pickup" && !order.internationalShipping) throw conflict("Customer collection orders do not dispatch to drivers.");
     if (!admin) {
       const store = await models.Store.findOne({ _id: order.store, owner: userId }).session(session);
       if (!store) throw Object.assign(new Error("You cannot manage this store."), { status: 403 });
@@ -93,7 +96,8 @@ async function enablePreparation(models, userId, orderId, { admin = false, vehic
     }
     const active = orders.filter((entry) => entry.fulfillmentStatus !== "cancelled" &&
       !["4", "Cancelled"].includes(String(entry.status)));
-    if (!active.length || active.some((entry) => entry.driver || entry.storeDispatchBatch || entry.storeRouteVersion ||
+    if (!active.length || active.some((entry) => entry.fulfillmentMethod === "pickup" && !entry.internationalShipping ||
+        entry.driver || entry.storeDispatchBatch || entry.storeRouteVersion ||
         entry.fulfillmentStatus !== "accepted" || !entry.store || entry.fallbackStore || entry.adminReviewRequired ||
         entry.deliveryStatus !== "Pending" || ["3", "Delivered"].includes(String(entry.status)) ||
         entry.paymentStatus === "failed" || entry.refundStatus && entry.refundStatus !== "not_required")) {

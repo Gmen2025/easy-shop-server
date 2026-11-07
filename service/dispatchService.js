@@ -325,6 +325,9 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
     if (!order) {
       throw new Error("Order not found.");
     }
+    if (require("../helpers/customer-pickup").isStorePickup(order)) {
+      return { success: false, reason: "customer_collection_no_driver" };
+    }
     if (order.cartRouteVersion === 1 || order.storeDispatchBatch) {
       return { cartOrder: order };
     }

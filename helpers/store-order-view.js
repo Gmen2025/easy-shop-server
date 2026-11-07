@@ -23,7 +23,8 @@ function summarizeStoreOrder(order, storeId, productIds) {
   if (productIds ? matchedItems === 0 && String(order.store) === String(storeId) : sales === 0) {
     sales = Number(order.itemsSubtotal || 0) || Math.max(
       0,
-      Number(order.totalPrice || 0) - Number(order.deliveryFee || 0) - Number(order.internationalShippingFee || 0)
+      Number(order.totalPrice || 0) - Number(order.deliveryFee || 0) - Number(order.internationalShippingFee || 0) -
+        Number(order.internationalShipping?.finalDeliveryFee || 0)
     );
     units = (order.orderItems || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
   }
@@ -55,9 +56,13 @@ function buildStoreOrderSummary(order, storeId, productIds) {
     assignedStore: order.assignedStoreSnapshot || null,
     fulfillmentStatus: order.fulfillmentStatus,
     checkoutGroup: order.checkoutGroup,
+    fulfillmentMethod: order.fulfillmentMethod || "delivery",
+    pickupAddress: order.pickupAddress,
+    pickupConfirmation: order.pickupConfirmation,
     requiredVehicle: order.requiredVehicle,
     ...(order.internationalShipping ? { internationalShipping: {
       hub: order.internationalShipping.hub, status: order.internationalShipping.status,
+      finalDeliveryFee: order.internationalShipping.finalDeliveryFee || 0,
     }, internationalShippingFee: order.internationalShippingFee } : {}),
     orderItems: items.map((item) => ({
       quantity: item.quantity,

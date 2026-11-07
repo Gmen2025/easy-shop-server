@@ -14,7 +14,8 @@ async function change(models, orderId, { admin = false, ownerId, respondingDrive
     const loaded = grouped ? await loadCart(models, order, session) : { group: null, orders: [order] };
     const { group } = loaded;
     const orders = liveOrders(loaded.orders);
-    if (!orders.length || orders.some((entry) => entry.adminReviewRequired && !(admin && entry.adminReviewRequired === "driver") || entry.fallbackStore ||
+    if (!orders.length || orders.some((entry) => require("../helpers/customer-pickup").isStorePickup(entry) ||
+        entry.adminReviewRequired && !(admin && entry.adminReviewRequired === "driver") || entry.fallbackStore ||
         ["cancelled", "completed", "payment_pending"].includes(entry.fulfillmentStatus) ||
         entry.inventoryManaged && entry.fulfillmentStatus !== "accepted" ||
         entry.storeRouteVersion && (!entry.storeReadyAt || !entry.storeDispatchBatch) ||

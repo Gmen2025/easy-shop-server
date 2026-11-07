@@ -19,6 +19,7 @@ async function dispatchPendingOrders(io, { databaseNames = getAllowedDatabaseNam
       await expireCheckouts(models, dbName, now);
       const expired = managed ? await models.Order.find({
         inventoryManaged: true,
+        $nor: [{ fulfillmentMethod: "pickup", internationalShipping: null }],
         adminReviewRequired: { $exists: false },
         fallbackStore: null,
         status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
@@ -35,6 +36,7 @@ async function dispatchPendingOrders(io, { databaseNames = getAllowedDatabaseNam
       await reconcileFallbackStores(models);
       const orders = await models.Order.find({
         driver: null,
+        $nor: [{ fulfillmentMethod: "pickup", internationalShipping: null }],
         fallbackStore: null,
         adminReviewRequired: { $exists: false },
         deliveryStatus: "Pending",

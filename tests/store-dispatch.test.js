@@ -58,6 +58,14 @@ test("accepted packages must be marked ready before release; only the assigned s
   f.orders[0].fulfillmentStatus = "pending";
   await assert.rejects(markReady(f.models, id(1), id(10)), /preparation/);
 });
+test("domestic collection packages never qualify for driver dispatch even if old readiness fields exist", () => {
+  const f = fixture();
+  f.orders[0].fulfillmentMethod = "pickup";
+  assert.equal(orderReady(f.orders[0]), false);
+  assert.throws(() => validatePackages(f.orders, id(10)), /ready, undispatched/);
+  f.orders[0].internationalShipping = { shipmentId: "recipient" };
+  assert.doesNotThrow(() => validatePackages(f.orders, id(10)), "International pickup still needs US hub delivery");
+});
 
 test("store releases measured packages from several customers as one durable dispatch batch with unchanged fees", async () => {
   const f = fixture();

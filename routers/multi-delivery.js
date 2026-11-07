@@ -2,7 +2,7 @@ const router = require("express").Router();
 const mongoose = require("mongoose");
 const { conflict } = require("../helpers/store-inventory");
 const { VEHICLE_CONFIG_KEY, validateVehicleConfig, validatePackageSize, cents } = require("../helpers/vehicle-delivery");
-const { addressInput, createQuote, createServiceQuote, prepare, activate, ensureIntent, reconcile, cancelDelivery, refundDelivery } = require("../helpers/multi-delivery");
+const { addressInput, createQuote, createServiceQuote, changeFulfillment, prepare, activate, ensureIntent, reconcile, cancelDelivery, refundDelivery } = require("../helpers/multi-delivery");
 const fx = require("../helpers/exchange-rate");
 const international = require("../helpers/international-shipping");
 
@@ -55,6 +55,7 @@ router.put("/international-shipping-config", endpoint(async (req, res) => {
   if (!/usa/i.test(req.dbName)) throw conflict("Select the USA region.");
   const input = international.validateConfig(req.body);
   input.hub.location = await require("../helpers/multi-delivery").geocodeAddress(input.hub);
+  if (input.ethiopiaPickup) input.ethiopiaPickup.location = await require("../helpers/multi-delivery").geocodeAddress(input.ethiopiaPickup);
   const saved = await req.dbModels.SiteSetting.db.transaction(async (session) => {
     const previous = await req.dbModels.SiteSetting.findOne({ key: international.KEY }).session(session).lean();
     const next = { ...input, revision: (previous?.internationalShippingConfig?.revision || 0) + 1 };
@@ -83,7 +84,7 @@ router.get("/delivery-addresses", endpoint(async (req, res) => {
   res.json(await req.dbModels.DeliveryAddress.find({ user: req.auth.userId }).sort({ updatedAt: -1 }).lean());
 }));
 router.get("/delivery-current-address", endpoint(async (req, res) => {
-  const order = await req.dbModels.Order.findOne({ user: req.auth.userId, status: { $nin: ["4", "Cancelled"] },
+  const order = await req.dbModels.Order.findOne({ user: req.auth.userId, fulfillmentMethod: { $ne: "pickup" }, status: { $nin: ["4", "Cancelled"] },
     fulfillmentStatus: { $ne: "payment_pending" } }).sort({ dateOrdered: -1 }).lean();
   const user = await req.dbModels.User.findById(req.auth.userId).lean();
   res.json({ label: "Current address", address1: order?.shippingAddress1 || user?.street || "",
@@ -118,6 +119,14 @@ router.delete("/delivery-addresses/:id", endpoint(async (req, res) => {
 
 router.post("/checkouts/quote", endpoint(async (req, res) => {
   res.status(201).json(serial(await createQuote(req.dbModels, req.auth.userId, req.dbName, req.body)));
+}));
+router.post("/checkouts/:id/fulfillment", endpoint(async (req, res) => {
+  validId(req.params.id);
+  res.json(serial(await changeFulfillment(req.dbModels, req.params.id, req.auth.userId, req.dbName, req.body.selections)));
+}));
+router.post("/checkouts/:id/orders/:orderId/pickup-confirmation", endpoint(async (req, res) => {
+  validId(req.params.id); validId(req.params.orderId);
+  res.json(await require("../helpers/customer-pickup").confirmPickup(req.dbModels, req.params.id, req.params.orderId, req.auth, req.body));
 }));
 router.post("/service-checkouts/:serviceId", endpoint(async (req, res) => {
   validId(req.params.serviceId);

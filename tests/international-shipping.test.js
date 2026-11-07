@@ -29,6 +29,33 @@ test("shipping fails closed for missing package data, unapproved exports and ove
   }
   assert.throws(() => shipping.tariff([{ product: "product", quantity: 10 }], [product], policy), /weight limit/);
 });
+test("Ethiopia collection configuration is optional; final delivery defaults to zero and accepts only nonnegative cent fees", () => {
+  assert.equal(shipping.validateConfig(policy).finalDeliveryUsd, 0);
+  const ethiopiaPickup = { ...hub, country: "Ethiopia", zip: "", address1: "Bole collection office" };
+  assert.equal(shipping.validateConfig({ ...policy, ethiopiaPickup, finalDeliveryUsd: "8.25" }).ethiopiaPickup.address1, "Bole collection office");
+  for (const value of [-1, "", true, 1.234, Infinity, "invalid"]) {
+    assert.throws(() => shipping.validateConfig({ ...policy, finalDeliveryUsd: value }), /final-delivery/);
+  }
+  assert.throws(() => shipping.validateConfig({ ...policy, ethiopiaPickup: hub }), /in Ethiopia/);
+});
+test("international mixed fulfillment keeps shipping once per shipment and apportions final-delivery cents only among delivery stores", () => {
+  const group = { deliveries: ["a", "b", "c"].map((key) => ({ key, address: { id: "home" }, itemsSubtotal: 10,
+    deliveryFee: 2, fulfillmentMethod: key === "a" ? "pickup" : "delivery" })),
+  international: { tariff: { finalDeliveryUsd: 8.01 }, shipments: [{ id: "home", shippingUsd: 15 }] },
+  exchangeRate: { birrPerUsd: 150 }, markModified() {} };
+  shipping.recalculate(group);
+  assert.deepEqual(group.deliveries.map((delivery) => delivery.finalDeliveryFee), [0, 4.01, 4]);
+  assert.equal(group.totalPrice, 59.01);
+  assert.equal(group.paymentAmount, 8851.5);
+  shipping.recalculate(group);
+  assert.equal(group.totalPrice, 59.01, "Recalculation must not add final delivery twice");
+  group.deliveries.forEach((delivery) => { delivery.fulfillmentMethod = "pickup"; });
+  shipping.recalculate(group);
+  assert.equal(group.totalPrice, 51);
+  assert.equal(group.finalDeliveryFee, 0);
+  assert.equal(group.international.shippingFee, 15);
+  assert.equal(group.deliveryFee, 6, "USA hub transport remains payable");
+});
 test("USA export rate expires at exactly 24 hours, remains independent, and multiplies USD into birr cents", async () => {
   const now = new Date("2026-10-11T12:00:00Z");
   const config = { enabled: true, birrPerUsd: 150.31, appliedAt: now, revision: 5 };

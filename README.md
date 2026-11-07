@@ -20,6 +20,49 @@ Deploy this backend before the matching mobile/website controls.
 
 Checks: `node --test tests/service-availability.test.js tests/rides.test.js`.
 
+## Customer pickup or delivery
+
+Website and mobile product checkout quotes allow an independent choice for every
+actual supplying store, after matching inventory to destination allocations.
+Existing quotes/orders default to delivery. Before payment, send
+`POST /api/v1/stores/checkouts/:id/fulfillment` with
+`{ "selections": [{ "storeId": "<supplying-store-id>", "method": "pickup" }] }`,
+including **every** supplying store exactly once (`pickup` or `delivery`).
+Only the quote owner can change unexpired product quotes. Totals and vehicle
+options are recalculated server-side; quote expiry is unchanged. Domestic
+collection has zero delivery/speed charges and displays the supplying store's
+saved collection address. Delivery stores retain their separately priced routes.
+Prepare sends vehicle selections only for actual domestic delivery orders.
+
+Pickup orders stay pinned to their collection store, have no driver dispatch
+or five-minute response expiry, and retain reserved stock until physical handover
+is cross-checked. Customer and assigned store owner/Admin separately send
+`POST /api/v1/stores/checkouts/:id/orders/:orderId/pickup-confirmation` with
+`{ "party": "customer", "note": "<handover reference>" }` or party `operator`.
+Notes are required (1-300 characters); repeats are idempotent. Noncash payment
+must be verified first. Both confirmations consume domestic stock, complete the
+order and settle cash payment. Normal individual edits cannot bypass this flow.
+Cancellation/refund uses existing checkout endpoints before either confirmation.
+
+USA-to-Ethiopia pickup means **collection in Ethiopia**, not the US store.
+Admin's USA international shipping settings now optionally accept a geocoded
+`ethiopiaPickup` address (same fields as `hub`, with country Ethiopia) and
+`finalDeliveryUsd` (nonnegative, two decimals, defaults to zero). No configured
+collection address means international pickup is unavailable. The existing
+tariff remains international shipping; USA store-to-hub and international
+shipping charges apply for both fulfillment choices. The separate final-delivery
+fee is charged once per recipient shipment if any supplying store is delivery,
+and split only among its delivery orders. Quotes and payments snapshot these
+fees/addresses. Duties/customs remain excluded.
+
+International confirmation waits for arrival in Ethiopia and verified payment.
+US `Delivered` still means arrival at the US hub. All-pickup shipments finish
+after both confirmations for every active pickup order; mixed shipments also
+require Admin's final-delivery proof. Store assignments and customer/Admin
+checkout history expose collection addresses and independent confirmation state.
+
+Checks: `node --test tests\multi-delivery.test.js tests\international-shipping.test.js tests\store-dispatch.test.js`.
+
 ## Store product publishing and nearest-store pricing
 
 Store owners manage their linked locations under `/api/v1/stores/me/locations`.
@@ -496,8 +539,8 @@ Configure **Admin > US Shipping** in the USA region:
   kg or total volumetric kg, rounded **up to 0.001 kg**. Shipping is
   `max(minimumUsd, baseUsd + billableKg * perKgUsd)`, rounded to USD cents.
   One international fee is charged per recipient, not per pickup. This tariff
-  is Admin pricing, not a live carrier quote; Admin must account for handling
-  and final delivery to the Ethiopian address.
+  is Admin shipping pricing, not a live carrier quote; final Ethiopian delivery
+  is configured separately and omitted for collection.
 - Explicit **export approval** per product (`exportToEthiopia`); default false.
   Admin must verify shipment/import legality and carrier coverage and measure
   package weight/dimensions. Unapproved, missing-size, overweight or oversize
@@ -545,8 +588,9 @@ not final Ethiopia delivery. Admin performs actual carrier booking/export and
 last-mile coordination outside the app; no carrier labels or automatic tracking
 feed are generated.
 
-The checkout explicitly discloses that shipping includes final address delivery
-but **customs/import duties, charges and clearance are excluded** and are the
+The checkout explicitly discloses that shipping applies to pickup and delivery,
+with a separate configured final-delivery fee for delivery only;
+**customs/import duties, charges and clearance are excluded** and are the
 recipient's responsibility. Paid child cancellation/refund is available only
 before driver assignment/hub handling under the existing cancellation rules.
 Refunds use each child's locked ETB amount, including its allocated shipping;

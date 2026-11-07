@@ -3,10 +3,11 @@ const assert = require("node:assert/strict");
 const {
   addressInput, normalizeAllocations, allocateStock, quoteTotals, selectVehicles, checkoutDeliveryPlan,
   groupNearbyStores, allocateDeliveryFees, NEARBY_STORE_METERS,
-  createQuote, createServiceQuote, prepare, activate, ensureIntent, reconcile, cancelDelivery, refundDelivery,
+  createQuote, createServiceQuote, changeFulfillment, prepare, activate, ensureIntent, reconcile, cancelDelivery, refundDelivery,
 } = require("../helpers/multi-delivery");
 const { validateVehicleConfig, validatePackageSize, cargoFor, suitableVehicles, vehicleFee, vehicleMatches } = require("../helpers/vehicle-delivery");
 const { updateManagedOrder } = require("../helpers/store-inventory");
+const { confirmPickup, isStorePickup } = require("../helpers/customer-pickup");
 const stripeRouter = require("../routers/stripe");
 const originalStripeResolver = stripeRouter.getStripe;
 const fx = require("../helpers/exchange-rate");
@@ -105,6 +106,7 @@ function fixture({ exchangeConfig, bankCurrency, shippingConfig } = {}) {
     Product: { find: () => query([product]), updateMany: async () => ({ modifiedCount: 1 }) },
     Store: {
       findById: (storeId) => query(stores.find((store) => store._id === String(storeId))),
+      findOne: ({ _id, owner }) => query(stores.find((store) => store._id === String(_id) && store.owner === owner)),
       updateOne: async () => ({ modifiedCount: 1 }),
     },
     SiteSetting: {
@@ -153,6 +155,201 @@ function fixture({ exchangeConfig, bankCurrency, shippingConfig } = {}) {
   const body = { method: "card", selections: group.deliveries.map((delivery) => ({ key: delivery.key, vehicle: "car" })) };
   return { models, stocks, orders, orderItems, group, body };
 }
+
+const fulfillmentSelections = (group, method) => group.deliveries.map((delivery) => ({ storeId: String(delivery.store._id), method }));
+
+test("store collection quotes remove all domestic fees and restore authoritative delivery routes when switched back", async () => {
+  const { models, group } = fixture();
+  const expiry = +group.expiresAt;
+  await changeFulfillment(models, group._id, userId, "E_ShopUSA", fulfillmentSelections(group, "pickup"));
+  assert.equal(group.deliveryFee, 0);
+  assert.equal(group.totalPrice, 40);
+  assert.equal(group.storeRoutes.length, 0);
+  assert.ok(group.deliveries.every((delivery) => delivery.pickupAddress.address === "Pickup" && delivery.vehicleOptions.length === 0));
+  selectVehicles(group, []);
+  assert.equal(group.totalPrice, 40);
+  await changeFulfillment(models, group._id, userId, "E_ShopUSA", fulfillmentSelections(group, "delivery"));
+  assert.equal(group.storeRoutes.length, 2);
+  assert.ok(group.deliveries.every((delivery) => delivery.vehicleOptions.length && delivery.vehicle && !delivery.pickupAddress));
+  assert.ok(group.deliveryFee > 0);
+  assert.equal(group.totalPrice, 40 + group.deliveryFee);
+  assert.equal(+group.expiresAt, expiry, "Changing choices does not extend a quote");
+});
+
+test("mixed store fulfillment charges only delivery routes and requires vehicles only for delivery orders", async () => {
+  const { models, group, orders } = fixture();
+  const selections = fulfillmentSelections(group, "delivery");
+  selections[0].method = "pickup";
+  await changeFulfillment(models, group._id, userId, "E_ShopUSA", selections);
+  assert.equal(group.storeRoutes.length, 1);
+  assert.equal(group.deliveries[0].deliveryFee, 0);
+  assert.equal(group.deliveryFee, group.deliveries[1].deliveryFee);
+  await prepare(models, group._id, userId, "E_ShopUSA", { method: "cash",
+    selections: [{ key: group.deliveries[1].key, vehicle: group.deliveries[1].vehicle }] });
+  assert.equal(orders[0].fulfillmentMethod, "pickup");
+  assert.equal(orders[0].storeRouteVersion, undefined);
+  assert.equal(orders[1].storeRouteVersion, 1);
+});
+test("Ethiopia collection removes native delivery charges and conserves converted USD payment shares", async () => {
+  const f = usdFixture();
+  await changeFulfillment(f.models, f.group._id, userId, "E_Shopping", fulfillmentSelections(f.group, "pickup"));
+  assert.equal(f.group.totalPrice, 40);
+  assert.equal(f.group.deliveryFee, 0);
+  assert.equal(f.group.paymentAmount, 13.33);
+  assert.equal(f.group.deliveries.reduce((sum, delivery) => sum + Math.round(delivery.paymentAmount * 100), 0), 1333);
+});
+
+test("fulfillment choices reject malformed, missing, duplicate, foreign, expired and reserved requests without changing the quote", async () => {
+  const f = fixture();
+  const choices = fulfillmentSelections(f.group, "pickup");
+  for (const selections of [undefined, [], [choices[0], choices[0]], [choices[0], { storeId: id(88), method: "pickup" }],
+    [choices[0], { ...choices[1], method: "other" }], [null, choices[1]]]) {
+    await assert.rejects(changeFulfillment(f.models, f.group._id, userId, "E_ShopUSA", selections), /Choose pickup or delivery/);
+    assert.equal(f.group.totalPrice, 44);
+  }
+  await assert.rejects(changeFulfillment(f.models, f.group._id, id(98), "E_ShopUSA", choices), /unexpired/);
+  f.group.expiresAt = new Date(0);
+  await assert.rejects(changeFulfillment(f.models, f.group._id, userId, "E_ShopUSA", choices), /unexpired/);
+  f.group.expiresAt = new Date(Date.now() + 600000);
+  f.group.status = "awaiting_payment";
+  await assert.rejects(changeFulfillment(f.models, f.group._id, userId, "E_ShopUSA", choices), /before payment/);
+});
+
+async function pickupFixture(method = "cash") {
+  const f = fixture();
+  await changeFulfillment(f.models, f.group._id, userId, "E_ShopUSA", fulfillmentSelections(f.group, "pickup"));
+  await prepare(f.models, f.group._id, userId, "E_ShopUSA", { method, selections: [], bankAccountId: id(40) });
+  await activate(f.models, f.group._id, method === "bank" ? { bankReceipt: { sender: "Customer", reference: "Transfer" } } : {});
+  return f;
+}
+const customerConfirmation = { party: "customer", note: "Products received at store" };
+const operatorConfirmation = { party: "operator", note: "Products handed to customer" };
+const customerAuth = { userId };
+const adminAuth = { userId: id(90), isAdmin: true };
+
+test("all-store collection ignores obsolete delivery windows and retains its supplying default store without driver eligibility", async () => {
+  const f = fixture();
+  await changeFulfillment(f.models, f.group._id, userId, "E_ShopUSA", fulfillmentSelections(f.group, "pickup"));
+  f.group.deliveryMode = "SCHEDULED";
+  f.group.scheduledFor = new Date(0);
+  f.group.deliverySnapshot = { deliveryMode: "SCHEDULED", policy: {}, speedSurcharge: 999,
+    windowStart: new Date(0), windowEnd: new Date(0), quotedAt: new Date(0) };
+  f.group.deliveries[0].defaultFallback = true;
+  const originalSetting = f.models.SiteSetting.findOne;
+  f.models.SiteSetting.findOne = (filter) => filter.key === "store-inventory-config" ?
+    query({ inventoryConfig: { enabled: true, defaultStoreId: id(1) } }) : originalSetting(filter);
+  f.models.StoreInventory.find = () => query(f.stocks);
+  await prepare(f.models, f.group._id, userId, "E_ShopUSA", { method: "cash", selections: [] });
+  await activate(f.models, f.group._id);
+  assert.ok(f.orders.every((order) => isStorePickup(order) && order.store && !order.requiredVehicle &&
+    !order.fulfillmentDeadline && !order.deliveryWindowStart && !order.deliveryWindowEnd));
+  const { orderReady } = require("../helpers/delivery-availability");
+  assert.ok(f.orders.every((order) => !orderReady(order)));
+  f.orders[0].fulfillmentStatus = "accepted";
+  await assert.rejects(require("../service/driverAssignment").reroute(f.models, f.orders[0]._id, { admin: true }), /ready, active/);
+});
+
+test("pickup child orders validate the real persistence schema and cancellation before handover releases only that store's stock", async () => {
+  const f = await pickupFixture();
+  const { Order: PersistedOrder } = require("../models/order");
+  for (const order of f.orders) {
+    const persisted = new PersistedOrder(order);
+    await persisted.validate();
+    assert.equal(persisted.fulfillmentMethod, "pickup");
+    assert.equal(persisted.pickupAddress.address, "Pickup");
+  }
+  await cancelDelivery(f.models, f.group._id, f.orders[0]._id);
+  assert.equal(f.orders[0].fulfillmentStatus, "cancelled");
+  assert.deepEqual(f.stocks.map((stock) => stock.reserved), [0, 2]);
+  assert.deepEqual(f.stocks.map((stock) => stock.countInStock), [3, 3]);
+  await assert.rejects(confirmPickup(f.models, f.group._id, f.orders[0]._id, customerAuth, customerConfirmation), /cancelled/);
+});
+
+test("customer and operator collection consume reserved stock and settle cash only after both independent confirmations", async () => {
+  const f = await pickupFixture();
+  const orderId = f.orders[0]._id;
+  const first = await confirmPickup(f.models, f.group._id, orderId, customerAuth, customerConfirmation);
+  assert.ok(first.pickupConfirmation.customerAt);
+  assert.equal(first.pickupConfirmation.operatorAt, undefined);
+  assert.equal(first.fulfillmentStatus, "pending");
+  assert.deepEqual(f.stocks.map((stock) => [stock.countInStock, stock.reserved]), [[3, 2], [3, 2]]);
+  const completed = await confirmPickup(f.models, f.group._id, orderId, adminAuth, operatorConfirmation);
+  assert.equal(completed.fulfillmentStatus, "completed");
+  assert.equal(completed.status, "3");
+  assert.equal(completed.paymentStatus, "completed");
+  assert.deepEqual(f.stocks.map((stock) => [stock.countInStock, stock.reserved]), [[1, 0], [3, 2]]);
+  assert.equal(f.group.paymentStatus, "pending", "Other store collection still awaits cash");
+  const timestamp = +completed.pickupConfirmation.operatorAt;
+  await confirmPickup(f.models, f.group._id, orderId, adminAuth, operatorConfirmation);
+  assert.equal(+completed.pickupConfirmation.operatorAt, timestamp);
+  assert.equal(f.stocks[0].countInStock, 1, "Retries must not consume stock twice");
+  await confirmPickup(f.models, f.group._id, f.orders[1]._id, adminAuth, operatorConfirmation);
+  await confirmPickup(f.models, f.group._id, f.orders[1]._id, customerAuth, customerConfirmation);
+  assert.equal(f.group.paymentStatus, "completed");
+});
+
+test("collection confirmations require authorization, notes, verified noncash payment and never allow cancellation after handover starts", async () => {
+  const f = await pickupFixture();
+  const orderId = f.orders[0]._id;
+  f.group.deliveries[0].store.owner = id(91);
+  await assert.rejects(confirmPickup(f.models, f.group._id, orderId, { userId: id(98), isAdmin: true }, customerConfirmation), /purchasing customer/);
+  await assert.rejects(confirmPickup(f.models, f.group._id, orderId, { userId: id(98) }, operatorConfirmation), /assigned store owner/);
+  for (const body of [{ party: "both", note: "Received" }, { party: "customer", note: "" }, { party: "customer", note: "x".repeat(301) }]) {
+    await assert.rejects(confirmPickup(f.models, f.group._id, orderId, customerAuth, body), /collection note/);
+  }
+  await confirmPickup(f.models, f.group._id, orderId, { userId: id(91) }, operatorConfirmation);
+  await assert.rejects(cancelDelivery(f.models, f.group._id, orderId), /Collection has been reported/);
+  const bank = await pickupFixture("bank");
+  await assert.rejects(confirmPickup(bank.models, bank.group._id, bank.orders[0]._id, customerAuth, customerConfirmation), /Payment must be verified/);
+});
+
+test("pickup stays pinned, can be accepted without a deadline, and cannot bypass confirmation through ordinary order editing or deletion", async () => {
+  const f = await pickupFixture();
+  const orderId = f.orders[0]._id;
+  await assert.rejects(require("../helpers/store-inventory").reroute(f.models, orderId, { decision: "reroute" }), /pinned/);
+  await assert.rejects(require("../helpers/admin-store-assignments").respondAsAdmin(f.models, orderId, "reroute"), /pinned/);
+  const accepted = await require("../helpers/store-inventory").reroute(f.models, orderId, { decision: "accept" });
+  assert.equal(accepted.fulfillmentStatus, "accepted");
+  for (const fields of [{ status: "3" }, { deliveryStatus: "Delivered" }, { fulfillmentStatus: "completed" },
+    { fulfillmentMethod: "delivery" }, { pickupConfirmation: { customerAt: new Date(), operatorAt: new Date() } }, { pickupAddress: {} }]) {
+    await assert.rejects(updateManagedOrder(f.models, orderId, fields));
+  }
+  await assert.rejects(updateManagedOrder(f.models, orderId, {}, { deleting: true }), /collection confirmations/);
+});
+
+test("international collection retains USA hub and shipping fees, requires configured Ethiopia collection and completes only after arrival and both parties", async () => {
+  const f = exportFixture();
+  const choices = fulfillmentSelections(f.group, "pickup");
+  await assert.rejects(changeFulfillment(f.models, f.group._id, userId, "E_ShopUSA", choices), /Ethiopia collection address/);
+  f.group.international.tariff.ethiopiaPickup = { ...address, country: "Ethiopia", address1: "Addis collection office" };
+  f.group.international.tariff.finalDeliveryUsd = 10;
+  await changeFulfillment(f.models, f.group._id, userId, "E_ShopUSA", choices);
+  assert.equal(f.group.totalPrice, 74);
+  assert.equal(f.group.finalDeliveryFee, 0);
+  assert.equal(f.group.international.shippingFee, 30);
+  assert.ok(f.group.deliveries.every((delivery) => delivery.vehicle === "car" && delivery.pickupAddress.address1 === "Addis collection office"));
+  await prepare(f.models, f.group._id, userId, "E_ShopUSA", { ...f.body, method: "bank", bankAccountId: id(40) });
+  await activate(f.models, f.group._id, { bankReceipt: { sender: "Customer", reference: "Export" } });
+  f.group.paymentStatus = "completed";
+  f.group.status = "placed";
+  for (const order of f.orders) {
+    order.paymentStatus = "completed";
+    order.fulfillmentStatus = "completed";
+    order.deliveryStatus = "Delivered";
+  }
+  const firstId = f.orders[0]._id;
+  await assert.rejects(confirmPickup(f.models, f.group._id, firstId, customerAuth, customerConfirmation), /arrived in Ethiopia/);
+  f.group.international.shipments[0].status = "arrived_ethiopia";
+  await confirmPickup(f.models, f.group._id, firstId, customerAuth, customerConfirmation);
+  await confirmPickup(f.models, f.group._id, firstId, adminAuth, operatorConfirmation);
+  assert.equal(f.group.international.shipments[0].status, "arrived_ethiopia");
+  await assert.rejects(require("../helpers/international-shipping").updateShipment(f.models, f.group._id, address.id,
+    { status: "delivered", note: "Final proof" }, adminAuth.userId), /Both customer/);
+  await confirmPickup(f.models, f.group._id, f.orders[1]._id, adminAuth, operatorConfirmation);
+  const last = await confirmPickup(f.models, f.group._id, f.orders[1]._id, customerAuth, customerConfirmation);
+  assert.equal(f.group.international.shipments[0].status, "delivered");
+  assert.equal(last.internationalShipping.status, "delivered");
+});
 
 function usdFixture() {
   const exchangeConfig = { enabled: true, birrPerUsd: 3, revision: 5, appliedAt: new Date(), source: "manual" };

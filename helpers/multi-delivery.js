@@ -192,6 +192,11 @@ function groupNearbyStores(deliveries) {
 function allocateDeliveryFees(deliveries) {
   const groups = new Map();
   for (const delivery of deliveries) {
+    if (delivery.fulfillmentMethod === "pickup" && !delivery.internationalPickup) {
+      delivery.deliveryFee = 0;
+      delivery.totalPrice = delivery.itemsSubtotal;
+      continue;
+    }
     const option = delivery.vehicle
       ? delivery.vehicleOptions.find((entry) => entry.type === delivery.vehicle)
       : [...delivery.vehicleOptions].sort((a, b) => a.fee - b.fee)[0];
@@ -226,6 +231,59 @@ function allocateDeliveryFees(deliveries) {
       });
     });
   }
+}
+
+async function changeFulfillment(models, groupId, user, databaseName, selections, { distance = getDrivingDistanceKm } = {}) {
+  return models.Order.db.transaction(async (session) => {
+    const group = await models.CheckoutGroup.findOne({ _id: groupId, user }).session(session);
+    if (!group || group.kind === "service" || group.status !== "quote" || group.expiresAt <= new Date()) {
+      throw conflict("Change pickup/delivery only on an unexpired product quote before payment.");
+    }
+    const storeIds = [...new Set(group.deliveries.map((delivery) => id(delivery.store)))];
+    if (!Array.isArray(selections) || selections.length !== storeIds.length ||
+        new Set(selections.map((entry) => entry?.storeId)).size !== storeIds.length ||
+        selections.some((entry) => !storeIds.includes(entry?.storeId) || !["delivery", "pickup"].includes(entry?.method))) {
+      throw conflict("Choose pickup or delivery once for every supplying store.");
+    }
+    for (const delivery of group.deliveries) {
+      delivery.fulfillmentMethod = selections.find((entry) => entry.storeId === id(delivery.store)).method;
+      delivery.internationalPickup = Boolean(group.international);
+      if (delivery.fulfillmentMethod === "pickup") {
+        if (group.international) {
+          const collection = group.international.tariff.ethiopiaPickup;
+          if (!collection) throw conflict("Admin must configure an Ethiopia collection address before international pickup is available.");
+          delivery.pickupAddress = collection;
+        } else {
+          if (!delivery.store.address?.trim()) throw conflict("The supplying store has no collection address. Contact Admin.");
+          delivery.pickupAddress = { name: delivery.store.name, address: delivery.store.address, location: delivery.store.location };
+          delivery.vehicle = undefined;
+          delivery.vehicleOptions = [];
+          delivery.requiresVehicleSelection = false;
+          delivery.pricingGroup = undefined;
+          delivery.distanceKm = 0;
+        }
+      } else delete delivery.pickupAddress;
+    }
+    if (!group.international) {
+      const deliveries = group.deliveries.filter((delivery) => delivery.fulfillmentMethod !== "pickup");
+      if (deliveries.length) {
+        const config = (await models.SiteSetting.findOne({ key: VEHICLE_CONFIG_KEY }).session(session).lean())?.vehicleDeliveryConfig;
+        if (!config?.enabled) throw conflict("Delivery vehicles are not enabled. Contact Admin.");
+        const products = await models.Product.find({ _id: { $in: deliveries.flatMap((delivery) => delivery.lines.map((line) => line.product)) } }).session(session).lean();
+        for (const delivery of deliveries) { delete delivery.pricingGroup; delete delivery.vehicle; }
+        group.storeRoutes = await require("./cart-route").quoteStoreRoutes(deliveries, products, config, databaseName,
+          group.deliverySnapshot?.speedSurcharge || 0, distance);
+      } else group.storeRoutes = [];
+      group.cartRoute = undefined;
+      allocateDeliveryFees(group.deliveries);
+      Object.assign(group, quoteTotals(group.deliveries));
+      if (group.exchangeRate) group.paymentAmount = fx.allocateDollars(group.deliveries, group.exchangeRate);
+    } else require("./international-shipping").recalculate(group);
+    group.markModified("deliveries");
+    group.markModified("storeRoutes");
+    await group.save({ session });
+    return group;
+  });
 }
 
 async function createQuote(models, user, databaseName, body, { geocode = geocodeAddress, distance = getDrivingDistanceKm, transient = false } = {}) {
@@ -319,9 +377,10 @@ function quoteTotals(deliveries) {
 function selectVehicles(group, selections) {
   if (group.status !== "quote" || group.expiresAt <= new Date()) throw conflict("This quote expired or is already reserved. Request a new quote.");
   if (!Array.isArray(selections) || selections.some((entry) => !entry || typeof entry.key !== "string" || typeof entry.vehicle !== "string") ||
-      selections.length !== group.deliveries.length ||
+      selections.length !== group.deliveries.filter((delivery) => delivery.fulfillmentMethod !== "pickup" || group.international).length ||
       new Set(selections.map((entry) => entry.key)).size !== selections.length) throw conflict("Select one vehicle for every delivery.");
   for (const delivery of group.deliveries) {
+    if (delivery.fulfillmentMethod === "pickup" && !group.international) continue;
     const selected = selections.find((entry) => entry.key === delivery.key);
     if (!selected?.vehicle) throw conflict("Select one vehicle for every delivery.");
     const option = delivery.vehicleOptions.find((entry) => entry.type === selected?.vehicle);
@@ -430,7 +489,7 @@ async function prepare(models, groupId, user, databaseName, body) {
     // Writing the settings document makes a concurrent admin edit conflict with this transaction.
     await models.SiteSetting.updateOne({ key: DELIVERY_CONFIG_KEY }, { $inc: { reservationVersion: 1 } }, { session });
     const snapshot = group.deliverySnapshot;
-    if (snapshot) {
+    if (snapshot && (group.international || group.deliveries.some((delivery) => delivery.fulfillmentMethod !== "pickup"))) {
       const current = { policy: deliveryPolicyFor(snapshot.deliveryMode, deliveryConfig, databaseName),
         speedSurcharge: speedSurchargeFor(snapshot.deliveryMode, deliveryConfig) };
       if (JSON.stringify(current.policy) !== JSON.stringify(snapshot.policy) || current.speedSurcharge !== snapshot.speedSurcharge) {
@@ -446,8 +505,10 @@ async function prepare(models, groupId, user, databaseName, body) {
     group.orders = [];
     const planNow = new Date();
     for (const delivery of group.deliveries) {
+      const pickup = delivery.fulfillmentMethod === "pickup" && !group.international;
       const currentStore = await models.Store.findById(delivery.store._id).session(session).lean();
       if (!currentStore || JSON.stringify(getCoordinates(currentStore.location)) !== JSON.stringify(getCoordinates(delivery.store.location))) throw conflict("A pickup location changed. Refresh the quote.");
+      if (pickup && currentStore.address !== delivery.pickupAddress?.address) throw conflict("The store collection address changed. Refresh the quote.");
       if (delivery.storefrontId && !delivery.defaultFallback) {
         const allowed = await eligibleStores(models, delivery.lines, {
           customerLocation: delivery.address.location, storefrontId: delivery.storefrontId, session,
@@ -465,7 +526,7 @@ async function prepare(models, groupId, user, databaseName, body) {
       }
       const config = (await models.SiteSetting.findOne({ key: VEHICLE_CONFIG_KEY }).session(session).lean())?.vehicleDeliveryConfig;
       delivery.cargo = cargoFor(delivery.lines, approved);
-      if (delivery.cargo.measurementsAvailable === false && !delivery.requiresVehicleSelection) {
+      if (!pickup && delivery.cargo.measurementsAvailable === false && !delivery.requiresVehicleSelection) {
         throw conflict("Packaged measurements are no longer available. Request a new quote and choose a vehicle manually.");
       }
       if (group.international) {
@@ -475,7 +536,7 @@ async function prepare(models, groupId, user, databaseName, body) {
         if (JSON.stringify(delivery.cargo) !== JSON.stringify(expectedCargo)) throw conflict("Packaged product dimensions changed. Request a new shipping quote.");
         require("./international-shipping").tariff(delivery.lines, approved, group.international.tariff);
       }
-      if (!config?.enabled || !suitableVehicles(delivery.cargo, config).includes(delivery.vehicle)) throw conflict("Vehicle capacity changed. Refresh the quote.");
+      if (!pickup && (!config?.enabled || !suitableVehicles(delivery.cargo, config).includes(delivery.vehicle))) throw conflict("Vehicle capacity changed. Refresh the quote.");
       // Lock the configuration and products against changes while these reservations are created.
       await models.SiteSetting.updateOne({ key: VEHICLE_CONFIG_KEY }, { $inc: { reservationVersion: 1 } }, { session });
       await models.Product.updateMany({ _id: { $in: approved.map((entry) => entry._id) } }, { $inc: { shippingReservationVersion: 1 } }, { session });
@@ -488,23 +549,26 @@ async function prepare(models, groupId, user, databaseName, body) {
       const address = delivery.address;
       // Business-day windows are rebuilt from the quote time so the reviewed window is what is persisted.
       const frozenWindow = snapshot && BUSINESS_DELIVERY_MODES.includes(group.deliveryMode);
-      const deliveryPlan = resolveDeliveryPlan({
+      const deliveryPlan = pickup ? { ok: true, value: { deliveryMode: group.deliveryMode || "STANDARD",
+        scheduledFor: null, deliveryWindowStart: null, deliveryWindowEnd: null,
+        dispatchStatus: "pending_assignment", dispatchPriority: 100 } } : resolveDeliveryPlan({
         deliveryMode: group.deliveryMode || "SAME_DAY",
         scheduledFor: group.scheduledFor || null,
       }, { now: frozenWindow ? new Date(snapshot.quotedAt) : planNow, databaseName, deliveryConfig,
         allowLegacyModes: LEGACY_DELIVERY_MODES.includes(group.deliveryMode || "SAME_DAY"),
         currentOrder: { deliveryFee: delivery.deliveryFee } });
       if (!deliveryPlan.ok) throw conflict(deliveryPlan.error);
-      if (frozenWindow && (deliveryPlan.value.deliveryWindowStart.getTime() !== new Date(snapshot.windowStart).getTime() ||
+      if (!pickup && frozenWindow && (deliveryPlan.value.deliveryWindowStart.getTime() !== new Date(snapshot.windowStart).getTime() ||
           deliveryPlan.value.deliveryWindowEnd.getTime() !== new Date(snapshot.windowEnd).getTime())) {
         throw conflict("The quoted delivery window changed. Request a new quote.");
       }
       const order = new models.Order({ orderItems: items, user, customer: user,
-        shippingAddress1: address.address1, shippingAddress2: address.address2, city: address.city,
+        shippingAddress1: pickup ? currentStore.address : address.address1, shippingAddress2: pickup ? "" : address.address2, city: pickup ? currentStore.city || address.city : address.city,
         zip: address.zip, country: address.country, phone: address.phone, customerLocation: address.location,
         inventoryManaged: true, checkoutGroup: group._id, storefrontId: delivery.storefrontId,
         ...(group.cartRoute ? { cartRouteVersion: 1, cartDeliveryKey: delivery.key, cartDeliveryAddressId: delivery.address.id } : {}),
-        ...(group.storeRoutes?.length ? { storeRouteVersion: 1, cartDeliveryKey: delivery.key, cartDeliveryAddressId: delivery.address.id } : {}),
+        ...(!pickup && group.storeRoutes?.length ? { storeRouteVersion: 1, cartDeliveryKey: delivery.key, cartDeliveryAddressId: delivery.address.id } : {}),
+        fulfillmentMethod: delivery.fulfillmentMethod || "delivery", pickupAddress: delivery.pickupAddress,
         requiredVehicle: delivery.vehicle, cargo: delivery.cargo,
         deliveryFee: delivery.deliveryFee, deliveryPricingGroup: delivery.pricingGroup,
         deliveryDistanceKm: delivery.pricingGroup?.billableDistanceKm ?? delivery.distanceKm,
@@ -520,13 +584,18 @@ async function prepare(models, groupId, user, databaseName, body) {
         ...(group.international ? { internationalShippingFee: delivery.internationalShippingFee,
           internationalShipping: { shipmentId: delivery.address.id,
             recipient: group.international.shipments.find((shipment) => shipment.id === delivery.address.id).recipient,
-            hub: group.international.hub, status: "awaiting_hub", customsNotice: group.international.customsNotice } } : {}),
+            hub: group.international.hub, status: "awaiting_hub", customsNotice: group.international.customsNotice,
+            finalDeliveryFee: delivery.finalDeliveryFee || 0 } } : {}),
         status: "Pending", deliveryStatus: "Pending", paymentStatus: "pending",
         paymentMethod: { cash: "1", bank: "2", card: "3" }[body.method],
-        methodName: { cash: "Cash on delivery", bank: "Bank transfer", card: "Card" }[body.method],
+        methodName: { cash: pickup ? "Cash at store collection" : "Cash on delivery", bank: "Bank transfer", card: "Card" }[body.method],
         bankName: group.bankAccount?.bankName,
       });
       assignStore(order, currentStore, delivery.lines);
+      if (pickup) {
+        order.deliveryWindowStart = null; order.deliveryWindowEnd = null; order.scheduledFor = null;
+        order.requiredVehicle = undefined; order.fulfillmentDeadline = null;
+      }
       order.fulfillmentStatus = "payment_pending";
       order.fulfillmentDeadline = null;
       await order.save({ session });
@@ -580,9 +649,9 @@ async function activate(models, groupId, { paymentIntent, bankReceipt, bankVerif
       const order = await models.Order.findById(orderId).session(session);
       if (!order || order.fulfillmentStatus !== "payment_pending") throw conflict("Checkout reservation is inconsistent. Contact support.");
       order.fulfillmentStatus = "pending";
-      order.fulfillmentDeadline = new Date(Date.now() + ACCEPTANCE_MS);
+      order.fulfillmentDeadline = require("./customer-pickup").isStorePickup(order) ? null : new Date(Date.now() + ACCEPTANCE_MS);
       const delivery = group.deliveries.find((entry) => entry.key === order.cartDeliveryKey);
-      if (delivery?.defaultFallback) {
+      if (delivery?.defaultFallback && !require("./customer-pickup").isStorePickup(order)) {
         order.fallbackInventoryStore = order.store;
         order.fallbackStore = order.store;
         order.store = null;
@@ -615,7 +684,8 @@ async function notifyStores(models, group) {
     if (!store?.owner) continue;
     try {
       await sendPushToUser({ User: models.User, userId: store.owner, title: "New delivery assignment",
-        body: order.fallbackStore ? `Order #${order._id} is queued for your default store without expiry.` :
+        body: require("./customer-pickup").isStorePickup(order) ? `Order #${order._id} is for customer collection at your store. Confirm handover after collection.` :
+          order.fallbackStore ? `Order #${order._id} is queued for your default store without expiry.` :
           `Order #${order._id} needs a response within five minutes.`,
         data: { type: "store_order_assigned", orderId: id(order) } });
     } catch (error) { console.error("Grouped checkout notification failed:", id(order), error.message); }
@@ -717,6 +787,7 @@ async function cancelDelivery(models, groupId, orderId, user, isAdmin) {
     const group = await models.CheckoutGroup.findOne({ _id: groupId, ...(isAdmin ? {} : { user }) }).session(session);
     if (!group || group.status !== "placed" || !group.orders.some((value) => id(value) === orderId)) throw conflict("Delivery not found in a placed checkout.");
     const order = await models.Order.findById(orderId).session(session);
+    if (order.pickupConfirmation?.customerAt || order.pickupConfirmation?.operatorAt) throw conflict("Collection has been reported. Contact support to reconcile both confirmations before cancellation.");
     if (order.fulfillmentStatus === "cancelled") return order;
     if (group.cartRoute) {
       if (group.routeDriver) throw conflict("This cart is assigned to a driver. Contact support before cancellation.");
@@ -806,7 +877,7 @@ async function refundDelivery(models, group, orderId, databaseName, { retryFaile
   return persist({ refundId: refund.id, refundStatus: "refunded" });
 }
 
-module.exports = { QUOTE_MS, HOLD_MS, NEARBY_STORE_METERS, groupNearbyStores, allocateDeliveryFees,
+module.exports = { QUOTE_MS, HOLD_MS, NEARBY_STORE_METERS, groupNearbyStores, allocateDeliveryFees, changeFulfillment,
   addressInput, normalizeAllocations, allocateStock, quoteTotals, selectVehicles,
   checkoutDeliveryPlan, createQuote, createServiceQuote, prepare, activate, ensureIntent, reconcile, expireCheckouts, cancelDelivery, refundDelivery, syncCashPayment,
   geocodeAddress, countryCode, stripeClient };

@@ -322,7 +322,7 @@ operatorGet(router, "/me/dashboard", "/admin/:accountId/dashboard", async (req, 
           { $or: [{ status: { $in: ["3", "Delivered"] } }, { deliveryStatus: "Delivered" }] },
         ],
       })
-        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd assignedStoreSnapshot fulfillmentStatus inventoryManaged checkoutGroup requiredVehicle")
+        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd assignedStoreSnapshot fulfillmentStatus inventoryManaged checkoutGroup requiredVehicle fulfillmentMethod pickupAddress pickupConfirmation internationalShipping internationalShippingFee")
         .populate({ path: "orderItems", populate: { path: "product", select: "name price store" } })
         .sort({ deliveredAt: -1, dateOrdered: -1 })
         .lean(),
@@ -335,7 +335,7 @@ operatorGet(router, "/me/dashboard", "/admin/:accountId/dashboard", async (req, 
         .lean() : [],
       Payout.find({ store: store._id }).select("amount status").lean(),
       Order.find(orderScope)
-        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee status deliveryStatus dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd assignedStoreSnapshot fulfillmentStatus inventoryManaged checkoutGroup requiredVehicle")
+        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee status deliveryStatus dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd assignedStoreSnapshot fulfillmentStatus inventoryManaged checkoutGroup requiredVehicle fulfillmentMethod pickupAddress pickupConfirmation internationalShipping internationalShippingFee")
         .populate({ path: "orderItems", populate: { path: "product", select: "name price store" } })
         .sort({ dateOrdered: -1 })
         .limit(20)
@@ -345,7 +345,7 @@ operatorGet(router, "/me/dashboard", "/admin/:accountId/dashboard", async (req, 
         status: { $nin: ["3", "4", "Delivered", "Cancelled"] },
         deliveryStatus: { $ne: "Delivered" },
       })
-        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee status deliveryStatus dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd assignedStoreSnapshot fulfillmentStatus inventoryManaged checkoutGroup requiredVehicle")
+        .select("_id store orderItems itemsSubtotal totalPrice deliveryFee status deliveryStatus dateOrdered deliveredAt deliveryMode scheduledFor deliveryWindowStart deliveryWindowEnd assignedStoreSnapshot fulfillmentStatus inventoryManaged checkoutGroup requiredVehicle fulfillmentMethod pickupAddress pickupConfirmation internationalShipping internationalShippingFee")
         .populate({ path: "orderItems", populate: { path: "product", select: "name price store" } })
         .sort({ dateOrdered: -1 })
         .lean(),
