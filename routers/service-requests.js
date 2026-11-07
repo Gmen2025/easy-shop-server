@@ -3,6 +3,7 @@ const router = express.Router();
 const mongoose = require('mongoose');
 const { sendPushToUser, sendPushToTokens } = require('../helpers/push-notify');
 const { sendMailSafe } = require('../helpers/mailer');
+const { requireServiceAvailable } = require('../helpers/service-availability');
 
 const validCountries = ['Ethiopia', 'USA'];
 const validPriorities = ['Low', 'Normal', 'High', 'Emergency'];
@@ -153,6 +154,11 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
+  try { await requireServiceAvailable(req.dbModels, 'services'); }
+  catch (error) {
+    console.error('Service request availability check failed:', error.message);
+    return res.status(error.status || 503).json({ success: false, message: error.status ? error.message : 'Unable to verify service availability. Please retry.' });
+  }
   const ServiceRequest = getServiceRequestModel(req);
 
   if (!ServiceRequest) {

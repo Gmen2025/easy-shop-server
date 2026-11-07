@@ -8,10 +8,38 @@ const { getCoordinates, resolvePickupStore } = require('../helpers/fulfillment-r
 const { PROVIDERS, readSocialLoginSetting, updateSocialLoginSetting } = require('../helpers/social-login-settings');
 const { METHODS, readPaymentSettings, updatePaymentSettings } = require('../helpers/payment-settings');
 const { readFinancialHealthSetting, updateFinancialHealthSetting } = require('../helpers/financial-health');
+const { FEATURES, readServiceAvailability, updateServiceAvailability } = require('../helpers/service-availability');
 
 const MAINTENANCE_SETTING_KEY = 'maintenance-mode';
 const BANK_ACCOUNT_SETTING_KEY = 'bank-account-info';
 const DELIVERY_SETTING_KEY = 'delivery-config';
+
+router.get('/service-availability', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try { res.json(await readServiceAvailability(req.dbModels)); }
+  catch (error) {
+    console.error('Failed to read service availability:', error);
+    res.status(503).json({ message: 'Unable to load service availability. Please retry.' });
+  }
+});
+
+router.put('/service-availability', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!req.auth?.userId) return res.status(401).json({ message: 'Sign in required.' });
+  const features = req.body;
+  if (!features || typeof features !== 'object' || Array.isArray(features) || !Object.keys(features).length ||
+      Object.entries(features).some(([key, value]) => !FEATURES.includes(key) || typeof value !== 'boolean')) {
+    return res.status(400).json({ message: 'Provide boolean rides and/or services switches.' });
+  }
+  try {
+    const admin = await req.dbModels.User.findOne({ _id: req.auth.userId, isAdmin: true }).select('_id').lean();
+    if (!admin) return res.status(403).json({ message: 'Admin access required.' });
+    res.json(await updateServiceAvailability(req.dbModels, features, req.auth.userId));
+  } catch (error) {
+    console.error('Failed to save service availability:', error);
+    res.status(503).json({ message: 'Unable to save service availability.' });
+  }
+});
 
 router.get('/financial-health', async (req, res) => {
   res.set('Cache-Control', 'no-store');

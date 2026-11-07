@@ -7,6 +7,7 @@ const { sendPushToUser } = require("../helpers/push-notify");
 const { computeDrivingRoute } = require("../helpers/google-route");
 const { placeDetails, currentLocationAddress } = require("../helpers/places");
 const { RIDE_PROFILE_PHOTO_MAX_AGE_MS, hasCurrentRideProfilePhoto } = require("../helpers/ride-driver-profile");
+const { requireServiceAvailable } = require("../helpers/service-availability");
 
 const MAX_ROUTE_POINTS = 1500;
 const thinPath = (points) => {
@@ -69,6 +70,7 @@ const matchesRideOption = (driver, ride) => !ride.vehicleOption ||
 async function quoteRide(models, user, databaseName, body, {
   geocode = geocodeAddress, lookup = roadLeg, place = placeDetails, currentLocation = currentLocationAddress, compare = false,
 } = {}) {
+  await requireServiceAvailable(models, "rides");
   const config = (await models.SiteSetting.findOne({ key: CONFIG_KEY }).lean())?.rideConfig;
   if (!config?.enabled) throw conflict("Ride service is not enabled in this region.");
   let options;
@@ -129,6 +131,7 @@ async function requestRide(models, rideId, user, now = new Date()) {
       if (ride.status === "cancelled") throw conflict("This request was cancelled. Request a new quote.");
       return ride;
     }
+    await requireServiceAvailable(models, "rides", session);
     if (ride.expiresAt <= now) throw conflict("Ride quote expired. Calculate a new fare.");
     const config = await models.SiteSetting.findOne({ key: CONFIG_KEY }).session(session).lean();
     if (!config?.rideConfig?.enabled) throw conflict("Ride service is no longer enabled.");

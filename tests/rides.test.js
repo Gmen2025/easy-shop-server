@@ -133,6 +133,32 @@ async function assigned(f, overrides) {
   return f.models.Ride.findById(ride._id);
 }
 
+test("ride availability blocks quotes and stale quote requests, but preserves dispatch, completion and settlement", async () => {
+  for (const database of ["E_Shopping", "E_ShopUSA"]) {
+    const f = fixture(), quote = await f.booking(), waiting = await f.booking();
+    await service.requestRide(f.models, waiting._id, userId);
+    f.tables.SiteSetting.push({ key: "service-availability", serviceAvailability: { rides: false, services: true } });
+    await assert.rejects(service.quoteRide(f.models, userId, database, {}, { compare: true }), { status: 403 });
+    await assert.rejects(service.quoteRide(f.models, userId, database, {}), { status: 403 });
+    await assert.rejects(service.requestRide(f.models, quote._id, userId), { status: 403 });
+    assert.equal((await f.models.Ride.findById(quote._id)).status, "quote");
+    assert.equal((await service.requestRide(f.models, waiting._id, userId)).status, "waiting");
+    await service.dispatchRide(f.models, waiting._id, { lookup });
+    await service.acceptRide(f.models, waiting._id, driverId, { lookup });
+    await service.completeStop(f.models, driverId, `${waiting._id}:0`, { lookup });
+    const finishedAt = new Date(Date.now() + 20 * 60000);
+    f.tables.Driver[0].rideLocationUpdatedAt = finishedAt;
+    const completed = await service.completeStop(f.models, driverId, `${waiting._id}:1`, { lookup, now: finishedAt });
+    assert.equal(completed.status, "completed");
+    assert.equal(completed.paymentStatus, "pending");
+    await service.prepareRidePayment(f.models, waiting._id, userId, { method: "cash" }, database);
+    assert.equal((await invoke(f, "/:id/received-payment", "post", { userId: id(3) }, { id: waiting._id })).code, 200);
+    assert.equal((await f.models.Ride.findById(waiting._id)).paymentStatus, "completed");
+    f.tables.SiteSetting.find((entry) => entry.key === "service-availability").serviceAvailability.rides = true;
+    assert.equal((await service.requestRide(f.models, quote._id, userId)).status, "waiting");
+  }
+});
+
 test("pickup ETA uses driver GPS and every pending stop through the owner's pickup without leaking shared stops", async () => {
   const f = fixture(), ride = await assigned(f);
   const trip = f.tables.RideTrip[0];

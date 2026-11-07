@@ -46,6 +46,7 @@ function authJwt() {
       { url: /^\/api\/v1\/settings\/social-login$/, methods: ["GET", "OPTIONS"] },
       { url: /^\/api\/v1\/settings\/payment-methods$/, methods: ["GET", "OPTIONS"] },
       { url: /^\/api\/v1\/settings\/financial-health$/, methods: ["GET", "OPTIONS"] },
+      { url: /^\/api\/v1\/settings\/service-availability$/, methods: ["GET", "OPTIONS"] },
       { url: /\/api\/v1\/settings\/bank-account$/, methods: ["GET", "OPTIONS"] },
       { url: /\/api\/v1\/notifications\/health$/, methods: ["GET", "OPTIONS"] },
     ],

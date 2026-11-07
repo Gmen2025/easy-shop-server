@@ -2,6 +2,24 @@
 
 A comprehensive REST API for an e-commerce platform built with Node.js, Express, and MongoDB. Features include JWT authentication, payment gateway integrations (Stripe & Telebirr), order management, and email notifications.
 
+## Regional ride and service availability
+
+Public, uncached `GET /api/v1/settings/service-availability` returns
+`{ rides: boolean, services: boolean }`. Current admins can `PUT` a partial
+object with either/both boolean switches. Settings are persisted independently
+in the database selected by `x-database-name` (`E_Shopping` for Ethiopia,
+`E_ShopUSA` for USA). Missing switches default ON for backward compatibility.
+Country maintenance mode and ride fare configuration are unchanged.
+
+OFF rejects ride quotes/comparisons and conversion of unrequested quotes to
+bookings, or new `POST /service-requests`, with 403. Settings read failures block
+new activity with 503. Existing requested rides can still dispatch, complete,
+cancel and settle; request history, updates and payments remain accessible.
+Re-enabling restores new requests without modifying saved fares or records.
+Deploy this backend before the matching mobile/website controls.
+
+Checks: `node --test tests/service-availability.test.js tests/rides.test.js`.
+
 ## Store product publishing and nearest-store pricing
 
 Store owners manage their linked locations under `/api/v1/stores/me/locations`.

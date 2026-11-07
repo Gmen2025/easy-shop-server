@@ -15,6 +15,10 @@ const siteSettingSchema = new mongoose.Schema(
     },
     socialLoginEnabled: { type: Boolean, default: false },
     financialHealthEnabled: { type: Boolean, default: false },
+    serviceAvailability: {
+      rides: { type: Boolean, default: undefined },
+      services: { type: Boolean, default: undefined },
+    },
     reviewFeatures: {
       products: { type: Boolean, default: false },
       deliveries: { type: Boolean, default: false },
