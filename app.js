@@ -7,6 +7,7 @@ const { Server } = require('socket.io');
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const authJwt = require('./helpers/jwt');
+const requireActiveAccount = require('./helpers/active-account');
 const errorHandler = require('./helpers/error-handler');
 const dbSelector = require('./helpers/db-selector');
 const { connectDefaultDatabase } = require('./helpers/db-manager');
@@ -169,6 +170,7 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(null, swaggerOptions));
 
 // Apply JWT authentication (after Swagger route)
 app.use(authJwt());
+app.use(requireActiveAccount);
 app.use(api, require('./helpers/payment-settings').paymentStartGuard);
 app.use('/public/uploads', express.static(__dirname + '/public/uploads'));;
 

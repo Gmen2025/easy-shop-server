@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 
 const storeDispatchSchema = new mongoose.Schema({
   store: { type: mongoose.Schema.Types.ObjectId, ref: "Store", required: true },
-  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+  createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
   status: { type: String, enum: ["placed"], default: "placed" },
   orders: [{ type: mongoose.Schema.Types.ObjectId, ref: "Order" }],
   cartRoute: { type: mongoose.Schema.Types.Mixed, required: true },

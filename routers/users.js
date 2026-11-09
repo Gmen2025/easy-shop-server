@@ -6,6 +6,8 @@ const { router: authRouter, wrap: authWrap } = require("./auth");
 const crypto = require("crypto");
 const { getFrontendBaseUrl, sendMailSafe } = require("../helpers/mailer");
 const { sendPushToUser } = require("../helpers/push-notify");
+const { deleteAccount } = require("../helpers/account-deletion");
+const mongoose = require("mongoose");
 
 const getUserModel = (req) => req.dbModels.User;
 router.use("/auth", authRouter);
@@ -1889,6 +1891,10 @@ router.put("/profile", async (req, res) => {
  *         description: Forbidden
  *       404:
  *         description: User not found
+ *       409:
+ *         description: Active transactions or payouts must be resolved first
+ *       503:
+ *         description: Uploaded media deletion is temporarily unavailable
  *       500:
  *         description: Server error
  */
@@ -1930,6 +1936,17 @@ router.delete("/:id", async (req, res) => {
     }
 
     const idToDelete = !isAdmin && isSelfDelete ? requesterIdStr : targetUserIdStr;
+
+    if (isSelfDelete) {
+      if (!mongoose.isValidObjectId(idToDelete)) {
+        return res.status(400).json({ success: false, message: "Invalid user ID" });
+      }
+      const deleted = await deleteAccount(req.dbModels, idToDelete);
+      if (!deleted) {
+        return res.status(404).json({ success: false, message: "User not found" });
+      }
+      return res.status(200).json({ success: true, message: "Account and associated personal data deleted successfully" });
+    }
 
     const deletedUser = await getUserModel(req)
       .findByIdAndDelete(idToDelete)
