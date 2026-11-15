@@ -43,6 +43,9 @@ async function getDrivingDistanceKm(originAddress, destinationAddress, { throwOn
 
     if (data?.status !== "OK" || !element || element.status !== "OK") {
       const status = data?.status !== "OK" ? data?.status : element?.status;
+      if (status === "REQUEST_DENIED" && /referer restrictions/i.test(data.error_message || "")) {
+        throw new Error("Google Distance Matrix rejected the backend key: set GOOGLE_MAPS_API_KEY to a server key without website/referrer restrictions, enable Distance Matrix API, and restart the backend. Keep the website browser key separate.");
+      }
       if (status === "ZERO_RESULTS") {
         throw new Error("Google Distance Matrix found no driving route between the pickup and delivery locations (ZERO_RESULTS). Check that both map pins are correct and accessible by road. Driving-route coverage may be unavailable in this area.");
       }

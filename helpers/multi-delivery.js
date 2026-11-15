@@ -126,7 +126,13 @@ async function geocodeAddress(address) {
   const body = await response.json();
   const result = body.results?.[0];
   const location = result?.geometry?.location;
-  if (["REQUEST_DENIED", "OVER_QUERY_LIMIT"].includes(body.status)) throw conflict("Address verification is unavailable. Admin must check Google Geocoding permissions, quota and billing.");
+  if (["REQUEST_DENIED", "OVER_QUERY_LIMIT"].includes(body.status)) {
+    console.error("Delivery address lookup rejected:", body.status, String(body.error_message || "").split(key).join("[redacted]"));
+    if (/referer restrictions/i.test(body.error_message || "")) {
+      throw conflict("Address verification is unavailable. Admin must set GOOGLE_MAPS_API_KEY on the backend to a server key without website/referrer restrictions, enable Geocoding and Distance Matrix APIs, and restart the backend. Keep the website browser key separate.");
+    }
+    throw conflict("Address verification is unavailable. Admin must check Google Geocoding permissions, quota and billing.");
+  }
   if (!response.ok || body.status !== "OK" || result?.partial_match || !Number.isFinite(location?.lng) || !Number.isFinite(location?.lat)) {
     throw conflict(countryCode(address.country) === "ET"
       ? "The Ethiopia delivery address could not be verified. Enter a complete street address or landmark and city, or choose an Ethiopia address suggestion. A postal code is not required."

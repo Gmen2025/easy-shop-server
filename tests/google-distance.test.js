@@ -50,6 +50,15 @@ test("distance lookup redacts server key from network errors", async () => {
     !error.message.includes("test-server-key") && error.message.includes("[redacted]"));
 });
 
+test("browser-restricted backend keys report the configuration fix and never invent a distance", async () => {
+  const helper = loadDistance({ fetch: async () => ({ ok: true, json: async () => ({
+    status: "REQUEST_DENIED", error_message: "API keys with referer restrictions cannot be used with this API.",
+  }) }) });
+  await assert.rejects(helper.getDrivingDistanceKm("A", "B", { throwOnError: true }),
+    /GOOGLE_MAPS_API_KEY.*server key.*referrer restrictions/);
+  assert.equal(await helper.getDrivingDistanceKm("A", "B"), null);
+});
+
 test("no-route and unresolved-location errors give location-specific guidance", async () => {
   for (const [status, expected] of [
     ["ZERO_RESULTS", /no driving route.*map pins.*coverage/],

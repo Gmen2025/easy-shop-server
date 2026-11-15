@@ -309,6 +309,11 @@ const sessionParam = {
   schema: { type: "string" },
   description: "Optional Google Places session token. Only 8-64 ASCII letters/digits/hyphens are forwarded; invalid tokens are silently ignored.",
 };
+const regionParam = {
+  name: "region", in: "query", required: false,
+  schema: { type: "string", enum: ["US", "ET"] },
+  description: "Recipient country for delivery searches. Overrides the shopping database country for this lookup only; checkout still verifies the destination.",
+};
 
 add("/config", "get", "ridesGetConfig", "Get regional ride configuration",
   "Any authenticated user. Returns the stored regional ride policy (enabled:false when unconfigured) plus read-only telebirrAvailable gateway readiness.",
@@ -386,19 +391,21 @@ add("/places/current-location", "post", "ridesCurrentLocation", "Reverse-geocode
   `${placesDescription}Requires valid numeric coordinates other than (0,0); verifies the reverse-geocoded country matches the selected region. Returns normalized address fields, the submitted currentLocation, and a verified GeoJSON location; no placeId is produced.`,
   ref("RidePlaceAddress"), { body: ref("RideGpsInput"), errors: placeErrors });
 add("/places/autocomplete", "get", "ridesAutocomplete", "Find regional address suggestions",
-  `${placesDescription}Search text is trimmed. Missing, non-string, shorter than 3 or longer than 200 characters returns [] without a provider request. Returns at most six suggestions. Invalid session tokens are ignored.`,
+  `${placesDescription}Optional region overrides the database country for cross-border recipient searches. Search text is trimmed. Missing, non-string, shorter than 3 or longer than 200 characters returns [] without a provider request. Returns at most six suggestions. Invalid session tokens are ignored.`,
   { ...array(ref("RidePlaceSuggestion")), maxItems: 6 }, {
     parameters: [
       { name: "input", in: "query", required: false, schema: { type: "string" }, description: "Address search text; useful length after trimming is 3-200 characters." },
       sessionParam,
+      regionParam,
     ], errors: placeErrors,
   });
 add("/places/details/{placeId}", "get", "ridesPlaceDetails", "Resolve and verify a selected place",
-  `${placesDescription}Validates the Google place ID and country. Coordinates come from the provider, not the client. Returns normalized address fields and placeId, without a currentLocation field.`,
+  `${placesDescription}Optional region overrides the database country; it must match the autocomplete request. Validates the Google place ID and country. Coordinates come from the provider, not the client. Returns normalized address fields and placeId, without a currentLocation field.`,
   ref("RidePlaceAddress"), {
     parameters: [
       { name: "placeId", in: "path", required: true, schema: { type: "string", pattern: "^[A-Za-z0-9_-]{10,300}$" } },
       sessionParam,
+      regionParam,
     ], errors: placeErrors,
   });
 add("/quote", "post", "ridesCreateQuote", "Create a single persisted ride quote",

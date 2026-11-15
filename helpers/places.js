@@ -13,7 +13,7 @@ const comparableAddress = (value) => value.toLowerCase().replace(/[.,]/g, " ")
   .trim().split(/\s+/).map((word) => STREET_WORDS[word] || word).join(" ");
 
 const placesKey = () => process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API_KEY;
-const unavailable = () => conflict("Address search is unavailable. Admin must enable Places API (New) for the server Google key.");
+const unavailable = () => conflict("Address search is unavailable. Admin must configure GOOGLE_PLACES_API_KEY (or GOOGLE_MAPS_API_KEY) on the backend with Places API (New) enabled and without website/referrer restrictions, then restart the backend.");
 const sessionParam = (session) => (typeof session === "string" && SESSION.test(session) ? session : undefined);
 
 async function callPlaces(url, init, fetcher) {

@@ -191,3 +191,57 @@ test("current pickup reverse lookup verifies the region and keeps the exact GPS 
   await assert.rejects(currentLocationAddress(point, "ET", { fetcher: reply({ status: "ZERO_RESULTS" }) }), /No address/);
   await assert.rejects(currentLocationAddress(point, "ET", { fetcher: reply({ status: "REQUEST_DENIED" }) }), /permissions/);
 });
+
+test("delivery search routes use the recipient region and preserve ride defaults", async (t) => {
+  const router = require("../routers/rides");
+  const places = require("../helpers/places");
+  const calls = [];
+  t.mock.method(places, "autocompletePlaces", async (...args) => { calls.push(args); return []; });
+  t.mock.method(places, "placeDetails", async (...args) => { calls.push(args); return { country: args[1] }; });
+  const handler = (path) => router.stack.find((entry) => entry.route?.path === path && entry.route.methods.get).route.stack[0].handle;
+  for (const [dbName, region, expected] of [
+    ["E_SHOPUSA", "ET", "ET"], ["E_SHOP", "US", "US"],
+    ["E_SHOPUSA", undefined, "US"], ["E_SHOP", undefined, "ET"],
+  ]) {
+    const req = { auth: { userId: "region-test" }, dbName, params: { placeId: PLACE },
+      query: { input: "Bole", session: "session-123", ...(region ? { region } : {}) } };
+    const res = { json(body) { this.body = body; }, status(code) { this.statusCode = code; return this; } };
+    await handler("/places/autocomplete")(req, res);
+    assert.deepEqual(calls.at(-1), ["Bole", expected, "session-123"]);
+    await handler("/places/details/:placeId")(req, res);
+    assert.deepEqual(calls.at(-1), [PLACE, expected, "session-123"]);
+    assert.equal(res.body.country, expected);
+  }
+  const count = calls.length;
+  for (const region of ["KE", ["ET", "US"], ""]) {
+    const res = { json(body) { this.body = body; }, status(code) { this.statusCode = code; return this; } };
+    await handler("/places/autocomplete")({
+      auth: { userId: "region-test" }, dbName: "E_SHOPUSA", query: { input: "Bole", region },
+    }, res);
+    assert.equal(res.statusCode, 409);
+    assert.match(res.body.message, /US or ET/);
+  }
+  assert.equal(calls.length, count, "Invalid regions must not reach Google");
+});
+
+test("checkout identifies a browser-restricted server key without accepting client coordinates", async (t) => {
+  const previous = process.env.GOOGLE_MAPS_API_KEY;
+  process.env.GOOGLE_MAPS_API_KEY = "server-key";
+  t.after(() => {
+    if (previous === undefined) delete process.env.GOOGLE_MAPS_API_KEY;
+    else process.env.GOOGLE_MAPS_API_KEY = previous;
+  });
+  const logs = [];
+  t.mock.method(console, "error", (...args) => logs.push(args.join(" ")));
+  t.mock.method(global, "fetch", async () => ({ ok: true, json: async () => ({
+    status: "REQUEST_DENIED", error_message: "API keys with referer restrictions cannot be used with this API. server-key",
+  }) }));
+  await assert.rejects(geocodeAddress({ country: "Ethiopia", address1: "Bole",
+    location: { type: "Point", coordinates: [38.787, 8.996] } }), (error) => {
+    assert.match(error.message, /GOOGLE_MAPS_API_KEY.*server key.*referrer restrictions/);
+    assert.doesNotMatch(error.message, /server-key/);
+    return true;
+  });
+  assert.match(logs[0], /REQUEST_DENIED/);
+  assert.doesNotMatch(logs[0], /server-key/);
+});

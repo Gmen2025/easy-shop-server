@@ -987,6 +987,24 @@ enabled and billing configured. It verifies destinations/country itself and
 uses driving routes without straight-line pricing fallbacks. Each destination
 must match the selected shopping region. Each store needs valid pickup coordinates.
 
+Use a **server key**, separate from the website/Android/iOS keys. Server requests
+cannot use a key with Websites/HTTP-referrer restrictions. Restrict its APIs and,
+where available, restrict application access to the backend host's fixed outbound
+IPs. On Render, set `GOOGLE_MAPS_API_KEY` under the backend service's
+**Environment**, then save/redeploy. Enable **Geocoding API**, **Distance Matrix API**
+and billing in the key's own Google Cloud project. Mobile search also needs
+**Places API (New)** on `GOOGLE_PLACES_API_KEY`, or on the Maps key if no separate
+Places key is configured. An existing Places variable overrides the Maps key.
+Keep `VITE_GOOGLE_MAPS_BROWSER_KEY` and its website restrictions unchanged.
+The customer's physical country does not cause a provider permission denial.
+Do not bypass address verification or replace road distances with straight-line
+estimates to produce a checkout price.
+
+Mobile delivery autocomplete passes optional `region=US|ET` to both
+`rides/places/autocomplete` and `rides/places/details/:placeId`, using the recipient
+country rather than the shopping database. Omitting it retains the database's
+country for ride searches. Checkout still verifies the actual destination country.
+
 Authenticated APIs (all paths below are relative to `/api/v1/stores/`):
 
 - `GET delivery-config`; Admin-only `PUT delivery-config` and

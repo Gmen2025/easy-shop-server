@@ -316,17 +316,22 @@ function limitPlaceSearch(req) {
   placeSearches.set(key, window);
 }
 const placeRegion = (req) => (/usa/i.test(req.dbName) ? "US" : "ET");
+function searchRegion(req) {
+  if (req.query.region === undefined) return placeRegion(req);
+  if (!["US", "ET"].includes(req.query.region)) throw conflict("Choose US or ET as the address search region.");
+  return req.query.region;
+}
 router.post("/places/current-location", endpoint(async (req, res) => {
   limitPlaceSearch(req);
   res.json(await places.currentLocationAddress(req.body, placeRegion(req)));
 }));
 router.get("/places/autocomplete", endpoint(async (req, res) => {
   limitPlaceSearch(req);
-  res.json(await places.autocompletePlaces(req.query.input, placeRegion(req), req.query.session));
+  res.json(await places.autocompletePlaces(req.query.input, searchRegion(req), req.query.session));
 }));
 router.get("/places/details/:placeId", endpoint(async (req, res) => {
   limitPlaceSearch(req);
-  res.json(await places.placeDetails(req.params.placeId, placeRegion(req), req.query.session));
+  res.json(await places.placeDetails(req.params.placeId, searchRegion(req), req.query.session));
 }));
 router.post("/quote", endpoint(async (req, res) => {
   res.status(201).json(publicRide(await service.quoteRide(req.dbModels, req.auth.userId, req.dbName, req.body)));
