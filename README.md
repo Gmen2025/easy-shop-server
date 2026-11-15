@@ -2,6 +2,64 @@
 
 A comprehensive REST API for an e-commerce platform built with Node.js, Express, and MongoDB. Features include JWT authentication, payment gateway integrations (Stripe & Telebirr), order management, and email notifications.
 
+## Prepaid cash/off-platform fee deposits
+
+The **Income dashboard** on website/mobile has a separate deposit wallet for
+drivers and stores (independent or company-owned). Regional and account
+requirements default **OFF**; Admin must explicitly enable both.
+`GET/PUT /api/v1/finance/wallet-config` controls the regional master switch.
+`PUT /finance/accounts/:kind/:accountId/wallet/settings` accepts
+`{ enabled, lowBalance, minimumBalance }`; warning must exceed the minimum.
+OFF preserves balances/history and pending payment recovery, while pausing
+new top-ups, cash-fee deductions and deposit-related new-work restrictions.
+Other Admin suspensions, approval and availability requirements remain.
+
+Wallet currency is ETB in Ethiopia and USD in USA, with no conversion.
+`POST .../wallet/deposits` accepts `{ amount, currency, method, requestKey }`.
+Bank/company-receipt claims additionally require `reference` and the actual
+`depositedAt` ISO date/time. Claims never self-credit: Admin must confirm actual
+receipt through `POST .../wallet/deposits/:id/verify` with
+`{ action: "approve", confirmedReceived: true }` (or `action: "reject"`).
+Amount, deposited time, submission time, verification time and balance after
+credit appear in history. Completed bank/receipt references must be unique
+within the region/currency; include the bank name in non-globally-unique references.
+
+USD card deposits use Stripe hosted Checkout with the existing regional live
+Stripe credentials. Configure `WALLET_PAYMENT_RETURN_URL` to an HTTPS website
+account/profile URL. ETB deposits use the configured live Telebirr H5 gateway;
+mock signing/payments and insecure TLS are not accepted. Existing regional
+bank/card/Telebirr availability switches apply to new deposits/payments.
+`POST .../wallet/deposits/:id/start` resumes a saved gateway attempt;
+`POST .../wallet/deposits/:id/verify` performs authenticated server-side queries.
+Redirects/client claims never credit funds. The existing finance scheduler also
+reconciles saved gateway attempts every minute, including after switches are OFF.
+An ambiguous Telebirr start must be queried/reconciled, never submitted as a
+second payment. Rollout requires live gateway testing and verified company bank
+instructions; automatic gateway availability fails closed without credentials.
+
+Completed, confirmed **cash** product/delivery/ride fees are debited atomically
+and once, using the existing fee snapshot (not the entire company-owned income).
+Online-paid transactions keep existing earnings accounting and never debit
+deposits. Historical completed finance rows are reconciled before enabling;
+switches do not retroactively charge them. Cash fees reversed by a source
+refund/cancellation credit the saved fee back once. Cash earnings are excluded
+from payouts, so the same fee is not also deducted from a payout.
+Offline transactions not recorded in this platform cannot be detected
+automatically: Admin records itemized additional fees through
+`POST .../wallet/charges` with `{ amount, notes, requestKey }`.
+No recurring subscriptions or automatic currency conversion are added.
+
+At/below the configured minimum, only **new** assignments/orders are blocked;
+active work can finish. Verified top-ups restore eligibility above the minimum
+without clearing manual Admin suspensions. Low-balance/credit alerts are saved
+transactionally to the website/mobile inbox; registered mobile devices receive
+queued pushes. Deposit balances and unresolved claims block account deletion.
+Legacy driver balances/history are retained; pending legacy deposits can still
+be verified once, but new submissions/adjustments use the Income wallet.
+Deploy the new schemas/indexes, including the receipt uniqueness index, before
+enabling either requirement. MongoDB transactions require the existing replica
+set deployment.
+
 ## Regional ride and service availability
 
 Public, uncached `GET /api/v1/settings/service-availability` returns
@@ -424,9 +482,36 @@ existing card intents, confirmation/status endpoints, gateway callbacks and
 refunds remain accessible. Legacy order creation remains a new submission:
 coordinate disabling around already-paid legacy orders, which need their
 method re-enabled before submission. Switches do not replace actual provider
-configuration or currency support: grouped checkout/rides do not support
-Telebirr, international shipping remains ETB bank-only, and converted/service
-payments exclude cash.
+configuration or currency support: USA-to-Ethiopia product checkout supports
+ETB bank transfer and live Telebirr; Ethiopia USD products support the dedicated
+USD Stripe merchant and USD bank transfer. Converted/service payments exclude
+cash; Telebirr is not offered for grouped domestic checkout, rides or USD.
+
+### Telebirr for USA products paid in ETB
+
+The existing USA Telebirr admin switch controls new reservations and gateway
+starts. Configure the existing live Telebirr environment variables, HTTPS
+gateway/checkout URLs and a whitelisted `NOTIFY_URL`; mock signing/payments and
+insecure TLS are not accepted for this checkout. The exchange-policy response
+includes `telebirrAvailable` for both clients. No credentials belong in either
+client.
+
+`POST /stores/checkouts/:id/payment` accepts `clientType: "web"` or `"mobile"`
+and returns a saved `paymentUrl`. The server persists one merchant order ID
+before contacting the gateway and charges only the locked ETB amount.
+`POST /stores/checkouts/:id/confirm` queries Telebirr's authenticated
+`payment.queryorder` API and verifies the merchant order, currency and amount.
+Only verified success activates child orders. Redirects, legacy mock status
+responses and client-reported success never activate grouped orders.
+
+Existing payment recovery continues after the admin switch is disabled.
+Pending or unknown gateway status prevents cancellation/stock release; the
+expiry worker retries reconciliation and releases only gateway-closed/failed
+orders. An ambiguous initiation timeout must be checked or escalated to support,
+not retried as another charge. Telebirr refunds are manual: return the funds,
+then record the actual reference through the existing admin manual-refund route.
+Validate real merchant credentials, gateway payment and closure in staging
+before production rollout; local tests use mocked gateway responses.
 
 ## Optional store logos (shared mobile and website)
 
@@ -664,6 +749,44 @@ USD cash is rejected. Bank accounts must be explicitly tagged `currency:"USD"`;
 old untagged Ethiopia accounts remain ETB. Native rides/legacy bank lists do not
 offer USD accounts in Ethiopia.
 
+#### Ethiopia products shipped to USA, payable in USD
+
+Domestic Ethiopia USD delivery remains the default. To export products, send
+`paymentCurrency:"usd"` and `destinationCountry:"USA"` to
+`POST stores/checkouts/quote` in the Ethiopia region, with USA recipient addresses.
+ETB payment cannot be used for this route; services and passenger rides are not
+exportable.
+
+Admin configures the existing `stores/international-shipping-config` endpoint
+in the Ethiopia region. Its independent `ethiopia-usa-shipping` setting contains
+an Ethiopian consolidation `hub`, USD weight/volume shipping tariff and
+`finalDeliveryUsd` per USA recipient. Optional `usaPickup` enables USA collection
+without the final-delivery fee; international shipping and Ethiopia hub transport
+remain payable. The USA region's existing reverse-route configuration is unchanged.
+
+Approve each Ethiopia product with `exportToUSA:true` through
+`PUT stores/international-products/:id`. Products default to domestic-only and
+require complete packaged weight/dimensions plus legal export/import and carrier
+coverage review. The server routes Ethiopia stores only to the Ethiopian hub,
+never across the ocean to the recipient.
+
+The combined USD charge is the rounded conversion of ETB products and Ethiopian
+hub delivery, plus exact USD shipping and USA final delivery. Shipping is charged
+once per recipient, not per pickup store. Native order totals include the ETB
+equivalent for receipts; payment/refund shares retain exact saved USD cents.
+Card uses the dedicated Ethiopia USD merchant; bank transfer requires an
+explicit USD account and enters `bank_review` until Admin verifies the full total.
+The existing Ethiopia admin payment switches control both methods. Cash and
+Telebirr are not supported for USD exports.
+
+Admin handles carrier booking and actual international/final delivery; this
+feature does not purchase labels. After all store packages reach the Ethiopia
+hub, shipment tracking advances `awaiting_hub -> at_hub -> shipped -> arrived_usa
+-> delivered`, with carrier/tracking and final delivery proof. Import duties and
+customs are excluded. Deploy backend first, configure and enable the hub/tariff,
+apply a current daily exchange rate, approve products and test actual payments
+and fulfillment in staging before rollout.
+
 Ethiopia USD cards require an explicitly configured USD-capable merchant:
 `STRIPE_SECRET_KEY_ETHIOPIA_USD` and matching
 `STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD` (both live, as in the existing production
@@ -865,7 +988,7 @@ Authenticated APIs (all paths below are relative to `/api/v1/stores/`):
   string flags are rejected. This is a client build/testing flag, not proof of
   development or a backend authorization boundary; do not rely on it to prevent
   custom clients from requesting cash. Debug checkouts create real reserved
-  orders, not simulated payments. International ETB bank-only checkout and
+  orders, not simulated payments. International ETB bank/Telebirr checkout and
   Ethiopia USD/service cash restrictions remain enforced even with the flag.
   Release apps hide cash and block submission; no server environment or live
   configuration change is performed automatically.

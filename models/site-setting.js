@@ -63,6 +63,7 @@ const siteSettingSchema = new mongoose.Schema(
     vehicleDeliveryConfig: { type: mongoose.Schema.Types.Mixed, default: undefined },
     reservationVersion: { type: Number, default: 0 },
     financeImportedAt: { type: Date },
+    cashDepositEnabled: { type: Boolean, default: false },
     rideConfig: { type: mongoose.Schema.Types.Mixed, default: undefined },
     exchangeConfig: { type: mongoose.Schema.Types.Mixed, default: undefined },
     internationalShippingConfig: { type: mongoose.Schema.Types.Mixed, default: undefined },

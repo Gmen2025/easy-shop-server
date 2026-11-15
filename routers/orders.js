@@ -13,7 +13,6 @@ const { assignDriverToOrder, offerCompanyDelivery, syncDriverAvailability, MAX_A
 const { resolvePickupStore, getCoordinates, DRIVER_RADIUS_METERS, findCompanyDriver, getCompanyDriverEligibility } = require("../helpers/fulfillment-routing");
 const { restoreCompanyDriversSuspendedForBalance } = require("../helpers/driver-wallet");
 const { getDriverLocation } = require("../helpers/driver-location");
-const { getCommissionRate, debitCommission } = require("../helpers/driver-wallet");
 const { buildDriverOrderSummary, isDropoffRevealed } = require("../helpers/driver-view");
 const {
   inventoryEnabled, nearestStorePricingEnabled, normalizeLines, eligibleStores,
@@ -545,6 +544,7 @@ router.get("/admin/company-fulfillable", requireAdmin, async (req, res) => {
       const nearbyPartnerDriver = await Driver.findOne({
         isCompanyOwned: { $ne: true },
         isSuspended: { $ne: true },
+        depositBlocked: { $ne: true },
         $or: [{ isAvailable: true }, { availabilityStatus: true }],
         location: {
           $near: {
@@ -570,6 +570,7 @@ async function hasNearbyPartnerDriver(Driver, Order, coords, requiredVehicle) {
   const nearbyPartnerDrivers = await Driver.find({
     isCompanyOwned: { $ne: true },
     isSuspended: { $ne: true },
+    depositBlocked: { $ne: true },
     approvalStatus: "approved",
     $or: [{ isAvailable: true }, { availabilityStatus: true }],
     location: {
@@ -1720,38 +1721,6 @@ router.put("/:id", async (req, res) => {
 
   if (!order) {
     return res.status(404).send("order not found after update");
-  }
-
-  // Deduct the platform commission from the driver's wallet exactly once, when delivery completes.
-  if (
-    updateFields.deliveryStatus === "Delivered" &&
-    existingOrder.deliveryStatus !== "Delivered" &&
-    order.driver?._id &&
-    !existingOrder.driverCommissionDeducted
-  ) {
-    try {
-      const { Driver, DriverWalletTransaction } = req.dbModels;
-      const driverDoc = await Driver.findById(order.driver._id);
-      const cashPayment = /cash|cod|pay.?on.?delivery/i.test(String(order.paymentMethod || order.methodName || ""));
-      if (driverDoc && !driverDoc.isCompanyOwned && cashPayment) {
-        const entry = await req.dbModels.FinanceEntry.findOne({ sourceType: "order", sourceId: order._id, category: "delivery" });
-        const commissionAmount = entry ? entry.platformMinor / 100 :
-          Math.round(Number(order.deliveryFee || 0) * getCommissionRate(driverDoc) * 100) / 100;
-        if (commissionAmount > 0) {
-          await debitCommission({
-            Driver,
-            WalletTransaction: DriverWalletTransaction,
-            User,
-            driverId: driverDoc._id,
-            order,
-            amount: commissionAmount,
-          });
-        }
-        await Order.findByIdAndUpdate(order._id, { driverCommissionDeducted: true });
-      }
-    } catch (commissionError) {
-      console.error("[Driver Wallet] Commission deduction failed:", commissionError?.message || commissionError);
-    }
   }
 
   // A delivered/reverted order frees a slot in the driver's queue; re-open dispatch to them if under capacity.

@@ -56,6 +56,40 @@ test("international mixed fulfillment keeps shipping once per shipment and appor
   assert.equal(group.international.shippingFee, 15);
   assert.equal(group.deliveryFee, 6, "USA hub transport remains payable");
 });
+test("Ethiopia-to-USA tariffs require an Ethiopian hub, USA export approval, complete measurements and a USA collection address", () => {
+  const reversePolicy = { ...policy, hub: { ...hub, country: "Ethiopia", zip: "" },
+    usaPickup: hub, finalDeliveryUsd: "8.01" };
+  assert.equal(shipping.validateConfig(reversePolicy, "ethiopia-to-usa").usaPickup.country, "USA");
+  assert.throws(() => shipping.validateConfig(policy, "ethiopia-to-usa"), /hub must be in Ethiopia/);
+  assert.throws(() => shipping.validateConfig({ ...reversePolicy, usaPickup: reversePolicy.hub }, "ethiopia-to-usa"), /must be in USA/);
+  const exportProduct = { ...product, exportToUSA: true };
+  assert.equal(shipping.tariff([{ product: "product", quantity: 2 }], [exportProduct], reversePolicy, "ethiopia-to-usa").shippingUsd, 130);
+  assert.throws(() => shipping.tariff([{ product: "product", quantity: 1 }], [product], reversePolicy, "ethiopia-to-usa"), /not approved.*USA/);
+  assert.throws(() => shipping.tariff([{ product: "product", quantity: 1 }], [{ ...exportProduct, packageSize: null }], reversePolicy, "ethiopia-to-usa"), /dimensions are missing/);
+});
+test("reverse export totals convert native costs once and add exact USD shipping/final delivery cents with stable refund shares", () => {
+  const group = { deliveries: ["a", "b"].map((key) => ({ key, address: { id: "home" },
+    itemsSubtotal: 20, deliveryFee: 2, fulfillmentMethod: "delivery" })),
+  international: { direction: "ethiopia-to-usa", tariff: { finalDeliveryUsd: 8.01 },
+    shipments: [{ id: "home", shippingUsd: 30 }] }, exchangeRate: { birrPerUsd: 3 }, markModified() {} };
+  shipping.recalculate(group);
+  assert.equal(group.paymentAmount, 52.68);
+  assert.deepEqual(group.deliveries.map((delivery) => delivery.paymentAmount), [26.35, 26.33]);
+  assert.equal(group.totalPrice, 158.03);
+  shipping.recalculate(group);
+  assert.equal(group.paymentAmount, 52.68, "Recalculation must not add fees twice");
+  group.deliveries.forEach((delivery) => { delivery.fulfillmentMethod = "pickup"; });
+  shipping.recalculate(group);
+  assert.equal(group.paymentAmount, 44.67);
+  assert.equal(group.deliveryFee, 4, "Ethiopia hub delivery remains payable");
+  assert.equal(group.finalDeliveryFee, 0);
+  assert.equal(group.international.shippingFee, 30);
+  group.deliveries = [{ address: { id: "home" }, itemsSubtotal: 0.01, deliveryFee: 0, fulfillmentMethod: "pickup" }];
+  group.exchangeRate.birrPerUsd = 150.31;
+  group.international.shipments[0].shippingUsd = 1.01;
+  shipping.recalculate(group);
+  assert.equal(group.paymentAmount, 1.01, "USD shipping cannot lose a cent to a conversion round trip");
+});
 test("USA export rate expires at exactly 24 hours, remains independent, and multiplies USD into birr cents", async () => {
   const now = new Date("2026-10-11T12:00:00Z");
   const config = { enabled: true, birrPerUsd: 150.31, appliedAt: now, revision: 5 };

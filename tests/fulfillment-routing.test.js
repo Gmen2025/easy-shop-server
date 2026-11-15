@@ -28,8 +28,8 @@ function store(id, longitude, company = false, overrides = {}) {
 
 function storeModel(stores) {
   return { find: (filter) => {
-    assert.deepEqual(filter, { approvalStatus: "approved", isOpen: { $ne: false } });
-    return query(stores.filter((entry) => entry.approvalStatus === "approved" && entry.isOpen !== false));
+    assert.deepEqual(filter, { approvalStatus: "approved", isOpen: { $ne: false }, depositBlocked: { $ne: true } });
+    return query(stores.filter((entry) => entry.approvalStatus === "approved" && entry.isOpen !== false && !entry.depositBlocked));
   } };
 }
 

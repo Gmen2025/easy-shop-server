@@ -6,6 +6,7 @@ const notificationSchema = new mongoose.Schema({
   body: { type: String, required: true },
   data: { type: mongoose.Schema.Types.Mixed, default: {} },
   isRead: { type: Boolean, default: false },
+  pushPending: { type: Boolean, default: false },
 }, { timestamps: true });
 
 notificationSchema.index({ user: 1, _id: -1 });

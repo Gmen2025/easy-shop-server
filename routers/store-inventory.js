@@ -513,7 +513,7 @@ operatorGet(router, "/me/assignments", "/admin/:accountId/assignments", endpoint
       { fallbackStore: { $in: stores.map((store) => store._id) }, store: null, driver: null, deliveryStatus: "Pending",
         status: { $nin: ["3", "4", "Delivered", "Cancelled"] } },
       { store: { $in: stores.map((store) => store._id) }, fulfillmentMethod: "pickup",
-        "internationalShipping.status": { $in: ["arrived_ethiopia", "delivered"] },
+        "internationalShipping.status": { $in: ["arrived_ethiopia", "arrived_usa", "delivered"] },
         "pickupConfirmation.operatorAt": { $exists: false }, fulfillmentStatus: { $ne: "cancelled" } },
     ],
   }).populate("fallbackStore", "name address logo").populate({ path: "orderItems", populate: { path: "product", select: "name image price" } }).sort({ dateOrdered: 1 }).lean();
@@ -525,7 +525,7 @@ router.get("/admin/assignments", endpoint(async (req, res) => {
   await reconcileFallbackStores(req.dbModels);
   const orders = await req.dbModels.Order.find({
     $or: [
-      { fulfillmentMethod: "pickup", "internationalShipping.status": { $in: ["arrived_ethiopia", "delivered"] },
+      { fulfillmentMethod: "pickup", "internationalShipping.status": { $in: ["arrived_ethiopia", "arrived_usa", "delivered"] },
         "pickupConfirmation.operatorAt": { $exists: false }, fulfillmentStatus: { $ne: "cancelled" } },
       { fulfillmentStatus: { $in: ["pending", "accepted", "unassigned"] }, status: { $nin: ["3", "4", "Delivered", "Cancelled"] } },
       { adminReviewRequired: "store" },

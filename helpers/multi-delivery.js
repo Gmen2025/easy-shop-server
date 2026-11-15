@@ -250,8 +250,9 @@ async function changeFulfillment(models, groupId, user, databaseName, selections
       delivery.internationalPickup = Boolean(group.international);
       if (delivery.fulfillmentMethod === "pickup") {
         if (group.international) {
-          const collection = group.international.tariff.ethiopiaPickup;
-          if (!collection) throw conflict("Admin must configure an Ethiopia collection address before international pickup is available.");
+          const shipmentRoute = require("./international-shipping").route(group.international.direction);
+          const collection = group.international.tariff[shipmentRoute.pickupField];
+          if (!collection) throw conflict(`Admin must configure a ${shipmentRoute.destination} collection address before international pickup is available.`);
           delivery.pickupAddress = collection;
         } else {
           if (!delivery.store.address?.trim()) throw conflict("The supplying store has no collection address. Contact Admin.");
@@ -287,9 +288,18 @@ async function changeFulfillment(models, groupId, user, databaseName, selections
 }
 
 async function createQuote(models, user, databaseName, body, { geocode = geocodeAddress, distance = getDrivingDistanceKm, transient = false } = {}) {
-  if (/usa/i.test(databaseName) && String(body.paymentCurrency).toLowerCase() === "etb") {
+  if (!body || typeof body !== "object") throw conflict("Checkout details are required.");
+  const destination = body.destinationCountry === undefined ? null : countryCode(body.destinationCountry);
+  if (destination !== null && !["US", "ET"].includes(destination)) throw conflict("Choose Ethiopia or USA as the checkout destination.");
+  if (fx.isEthiopia(databaseName) && destination === "US") {
+    if (String(body.paymentCurrency).toLowerCase() !== "usd") throw conflict("Ethiopia-to-USA shipping requires USD payment.");
     return require("./international-shipping").createQuote(models, user, databaseName, body, { geocode, distance });
   }
+  if (/usa/i.test(databaseName) && String(body.paymentCurrency).toLowerCase() === "etb") {
+    if (destination === "US") throw conflict("USA products paid in ETB must be shipped to Ethiopia.");
+    return require("./international-shipping").createQuote(models, user, databaseName, body, { geocode, distance });
+  }
+  if (destination !== null && destination !== (fx.isEthiopia(databaseName) ? "ET" : "US")) throw conflict("The destination does not match this domestic checkout.");
   const deliveryConfig = (await models.SiteSetting.findOne({ key: DELIVERY_CONFIG_KEY }).lean())?.deliveryConfig;
   const deliveryPlan = checkoutDeliveryPlan(body, databaseName, new Date(), deliveryConfig);
   const nativeCurrency = /usa/i.test(databaseName) ? "usd" : "etb";
@@ -404,7 +414,7 @@ function selectVehicles(group, selections) {
 
 async function prepare(models, groupId, user, databaseName, body) {
   if (!body || typeof body !== "object") throw conflict("Payment details are required.");
-  if (!["cash", "bank", "card"].includes(body.method)) throw conflict("Choose a supported payment method.");
+  if (!["cash", "bank", "card", "telebirr"].includes(body.method)) throw conflict("Choose a supported payment method.");
   return models.Order.db.transaction(async (session) => {
     const group = await models.CheckoutGroup.findOne({ _id: groupId, user }).session(session);
     if (!group) throw conflict("Checkout not found.");
@@ -435,14 +445,23 @@ async function prepare(models, groupId, user, databaseName, body) {
       }
     }
     if (group.international) {
-      if (group.kind !== "products" || group.currency !== "etb" || body.method !== "bank" || !/usa/i.test(databaseName)) {
-        throw conflict("US-to-Ethiopia checkout is product-only and supports ETB bank transfer only.");
+      const shipping = require("./international-shipping");
+      const shipmentRoute = shipping.route(group.international.direction);
+      if (group.kind !== "products" || group.currency !== shipmentRoute.currency || !shipmentRoute.methods.includes(body.method) ||
+          shipping.directionForDatabase(databaseName) !== (group.international.direction || "usa-to-ethiopia")) {
+        throw conflict(group.international.direction === "ethiopia-to-usa" ?
+          "Ethiopia-to-USA checkout is product-only and supports USD card or bank transfer." :
+          "US-to-Ethiopia checkout is product-only and supports ETB bank transfer or Telebirr.");
       }
       await require("./international-shipping").lockConfig(models, group, session);
     }
+    if (body.method === "telebirr") {
+      if (!group.international || group.currency !== "etb") throw conflict("Telebirr is available here only for USA products paid in ETB.");
+      require("./checkout-telebirr").requireConfigured();
+    }
     if (body.method === "card" && !/usa/i.test(databaseName) && !group.exchangeRate) throw conflict("Ethiopia card payment requires an enabled USD quote.");
     if (group.exchangeRate) {
-      if (body.method === "cash") throw conflict("USD checkout supports card or a USD bank account, not cash.");
+      if (body.method === "cash") throw conflict("Converted checkout supports card or bank transfer where eligible, not cash.");
       await fx.lockRate(models, group.exchangeRate, databaseName, session);
     }
     if (body.method === "card") {
@@ -514,7 +533,7 @@ async function prepare(models, groupId, user, databaseName, body) {
           customerLocation: delivery.address.location, storefrontId: delivery.storefrontId, session,
         });
         if (!allowed.some((store) => id(store) === delivery.store._id)) throw conflict("This pickup no longer belongs to an available storefront branch. Refresh the quote.");
-        const selected = await models.Store.updateOne({ _id: delivery.storefrontId, approvalStatus: "approved" },
+        const selected = await models.Store.updateOne({ _id: delivery.storefrontId, approvalStatus: "approved", depositBlocked: { $ne: true } },
           { $inc: { inventoryVersion: 1 } }, { session });
         if (selected.modifiedCount !== 1) throw conflict("The selected storefront is no longer approved.");
       }
@@ -534,7 +553,7 @@ async function prepare(models, groupId, user, databaseName, body) {
         if (!quoted) throw conflict("International recipient snapshot is missing.");
         const expectedCargo = group.deliveries.find((entry) => entry.key === delivery.key).quotedCargo;
         if (JSON.stringify(delivery.cargo) !== JSON.stringify(expectedCargo)) throw conflict("Packaged product dimensions changed. Request a new shipping quote.");
-        require("./international-shipping").tariff(delivery.lines, approved, group.international.tariff);
+        require("./international-shipping").tariff(delivery.lines, approved, group.international.tariff, group.international.direction);
       }
       if (!pickup && (!config?.enabled || !suitableVehicles(delivery.cargo, config).includes(delivery.vehicle))) throw conflict("Vehicle capacity changed. Refresh the quote.");
       // Lock the configuration and products against changes while these reservations are created.
@@ -583,12 +602,13 @@ async function prepare(models, groupId, user, databaseName, body) {
         ...(group.exchangeRate ? { paymentCurrency: group.currency, paymentAmount: delivery.paymentAmount, exchangeRate: group.exchangeRate } : {}),
         ...(group.international ? { internationalShippingFee: delivery.internationalShippingFee,
           internationalShipping: { shipmentId: delivery.address.id,
+            direction: group.international.direction || "usa-to-ethiopia",
             recipient: group.international.shipments.find((shipment) => shipment.id === delivery.address.id).recipient,
             hub: group.international.hub, status: "awaiting_hub", customsNotice: group.international.customsNotice,
             finalDeliveryFee: delivery.finalDeliveryFee || 0 } } : {}),
         status: "Pending", deliveryStatus: "Pending", paymentStatus: "pending",
-        paymentMethod: { cash: "1", bank: "2", card: "3" }[body.method],
-        methodName: { cash: pickup ? "Cash at store collection" : "Cash on delivery", bank: "Bank transfer", card: "Card" }[body.method],
+        paymentMethod: { cash: "1", bank: "2", card: "3", telebirr: "4" }[body.method],
+        methodName: { cash: pickup ? "Cash at store collection" : "Cash on delivery", bank: "Bank transfer", card: "Card", telebirr: "Telebirr" }[body.method],
         bankName: group.bankAccount?.bankName,
       });
       assignStore(order, currentStore, delivery.lines);
@@ -602,13 +622,13 @@ async function prepare(models, groupId, user, databaseName, body) {
       group.orders.push(order._id);
     }
     if (group.exchangeRate) await fx.requireCurrent(models, databaseName, session, new Date(),
-      group.international ? fx.EXPORT_KEY : fx.KEY);
+      group.exchangeRate.direction === "usd-to-etb" ? fx.EXPORT_KEY : fx.KEY);
     await group.save({ session });
     return group;
   });
 }
 
-async function activate(models, groupId, { paymentIntent, bankReceipt, bankVerified = false } = {}) {
+async function activate(models, groupId, { paymentIntent, telebirrPayment, bankReceipt, bankVerified = false } = {}) {
   const result = await models.Order.db.transaction(async (session) => {
     const group = await models.CheckoutGroup.findById(groupId).session(session);
     if (!group || group.status === "cancelled") throw conflict("This checkout is no longer payable.");
@@ -616,7 +636,7 @@ async function activate(models, groupId, { paymentIntent, bankReceipt, bankVerif
     if (group.status !== "awaiting_payment" && !(group.international && bankVerified && group.status === "bank_review")) throw conflict("Reserve the checkout before payment.");
     if (group.paymentMethod === "bank") {
       if (bankVerified && group.international) {
-        if (group.status !== "bank_review" || !group.bankReference) throw conflict("The customer must submit their ETB bank reference for review first.");
+        if (group.status !== "bank_review" || !group.bankReference) throw conflict(`The customer must submit their ${group.currency.toUpperCase()} bank reference for review first.`);
         group.paymentStatus = "completed";
       } else {
         if (group.expiresAt <= new Date()) throw conflict("Bank reservation expired. If funds were sent, contact support with the reference; do not pay again.");
@@ -640,6 +660,17 @@ async function activate(models, groupId, { paymentIntent, bankReceipt, bankVerif
           paymentIntent.metadata?.user !== id(group.user)) throw conflict("Card payment has not been verified. Resume this checkout; do not start a second payment.");
       group.paymentStatus = "completed";
     }
+    if (group.paymentMethod === "telebirr") {
+      if (!telebirrPayment || !require("./checkout-telebirr").paid(telebirrPayment) ||
+          telebirrPayment.merch_order_id !== group.telebirrMerchantOrderId ||
+          !telebirrPayment.payment_order_id || telebirrPayment.trans_currency !== "ETB" ||
+          !Number.isFinite(Number(telebirrPayment.total_amount)) ||
+          cents(Number(telebirrPayment.total_amount)) !== cents(fx.paymentTotal(group))) {
+        throw conflict("Telebirr payment has not been verified. Check this checkout; do not pay again.");
+      }
+      group.telebirrTransactionId = telebirrPayment.payment_order_id;
+      group.paymentStatus = "completed";
+    }
     if (group.kind === "service") {
       const request = await models.ServiceRequest.findOneAndUpdate({ _id: group.serviceRequest, checkoutGroup: group._id },
         { quoteAccepted: true, paymentStatus: group.paymentStatus }, { new: true, session });
@@ -659,7 +690,7 @@ async function activate(models, groupId, { paymentIntent, bankReceipt, bankVerif
         order.fulfillmentDeadline = null;
       }
       order.paymentStatus = group.paymentStatus === "completed" ? "completed" : "pending";
-      order.paymentTransactionId = group.paymentIntentId || "";
+      order.paymentTransactionId = group.paymentIntentId || group.telebirrTransactionId || "";
       order.paymentProvider = group.paymentMethod === "card" ? "stripe" : group.paymentMethod;
       order.transferReference = group.bankReference || "";
       order.senderName = group.bankSender || "";
@@ -727,6 +758,14 @@ async function ensureIntent(models, group, databaseName) {
 async function reconcile(models, group, databaseName, { expire = false, bankReceipt, rejectBank = false } = {}) {
   if (group.status !== "awaiting_payment" && !(group.international && group.status === "bank_review" && rejectBank)) return group;
   let intent;
+  if (group.paymentMethod === "telebirr") {
+    if (group.telebirrMerchantOrderId) {
+      const gateway = require("./checkout-telebirr");
+      const payment = await gateway.query(group);
+      if (gateway.paid(payment)) return activate(models, group._id, { telebirrPayment: payment });
+      if (!expire || !gateway.closed(payment)) throw conflict("Telebirr payment is still pending. Stock stays held until the gateway confirms payment or closes the order.");
+    } else if (!expire) throw conflict("Start Telebirr payment before checking its status.");
+  }
   if (group.paymentMethod === "card") {
     if (group.paymentIntentId || !expire) {
       ({ group } = await ensureIntent(models, group, databaseName));
@@ -739,7 +778,7 @@ async function reconcile(models, group, databaseName, { expire = false, bankRece
         await stripe.paymentIntents.cancel(intent.id);
       }
     }
-  } else if (!expire) {
+  } else if (group.paymentMethod !== "telebirr" && !expire) {
     return activate(models, group._id, { bankReceipt });
   }
   return models.Order.db.transaction(async (session) => {
@@ -747,6 +786,9 @@ async function reconcile(models, group, databaseName, { expire = false, bankRece
     if (current.status !== "awaiting_payment" && !(current.international && current.status === "bank_review" && rejectBank)) return current;
     if (current.paymentMethod === "card" && current.paymentIntentId && !intent) {
       throw conflict("Payment started while cancelling. Retry payment reconciliation before releasing stock.");
+    }
+    if (current.paymentMethod === "telebirr" && current.telebirrMerchantOrderId !== group.telebirrMerchantOrderId) {
+      throw conflict("Telebirr started while cancelling. Retry status before releasing stock.");
     }
     for (const orderId of current.orders) {
       const order = await models.Order.findById(orderId).session(session);
@@ -838,7 +880,7 @@ async function refundDelivery(models, group, orderId, databaseName, { retryFaile
   let order = await models.Order.findOne({ _id: orderId, checkoutGroup: group._id });
   if (!order || order.fulfillmentStatus !== "cancelled") throw conflict("Cancel this delivery before issuing a refund.");
   if (!["pending", "failed"].includes(order.refundStatus)) return order;
-  if (group.paymentMethod !== "card") throw conflict("This bank payment needs a manual refund. Record it after returning the funds.");
+  if (group.paymentMethod !== "card") throw conflict("This payment needs a manual refund. Record it after returning the funds.");
   const stripe = stripeClient(databaseName, group);
   const persist = async (fields) => {
     const updated = await models.Order.findOneAndUpdate({ _id: orderId, checkoutGroup: group._id, refundAttempt: order.refundAttempt || 0 },

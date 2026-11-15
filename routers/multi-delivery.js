@@ -46,20 +46,21 @@ router.put("/delivery-config", endpoint(async (req, res) => {
   res.json(config);
 }));
 router.get("/international-shipping-config", endpoint(async (req, res) => {
-  if (!/usa/i.test(req.dbName)) throw conflict("International shipping settings belong to the USA region.");
-  const saved = await req.dbModels.SiteSetting.findOne({ key: international.KEY }).lean();
+  const shipmentRoute = international.route(international.directionForDatabase(req.dbName));
+  const saved = await req.dbModels.SiteSetting.findOne({ key: shipmentRoute.key }).lean();
   res.json(saved?.internationalShippingConfig || { enabled: false });
 }));
 router.put("/international-shipping-config", endpoint(async (req, res) => {
   admin(req);
-  if (!/usa/i.test(req.dbName)) throw conflict("Select the USA region.");
-  const input = international.validateConfig(req.body);
+  const direction = international.directionForDatabase(req.dbName);
+  const shipmentRoute = international.route(direction);
+  const input = international.validateConfig(req.body, direction);
   input.hub.location = await require("../helpers/multi-delivery").geocodeAddress(input.hub);
-  if (input.ethiopiaPickup) input.ethiopiaPickup.location = await require("../helpers/multi-delivery").geocodeAddress(input.ethiopiaPickup);
+  if (input[shipmentRoute.pickupField]) input[shipmentRoute.pickupField].location = await require("../helpers/multi-delivery").geocodeAddress(input[shipmentRoute.pickupField]);
   const saved = await req.dbModels.SiteSetting.db.transaction(async (session) => {
-    const previous = await req.dbModels.SiteSetting.findOne({ key: international.KEY }).session(session).lean();
+    const previous = await req.dbModels.SiteSetting.findOne({ key: shipmentRoute.key }).session(session).lean();
     const next = { ...input, revision: (previous?.internationalShippingConfig?.revision || 0) + 1 };
-    await req.dbModels.SiteSetting.findOneAndUpdate({ key: international.KEY },
+    await req.dbModels.SiteSetting.findOneAndUpdate({ key: shipmentRoute.key },
       { internationalShippingConfig: next, updatedBy: req.auth.userId }, { upsert: true, session });
     return next;
   });
@@ -67,8 +68,9 @@ router.put("/international-shipping-config", endpoint(async (req, res) => {
 }));
 router.put("/international-products/:id", endpoint(async (req, res) => {
   admin(req); validId(req.params.id);
-  if (!/usa/i.test(req.dbName) || typeof req.body.exportToEthiopia !== "boolean") throw conflict("Set explicit export eligibility for a USA product.");
-  const product = await req.dbModels.Product.findByIdAndUpdate(req.params.id, { exportToEthiopia: req.body.exportToEthiopia }, { new: true });
+  const field = international.route(international.directionForDatabase(req.dbName)).exportField;
+  if (typeof req.body[field] !== "boolean") throw conflict("Set explicit export eligibility for the selected region's product.");
+  const product = await req.dbModels.Product.findByIdAndUpdate(req.params.id, { [field]: req.body[field] }, { new: true });
   if (!product) throw conflict("Product not found.");
   res.json(product);
 }));
@@ -159,8 +161,10 @@ router.post("/checkouts/:id/payment", endpoint(async (req, res) => {
     if (group.status !== "placed") throw conflict("This reservation expired. Request a new quote.");
     return res.json({ group: serial(group) });
   }
-  const result = await ensureIntent(req.dbModels, group, req.dbName);
-  res.json({ group: serial(result.group), clientSecret: result.clientSecret });
+  const result = group.paymentMethod === "telebirr" ?
+    await require("../helpers/checkout-telebirr").start(req.dbModels, group, req.body?.clientType === "mobile" ? "mobile" : "web") :
+    await ensureIntent(req.dbModels, group, req.dbName);
+  res.json({ group: serial(result.group), clientSecret: result.clientSecret, paymentUrl: result.paymentUrl });
 }));
 router.post("/checkouts/:id/confirm", endpoint(async (req, res) => {
   const group = await ownedGroup(req);
@@ -189,7 +193,7 @@ router.post("/checkouts/:id/bank-confirm", endpoint(async (req, res) => {
   admin(req);
   const group = await ownedGroup(req);
   if (group.international) {
-    if (group.paymentMethod !== "bank") throw conflict("International checkout requires ETB bank verification.");
+    if (group.paymentMethod !== "bank") throw conflict("Only international bank-transfer checkouts require Admin bank verification.");
     res.json(serial(await activate(req.dbModels, group._id, { bankVerified: true })));
     return;
   }
@@ -231,11 +235,11 @@ router.post("/checkouts/:id/deliveries/:orderId/manual-refund", endpoint(async (
   admin(req);
   const group = await ownedGroup(req);
   validId(req.params.orderId);
-  if (group.paymentMethod !== "bank" || typeof req.body.reference !== "string" || !req.body.reference.trim()) throw conflict("A bank refund reference is required.");
+  if (!["bank", "telebirr"].includes(group.paymentMethod) || typeof req.body.reference !== "string" || !req.body.reference.trim()) throw conflict("A completed bank or Telebirr refund reference is required.");
   const order = await req.dbModels.Order.findOneAndUpdate({
     _id: req.params.orderId, checkoutGroup: group._id, fulfillmentStatus: "cancelled", refundStatus: "pending",
   }, { refundStatus: "refunded", refundId: req.body.reference.trim().slice(0, 300) }, { new: true });
-  if (!order) throw conflict("No pending bank refund found.");
+  if (!order) throw conflict("No pending manual refund found.");
   res.json(order);
 }));
 

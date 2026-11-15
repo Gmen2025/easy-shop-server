@@ -32,7 +32,7 @@ function customerCoordinates(latitude, longitude) {
 }
 
 async function nearestInventoryForProduct(models, productId, coordinates) {
-  const stores = await models.Store.find({ approvalStatus: "approved", isOpen: { $ne: false } }).lean();
+  const stores = await models.Store.find({ approvalStatus: "approved", isOpen: { $ne: false }, depositBlocked: { $ne: true } }).lean();
   const inventory = await models.StoreInventory.find({
     product: productId,
     store: { $in: stores.map((store) => store._id) },
@@ -108,7 +108,7 @@ function normalizeLines(lines) {
 }
 
 async function eligibleStores(models, lines, { customerLocation, storefrontId, excluded = [], session, allowClosed = false } = {}) {
-  const filter = { approvalStatus: "approved", ...(!allowClosed ? { isOpen: { $ne: false } } : {}), _id: { $nin: excluded } };
+  const filter = { approvalStatus: "approved", depositBlocked: { $ne: true }, ...(!allowClosed ? { isOpen: { $ne: false } } : {}), _id: { $nin: excluded } };
   if (storefrontId) {
     const selected = await models.Store.findById(storefrontId).session(session || null).lean();
     if (!selected) {
@@ -139,7 +139,7 @@ async function defaultPickupStore(models, lines, session) {
   const setting = await models.SiteSetting.findOne({ key: CONFIG_KEY }).session(session || null).lean();
   const storeId = setting?.inventoryConfig?.defaultStoreId;
   if (!storeId) return null;
-  const store = await models.Store.findOne({ _id: storeId, approvalStatus: "approved" }).session(session || null).lean();
+  const store = await models.Store.findOne({ _id: storeId, approvalStatus: "approved", depositBlocked: { $ne: true } }).session(session || null).lean();
   if (!store) return null;
   const stocks = await models.StoreInventory.find({ store: storeId, product: { $in: lines.map((line) => line.product) } })
     .session(session || null).lean();
@@ -155,7 +155,7 @@ async function reserve(models, store, lines, session, { defaultFallback = false,
     await models.SiteSetting.updateOne({ key: CONFIG_KEY }, { $inc: { reservationVersion: 1 } }, { session });
   }
   const availableStore = await models.Store.updateOne({
-    _id: store, approvalStatus: "approved", ...(!defaultFallback && !allowClosed ? { isOpen: { $ne: false } } : {}),
+    _id: store, approvalStatus: "approved", depositBlocked: { $ne: true }, ...(!defaultFallback && !allowClosed ? { isOpen: { $ne: false } } : {}),
   }, { $inc: { inventoryVersion: 1 } }, { session });
   if (availableStore.modifiedCount !== 1) throw conflict("The assigned store is no longer available. Refresh checkout.");
   for (const line of lines) {

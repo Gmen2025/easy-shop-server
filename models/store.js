@@ -43,6 +43,10 @@ const storeSchema = new mongoose.Schema({
   // true for company-run fulfillment locations created directly by an admin (not a partner-owned store).
   isCompanyOwned: { type: Boolean, default: false },
   financeFees: { type: mongoose.Schema.Types.Mixed, default: {} },
+  walletBalance: { type: Number, default: 0 },
+  depositPolicy: { type: mongoose.Schema.Types.Mixed, default: { enabled: false, lowBalance: 50, minimumBalance: 0 } },
+  depositBlocked: { type: Boolean, default: false },
+  depositNotice: { type: String, default: "" },
   payoutsEnabled: { type: Boolean, default: false },
   financeVersion: { type: Number, default: 0 },
   location: {

@@ -5,6 +5,7 @@ const { sendPushToUser } = require("../helpers/push-notify");
 const { notifyStoreMutation } = require("../helpers/store-inventory");
 const { inventoryEnabled } = require("../helpers/store-inventory");
 const { stockInput, createStoreProduct, addStoreListing } = require("../helpers/operator-products");
+const wallet = require("../helpers/participant-wallet");
 
 const handle = (action) => async (req, res) => {
   try { await action(req, res); }
@@ -39,10 +40,52 @@ function publicAccount(value, kind) {
     _id: value._id, kind, name: value.name, email: value.email, phone: value.phone,
     isCompanyOwned: value.isCompanyOwned, payoutsEnabled: value.payoutsEnabled,
     approvalStatus: value.approvalStatus,
+    depositPolicy: wallet.policy(value.depositPolicy), depositBlocked: Boolean(value.depositBlocked),
     financeFees: Object.fromEntries((kind === "store" ? ["products"] : ["delivery", "rides"]).map((category) =>
       [category, finance.allocation(0, value, category).fee])),
   };
 }
+
+router.get("/wallet-config", handle(async (req, res) => {
+  if (!req.auth?.userId) throw finance.fail("Sign in required.", 401);
+  res.json({ enabled: await wallet.config(req.dbModels) });
+}));
+router.put("/wallet-config", requireAdmin, handle(async (req, res) => {
+  res.json(await wallet.setConfig(req.dbModels, req.body.enabled, req.auth.userId));
+}));
+router.put("/accounts/:kind/:accountId/wallet/settings", requireAdmin, handle(async (req, res) => {
+  const participant = await account(req);
+  const updated = await wallet.setPolicy(req.dbModels, req.params.kind, participant._id, req.body);
+  res.json({ account: publicAccount(updated, req.params.kind) });
+}));
+router.post("/accounts/:kind/:accountId/wallet/deposits", handle(async (req, res) => {
+  const participant = await account(req);
+  const transaction = await wallet.deposit(req.dbModels, req.params.kind, participant._id, req.dbName, req.body);
+  const result = await wallet.start(req.dbModels, transaction, req.dbName);
+  if (!result) throw wallet.fail("Deposit changed; reload its saved status before paying.", 409);
+  res.status(201).json({ transaction: result, paymentUrl: result.paymentUrl });
+}));
+router.post("/accounts/:kind/:accountId/wallet/deposits/:depositId/start", handle(async (req, res) => {
+  const participant = await account(req);
+  if (!mongoose.isValidObjectId(req.params.depositId)) throw wallet.fail("Invalid deposit id.");
+  const transaction = await req.dbModels.ParticipantWalletTransaction.findOne({
+    _id: req.params.depositId, kind: req.params.kind, account: participant._id, type: "deposit",
+  });
+  if (!transaction) throw wallet.fail("Deposit not found.", 404);
+  const result = await wallet.start(req.dbModels, transaction, req.dbName);
+  if (!result) throw wallet.fail("Deposit changed. Reload before paying.", 409);
+  res.json({ transaction: result, paymentUrl: result.paymentUrl });
+}));
+router.post("/accounts/:kind/:accountId/wallet/deposits/:depositId/verify", handle(async (req, res) => {
+  const participant = await account(req);
+  if (!mongoose.isValidObjectId(req.params.depositId)) throw wallet.fail("Invalid deposit id.");
+  res.json({ transaction: await wallet.verify(req.dbModels, req.params.depositId, req.params.kind,
+    participant._id, req.dbName, req.body, req.auth) });
+}));
+router.post("/accounts/:kind/:accountId/wallet/charges", requireAdmin, handle(async (req, res) => {
+  const participant = await account(req);
+  res.json({ transaction: await wallet.charge(req.dbModels, req.params.kind, participant._id, req.dbName, req.body, req.auth.userId) });
+}));
 
 router.get("/admin/report", requireAdmin, handle(async (req, res) => {
   await finance.reconcileFinance(req.dbModels);
@@ -56,7 +99,7 @@ router.get("/admin/report", requireAdmin, handle(async (req, res) => {
 }));
 
 router.get("/admin/accounts", requireAdmin, handle(async (req, res) => {
-  const fields = "_id name email phone owner user isCompanyOwned payoutsEnabled financeFees commissionRate approvalStatus";
+  const fields = "_id name email phone owner user isCompanyOwned payoutsEnabled financeFees commissionRate approvalStatus depositPolicy depositBlocked";
   const [stores, drivers] = await Promise.all([
     req.dbModels.Store.find({}).select(fields).populate("owner", "name email").sort({ name: 1 }).lean(),
     req.dbModels.Driver.find({}).select(fields).populate("user", "name email").sort({ name: 1 }).lean(),
@@ -132,8 +175,9 @@ router.post("/accounts/store/:accountId/inventory/:productId", requireAdmin, han
 }));
 
 router.get("/accounts/:kind/:accountId", handle(async (req, res) => {
-  const participant = await account(req);
+  let participant = await account(req);
   await finance.reconcileFinance(req.dbModels);
+  participant = await wallet.accountModel(req.dbModels, req.params.kind).findById(participant._id);
   const data = await finance.participantFinance(req.dbModels, req.params.kind, participant._id);
   let products = [];
   let inventory = [];
@@ -152,7 +196,21 @@ router.get("/accounts/:kind/:accountId", handle(async (req, res) => {
     Object.fromEntries(["ETB", "USD"].map((currency) => [currency, finance.summarizeEntries(data.entries.filter((entry) =>
       entry.currency === currency && new Date(entry.completedAt).getTime() >= now - days * 86400000 &&
       new Date(entry.completedAt).getTime() <= now))]))]));
+  const [walletEnabled, transactions, paymentSettings, legacyTransactions, bankInfo] = await Promise.all([
+    wallet.config(req.dbModels),
+    req.dbModels.ParticipantWalletTransaction.find({ kind: req.params.kind, account: participant._id }).sort({ createdAt: -1 }).limit(100).lean(),
+    require("../helpers/payment-settings").readPaymentSettings(req.dbModels),
+    req.params.kind === "driver" ? req.dbModels.DriverWalletTransaction.find({ driver: participant._id }).sort({ createdAt: -1 }).limit(20).lean() : [],
+    req.dbModels.SiteSetting.findOne({ key: "bank-account-info" }).lean(),
+  ]);
+  const walletCurrency = wallet.currencyFor(req.dbName);
   res.json({ ...data, entries: data.entries.slice(0, 100), payouts: data.payouts.slice(0, 100), periods,
+    wallet: { enabled: walletEnabled, currency: walletCurrency, balance: wallet.balanceMinor(participant) / 100,
+      state: wallet.state(participant, walletEnabled), transactions, legacyTransactions,
+      bankAccounts: (bankInfo?.bankAccounts || []).filter((entry) => entry.isActive !== false && (entry.currency || walletCurrency) === walletCurrency),
+      methods: { bank: paymentSettings.methods.bank,
+        card: walletCurrency === "USD" && paymentSettings.methods.card && Boolean(require("./stripe").getStripe(req.dbName).stripe) && /^https:\/\//.test(process.env.WALLET_PAYMENT_RETURN_URL || ""),
+        telebirr: walletCurrency === "ETB" && paymentSettings.methods.telebirr && require("../helpers/checkout-telebirr").available() } },
     account: publicAccount(participant, req.params.kind), products, inventory, locations,
     automaticPaymentsAvailable: false, schedule: "Weekly requests on Monday (UTC). All payments require an admin-confirmed manual transfer." });
 }));

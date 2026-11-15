@@ -159,6 +159,21 @@ test("ride availability blocks quotes and stale quote requests, but preserves di
   }
 });
 
+test("deposit-blocked drivers cannot take new rides but can finish already accepted passengers", async () => {
+  const f = fixture(), active = await assigned(f);
+  f.tables.Driver[0].depositBlocked = true;
+  const next = await f.booking();
+  await service.requestRide(f.models, next._id, userId);
+  await service.dispatchRide(f.models, next._id, { lookup });
+  assert.equal((await f.models.Ride.findById(next._id)).status, "waiting");
+  await service.completeStop(f.models, driverId, `${active._id}:0`, { lookup });
+  const now = new Date(Date.now() + 20 * 60000);
+  f.tables.Driver[0].rideLocationUpdatedAt = now;
+  const completed = await service.completeStop(f.models, driverId, `${active._id}:1`, { lookup, now });
+  assert.equal(completed.status, "completed");
+  assert.equal(f.tables.Driver[0].depositBlocked, true);
+});
+
 test("pickup ETA uses driver GPS and every pending stop through the owner's pickup without leaking shared stops", async () => {
   const f = fixture(), ride = await assigned(f);
   const trip = f.tables.RideTrip[0];

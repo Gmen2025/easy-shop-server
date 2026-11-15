@@ -62,6 +62,7 @@ function fixture({ activeOrder = false, includeBusinessProfiles = false } = {}) 
     Product: model("Product"),
     StoreDispatch: model("StoreDispatch"),
     DriverWalletTransaction: model("DriverWalletTransaction"),
+    ParticipantWalletTransaction: model("ParticipantWalletTransaction"),
   };
   return { models, calls, isDeleted: () => !userExists };
 }
@@ -74,6 +75,16 @@ test("Cloudinary account media URLs are parsed and other hosts are rejected", ()
   assert.throws(() => cloudinaryAsset("https://example.com/photo.jpg", "test-cloud"), { status: 409 });
 });
 
+test("store deposits and unresolved gateway top-ups must be reconciled before account deletion", async () => {
+  const f = fixture({ includeBusinessProfiles: true });
+  f.models.Store.find = () => query([{ _id: storeId, walletBalance: 20 }]);
+  await assert.rejects(deleteAccount(f.models, userId), { status: 409 });
+  assert.equal(f.isDeleted(), false);
+  f.models.Store.find = () => query([{ _id: storeId, walletBalance: 0 }]);
+  f.models.ParticipantWalletTransaction.exists = () => query({ _id: "unverified" });
+  await assert.rejects(deleteAccount(f.models, userId), { status: 409 });
+  assert.equal(f.isDeleted(), false);
+});
 test("account deletion is blocked while customer orders are active", async () => {
   const f = fixture({ activeOrder: true });
   await assert.rejects(deleteAccount(f.models, userId), {

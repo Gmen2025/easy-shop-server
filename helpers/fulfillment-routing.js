@@ -13,6 +13,8 @@ function getCompanyDriverEligibility(driver, activeOrders, maxActiveOrders = 3) 
     if (driver.suspensionReason?.trim()) {
       message += ` Reason: ${driver.suspensionReason.trim()}`;
     }
+  } else if (driver.depositBlocked) {
+    message = "Your deposit balance is too low. Top up and verify the deposit before accepting new work.";
   } else if (driver.exclusiveDelivery) {
     message = "Complete your vehicle-sized delivery before accepting another load.";
   } else if (driver.activeRideTrip || driver.pendingRideOffer || driver.serviceModes?.delivery === false) {
@@ -28,7 +30,7 @@ function getCompanyDriverEligibility(driver, activeOrders, maxActiveOrders = 3) 
     isSuspended: Boolean(driver.isSuspended),
     activeOrders,
     maxActiveOrders,
-    eligible: driver.approvalStatus === "approved" && !driver.isSuspended && !driver.exclusiveDelivery &&
+    eligible: driver.approvalStatus === "approved" && !driver.isSuspended && !driver.depositBlocked && !driver.exclusiveDelivery &&
       !driver.activeRideTrip && !driver.pendingRideOffer && driver.serviceModes?.delivery !== false &&
       available && activeOrders < maxActiveOrders,
     message,
@@ -62,11 +64,12 @@ function rankByDistance(candidates, coordinates) {
 }
 
 async function resolvePickupStore(Store, { customerLocation, preferredStoreId, excludedStoreIds = [] } = {}) {
-  const stores = await Store.find({ approvalStatus: "approved", isOpen: { $ne: false } }).lean();
+  const stores = await Store.find({ approvalStatus: "approved", isOpen: { $ne: false }, depositBlocked: { $ne: true } }).lean();
   return selectPickupStore(stores.filter((store) => !excludedStoreIds.some((id) => String(id) === String(store._id))), { customerLocation, preferredStoreId });
 }
 
 function selectPickupStore(stores, { customerLocation, preferredStoreId } = {}) {
+  stores = stores.filter((store) => !store.depositBlocked);
   const preferred = stores.find((store) => String(store._id) === String(preferredStoreId));
   const coordinates = getCoordinates(customerLocation) || getCoordinates(preferred?.location);
   const partners = rankByDistance(stores.filter((store) => !store.isCompanyOwned), coordinates)
@@ -81,7 +84,7 @@ function selectPickupStore(stores, { customerLocation, preferredStoreId } = {}) 
 }
 
 async function reconcileUnassignedPickupStores({ Store, Order }) {
-  const stores = await Store.find({ approvalStatus: "approved", isOpen: { $ne: false } }).lean();
+  const stores = await Store.find({ approvalStatus: "approved", isOpen: { $ne: false }, depositBlocked: { $ne: true } }).lean();
   if (!stores.length) return 0;
   const scope = {
     inventoryManaged: { $ne: true },
@@ -112,7 +115,7 @@ async function reconcileUnassignedPickupStores({ Store, Order }) {
 
 function isCompanyFulfillableProduct(product, companyLocation, radiusMeters = STORE_RADIUS_METERS) {
   const store = product.store;
-  if (!store || store.isCompanyOwned || store.isOpen === false ||
+  if (!store || store.isCompanyOwned || store.isOpen === false || store.depositBlocked ||
     (store.approvalStatus && store.approvalStatus !== "approved")) return true;
   return distanceMeters(getCoordinates(companyLocation), getCoordinates(store.location)) > radiusMeters;
 }
@@ -123,6 +126,7 @@ async function findCompanyDriver(Driver, Order, coordinates, { excludedDriverIds
     isCompanyOwned: true,
     approvalStatus: "approved",
     isSuspended: { $ne: true },
+    depositBlocked: { $ne: true },
     ...(!allowUnavailable ? {
       $or: [{ isAvailable: true }, { availabilityStatus: true }],
     } : {}),
@@ -131,7 +135,7 @@ async function findCompanyDriver(Driver, Order, coordinates, { excludedDriverIds
   const eligible = [];
   const waiting = [];
   for (const driver of drivers) {
-    if (driver.isSuspended || driver.exclusiveDelivery || driver.activeRideTrip || driver.pendingRideOffer ||
+    if (driver.isSuspended || driver.depositBlocked || driver.exclusiveDelivery || driver.activeRideTrip || driver.pendingRideOffer ||
         driver.serviceModes?.delivery === false) continue;
     if (!vehicleMatches(driver, requiredVehicle)) continue;
     waiting.push(driver);

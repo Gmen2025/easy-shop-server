@@ -12,7 +12,7 @@ function getTelebirrTimeoutMs() {
 
 exports.createOrder = async (req, res) => {
   try {
-    const { title, amount, clientType, platform } = req.body;
+    const { title, amount, clientType, platform, merchantOrderId, timeoutExpress } = req.body;
     
     // Validate inputs
     if (!title || typeof title !== 'string' || title.trim().length === 0) {
@@ -36,7 +36,9 @@ exports.createOrder = async (req, res) => {
       fabricToken,
       title,
       amount,
-      clientType || platform
+      clientType || platform,
+      merchantOrderId,
+      timeoutExpress
     );
     
     if (!createOrderResult || !createOrderResult.biz_content || !createOrderResult.biz_content.prepay_id) {
@@ -65,9 +67,9 @@ exports.createOrder = async (req, res) => {
   }
 };
 
-exports.requestCreateOrder = async (fabricToken, title, amount, clientType) => {
+exports.requestCreateOrder = async (fabricToken, title, amount, clientType, merchantOrderId, timeoutExpress) => {
  try {
-  let reqObject = createRequestObject(title, amount, clientType);
+  let reqObject = createRequestObject(title, amount, clientType, merchantOrderId, timeoutExpress);
     
     const response = await axios.post(
       config.baseUrl + "/payment/v1/merchant/preOrder",
@@ -89,7 +91,7 @@ exports.requestCreateOrder = async (fabricToken, title, amount, clientType) => {
   }
 };
 
-function createRequestObject(title, amount, clientType) {
+function createRequestObject(title, amount, clientType, merchantOrderId, timeoutExpress) {
   const useMockService = process.env.USE_MOCK_TELEBIRR === 'true' || process.env.USE_MOCK_TELEBIRR === undefined ;
   const notifyUrl = String(config.notifyUrl || '').trim();
 
@@ -107,12 +109,12 @@ function createRequestObject(title, amount, clientType) {
     notify_url: notifyUrl,
     appid: config.merchantAppId,
     merch_code: config.merchantCode,
-    merch_order_id: createMerchantOrderId(),
+    merch_order_id: merchantOrderId || createMerchantOrderId(),
     trade_type: "Checkout",
     title: title,
     total_amount: amount,
     trans_currency: "ETB",
-    timeout_express: "120m",
+    timeout_express: timeoutExpress || "120m",
     business_type: "BuyGoods",
     payee_identifier: config.merchantCode,
     payee_identifier_type: "04",

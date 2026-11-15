@@ -10,8 +10,6 @@ const {
   getCommissionRate,
   getLowBalanceThreshold,
   getSuspendThreshold,
-  checkBalanceThresholds,
-  reinstateDriverIfEligible,
   restoreCompanyDriversSuspendedForBalance,
 } = require("../helpers/driver-wallet");
 const { buildDriverOrderSummary } = require("../helpers/driver-view");
@@ -846,43 +844,9 @@ operatorGet(router, "/me/wallet", "/admin/:accountId/wallet", async (req, res) =
   }
 });
 
-// Drivers submit a top-up claim (e.g. mobile-money/bank transfer reference); an admin
-// must approve it before the balance is credited, so a driver can never self-credit.
-router.post("/me/wallet/deposit-requests", async (req, res) => {
-  try {
-    const userId = req.auth?.userId;
-    const { Driver, DriverWalletTransaction } = req.dbModels;
-    if (!userId) {
-      return res.status(401).json({ success: false, message: "Unauthorized" });
-    }
-
-    const driver = await Driver.findOne({ user: userId });
-    if (!driver) {
-      return res.status(404).json({ success: false, message: "Driver profile not found." });
-    }
-
-    const amount = Number(req.body?.amount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      return res.status(400).json({ success: false, message: "amount must be a positive number." });
-    }
-
-    const transaction = await DriverWalletTransaction.create({
-      driver: driver._id,
-      type: "deposit",
-      amount,
-      balanceAfter: driver.walletBalance,
-      provider: String(req.body?.provider || "").trim(),
-      reference: String(req.body?.reference || "").trim(),
-      notes: String(req.body?.notes || "").trim(),
-      status: "pending",
-    });
-
-    return res.status(201).json({ success: true, transaction });
-  } catch (error) {
-    console.error("Driver deposit request error:", error);
-    return res.status(500).json({ success: false, message: "Unable to submit deposit request right now." });
-  }
-});
+const legacyWalletReplaced = (req, res) => res.status(410).json({ success: false,
+  message: "Use the Income dashboard deposit wallet. New top-ups and adjustments require verified deposits or itemized Admin fees." });
+router.post("/me/wallet/deposit-requests", legacyWalletReplaced);
 
 router.get("/wallet/deposit-requests", requireAdmin, async (req, res) => {
   try {
@@ -902,113 +866,23 @@ router.get("/wallet/deposit-requests", requireAdmin, async (req, res) => {
   }
 });
 
-router.put("/wallet/deposit-requests/:transactionId/approve", requireAdmin, async (req, res) => {
+const legacyDepositReview = (action) => async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.transactionId)) {
       return res.status(400).json({ success: false, message: "Invalid transaction id." });
     }
 
-    const { Driver, DriverWalletTransaction, User } = req.dbModels;
-    const transaction = await DriverWalletTransaction.findById(req.params.transactionId);
-    if (!transaction || transaction.type !== "deposit" || transaction.status !== "pending") {
-      return res.status(404).json({ success: false, message: "Pending deposit request not found." });
-    }
-
-    const driver = await Driver.findByIdAndUpdate(
-      transaction.driver,
-      { $inc: { walletBalance: transaction.amount } },
-      { new: true }
-    );
-    if (!driver) {
-      return res.status(404).json({ success: false, message: "Driver not found." });
-    }
-
-    transaction.status = "completed";
-    transaction.balanceAfter = driver.walletBalance;
-    transaction.createdBy = req.auth.userId;
-    await transaction.save();
-
-    await reinstateDriverIfEligible({ Driver, User, driver });
-
-    return res.status(200).json({ success: true, driver, transaction });
+    const transaction = await require("../helpers/participant-wallet").verifyLegacy(req.dbModels,
+      req.params.transactionId, req.dbName, action, req.auth.userId, req.body?.confirmedReceived);
+    return res.json({ success: true, transaction });
   } catch (error) {
-    console.error("Driver deposit approval error:", error);
-    return res.status(500).json({ success: false, message: "Unable to approve deposit right now." });
+    console.error("Legacy wallet verification failed:", error.message);
+    return res.status(error.status || 500).json({ success: false, message: error.status ? error.message : "Unable to verify the legacy deposit." });
   }
-});
-
-router.put("/wallet/deposit-requests/:transactionId/reject", requireAdmin, async (req, res) => {
-  try {
-    if (!mongoose.isValidObjectId(req.params.transactionId)) {
-      return res.status(400).json({ success: false, message: "Invalid transaction id." });
-    }
-
-    const { DriverWalletTransaction } = req.dbModels;
-    const transaction = await DriverWalletTransaction.findById(req.params.transactionId);
-    if (!transaction || transaction.status !== "pending") {
-      return res.status(404).json({ success: false, message: "Pending deposit request not found." });
-    }
-
-    transaction.status = "failed";
-    transaction.createdBy = req.auth.userId;
-    if (req.body?.reason) {
-      transaction.notes = `${transaction.notes ? `${transaction.notes} | ` : ""}Rejected: ${req.body.reason}`;
-    }
-    await transaction.save();
-
-    return res.status(200).json({ success: true, transaction });
-  } catch (error) {
-    console.error("Driver deposit rejection error:", error);
-    return res.status(500).json({ success: false, message: "Unable to reject deposit right now." });
-  }
-});
-
-// Trusted admin path for manual credits/debits (cash top-ups, corrections). Positive
-// amount credits the wallet, negative amount debits it (e.g. correcting an overpayment).
-router.post("/:id/wallet/adjust", requireAdmin, async (req, res) => {
-  try {
-    if (!mongoose.isValidObjectId(req.params.id)) {
-      return res.status(400).json({ success: false, message: "Invalid Driver Id" });
-    }
-
-    const { Driver, DriverWalletTransaction, User } = req.dbModels;
-    const amount = Number(req.body?.amount);
-    if (!Number.isFinite(amount) || amount === 0) {
-      return res.status(400).json({ success: false, message: "amount must be a non-zero number." });
-    }
-
-    const driver = await Driver.findByIdAndUpdate(
-      req.params.id,
-      { $inc: { walletBalance: amount } },
-      { new: true }
-    );
-    if (!driver) {
-      return res.status(404).json({ success: false, message: "Driver not found." });
-    }
-
-    await DriverWalletTransaction.create({
-      driver: driver._id,
-      type: amount > 0 ? "deposit" : "adjustment",
-      amount: Math.abs(amount),
-      balanceAfter: driver.walletBalance,
-      provider: "admin",
-      reference: String(req.body?.reference || "").trim(),
-      notes: String(req.body?.notes || "Manual admin adjustment"),
-      createdBy: req.auth.userId,
-    });
-
-    if (amount > 0) {
-      await reinstateDriverIfEligible({ Driver, User, driver });
-    } else {
-      await checkBalanceThresholds({ User, driver });
-    }
-
-    return res.status(200).json({ success: true, driver });
-  } catch (error) {
-    console.error("Driver wallet adjustment error:", error);
-    return res.status(500).json({ success: false, message: "Unable to adjust wallet right now." });
-  }
-});
+};
+router.put("/wallet/deposit-requests/:transactionId/approve", requireAdmin, legacyDepositReview("approve"));
+router.put("/wallet/deposit-requests/:transactionId/reject", requireAdmin, legacyDepositReview("reject"));
+router.post("/:id/wallet/adjust", requireAdmin, legacyWalletReplaced);
 
 router.get("/:id/wallet/transactions", requireAdmin, async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) {

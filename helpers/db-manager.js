@@ -21,6 +21,7 @@ const { authRecordSchema, authIdentitySchema } = require('../models/auth-record'
 const { notificationSchema } = require('../models/notification');
 const { financeEntrySchema } = require('../models/finance-entry');
 const { financialWorkspaceSchema } = require('../models/financial-workspace');
+const { participantWalletTransactionSchema } = require('../models/participant-wallet-transaction');
 
 const DEFAULT_DB_NAME = process.env.DEFAULT_DB_NAME || 'E_Shopping';
 const DEFAULT_ALLOWED_DBS = ['E_Shopping', 'E_Shopping_2', 'E_ShopUSA', 'E_ShoppingUSA'];
@@ -119,6 +120,7 @@ function getModelsForDb(dbName) {
     Payout: db.models.Payout || db.model('Payout', payoutSchema),
     FinanceEntry: db.models.FinanceEntry || db.model('FinanceEntry', financeEntrySchema),
     FinancialWorkspace: db.models.FinancialWorkspace || db.model('FinancialWorkspace', financialWorkspaceSchema),
+    ParticipantWalletTransaction: db.models.ParticipantWalletTransaction || db.model('ParticipantWalletTransaction', participantWalletTransactionSchema),
     CustomerFinancialWorkspace: db.models.CustomerFinancialWorkspace || db.model('CustomerFinancialWorkspace', financialWorkspaceSchema),
     ServiceRequest: db.models.ServiceRequest || db.model('ServiceRequest', serviceRequestSchema),
     DriverWalletTransaction:

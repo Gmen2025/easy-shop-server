@@ -12,6 +12,8 @@ const financeEntrySchema = new mongoose.Schema({
   platformMinor: { type: Number, required: true },
   netMinor: { type: Number, required: true },
   fee: { type: mongoose.Schema.Types.Mixed },
+  walletEligible: { type: Boolean, default: false },
+  walletFeeMinor: { type: Number, default: 0 },
   collected: { type: Boolean, default: false },
   cash: { type: Boolean, default: false },
   voided: { type: Boolean, default: false },

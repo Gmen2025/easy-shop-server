@@ -172,7 +172,7 @@ async function findBatchPartnerDriver(Order, Driver, { storeCoordinates, dropCoo
     if (activeCount >= MAX_ACTIVE_ORDERS_PER_DRIVER) continue;
 
     const driver = await Driver.findOne({
-      _id: driverId, isAvailable: true, isSuspended: { $ne: true },
+      _id: driverId, isAvailable: true, isSuspended: { $ne: true }, depositBlocked: { $ne: true },
       isCompanyOwned: { $ne: true }, approvalStatus: "approved",
       location: { $near: {
         $geometry: { type: "Point", coordinates: storeCoordinates },
@@ -202,6 +202,7 @@ async function findNearestAvailableDriver(Driver, Order, storeCoordinates, exclu
     },
     $or: [{ isAvailable: true }, { availabilityStatus: true }],
     isSuspended: { $ne: true },
+    depositBlocked: { $ne: true },
     isCompanyOwned: { $ne: true },
     approvalStatus: "approved",
   };
@@ -431,7 +432,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
     }
     if (options.companyDriverId) {
       const activeCount = await countActiveOrders(Order, candidate._id);
-      if (candidate.approvalStatus !== "approved" || candidate.isSuspended ||
+      if (candidate.approvalStatus !== "approved" || candidate.isSuspended || candidate.depositBlocked ||
           !(candidate.isAvailable === true || candidate.availabilityStatus === true) ||
           !vehicleMatches(candidate, order.requiredVehicle) ||
           activeCount >= (order.requiredVehicle ? 1 : MAX_ACTIVE_ORDERS_PER_DRIVER)) {
@@ -476,6 +477,7 @@ async function assignDriverToOrder(orderId, ioInstance, options = {}) {
           _id: candidate._id,
           $or: [{ isAvailable: true }, { availabilityStatus: true }],
           isSuspended: { $ne: true },
+          depositBlocked: { $ne: true },
           approvalStatus: "approved",
           exclusiveDelivery: null,
           activeRideTrip: null,

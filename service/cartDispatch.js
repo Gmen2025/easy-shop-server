@@ -52,7 +52,7 @@ async function driverCapacity(models, driver, incoming, maxCarts, session) {
   const active = await models.Order.find({ driver: driver._id, deliveryStatus: { $in: activeStatuses } }).session(session).lean();
   const count = new Set(active.map(unit)).size;
   if (count >= maxCarts || driver.exclusiveDelivery || driver.activeRideTrip || driver.pendingRideOffer ||
-    driver.serviceModes?.delivery === false || driver.isSuspended || driver.approvalStatus !== "approved" ||
+    driver.serviceModes?.delivery === false || driver.isSuspended || driver.depositBlocked || driver.approvalStatus !== "approved" ||
     !incoming.store && vehicleName(driver) !== incoming.cartRoute.vehicle) return false;
   const vehicle = incoming.store ? vehicleName(driver) : incoming.cartRoute.vehicle;
   const config = (await models.SiteSetting.findOne({ key: "vehicle-delivery-config" }).session(session).lean())?.vehicleDeliveryConfig;
@@ -93,7 +93,7 @@ async function assign(models, order, candidate, maxCarts, company, shared = fals
       throw conflict("This complete cart is no longer offered to you.");
     }
     const driver = await models.Driver.findOneAndUpdate({ _id: candidate._id, approvalStatus: "approved",
-      isSuspended: { $ne: true }, exclusiveDelivery: null, activeRideTrip: null, pendingRideOffer: null,
+      isSuspended: { $ne: true }, depositBlocked: { $ne: true }, exclusiveDelivery: null, activeRideTrip: null, pendingRideOffer: null,
       "serviceModes.delivery": { $ne: false }, $or: [{ isAvailable: true }, { availabilityStatus: true }] },
     { $inc: { dispatchVersion: 1 } }, { new: true, session });
     if (!driver || !await driverCapacity(models, driver, group, maxCarts, session)) throw conflict("Driver capacity changed. Finish a cart or choose a larger vehicle.");
@@ -162,7 +162,7 @@ async function dispatch(models, order, io, { companyDriverId, sharedDriverId, ma
     if (!driver || id(offered) !== id(driver)) throw conflict("This complete cart is not offered to you.");
     candidates = [driver];
   } else {
-    candidates = await models.Driver.find({ approvalStatus: "approved", isSuspended: { $ne: true },
+    candidates = await models.Driver.find({ approvalStatus: "approved", isSuspended: { $ne: true }, depositBlocked: { $ne: true },
       $or: [{ isAvailable: true }, { availabilityStatus: true }, { isCompanyOwned: true }] });
     candidates = rankDrivers(candidates, route.stops[0].location, live);
   }
@@ -225,7 +225,7 @@ async function ensureCompanyOffer(models, order, maxCarts, { includeScheduled = 
   if (!ready(orders, { includeScheduled }) || group.routeDriver || orders.some((entry) => entry.companyOfferDriver)) return;
   const pickup = assignmentRoute(group, liveOrders(orders)).stops[0]?.location;
   // List recovery cannot contact partners or await their acceptance.
-  const candidates = await models.Driver.find({ isCompanyOwned: true, approvalStatus: "approved", isSuspended: { $ne: true } });
+  const candidates = await models.Driver.find({ isCompanyOwned: true, approvalStatus: "approved", isSuspended: { $ne: true }, depositBlocked: { $ne: true } });
   const eligible = rankDrivers(candidates, pickup, liveOrders(orders));
   for (const driver of eligible) {
     if (!await driverCapacity(models, driver, group, maxCarts)) continue;

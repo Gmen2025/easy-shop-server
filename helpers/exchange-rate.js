@@ -58,10 +58,10 @@ function dollars(etb, snapshot) {
 }
 function paymentTotal(group) { return group.paymentAmount ?? group.totalPrice; }
 function paymentForOrder(order) { return order.paymentAmount ?? order.totalPrice; }
-function allocatePayment(deliveries, snapshot, direction) {
+function allocatePayment(deliveries, snapshot, direction, allowZero = false) {
   const totalEtb = deliveries.reduce((sum, delivery) => sum + Math.round(delivery.totalPrice * 100), 0) / 100;
   const target = Math.round((direction === "usd-to-etb" ? birr(totalEtb, snapshot) : dollars(totalEtb, snapshot)) * 100);
-  if (target <= 0) throw fail("The converted checkout is less than one payment cent.");
+  if (target < 0 || target === 0 && !allowZero) throw fail("The converted checkout is less than one payment cent.");
   const values = deliveries.map((delivery, index) => {
     const raw = (direction === "usd-to-etb" ? delivery.totalPrice * snapshot.birrPerUsd : delivery.totalPrice / snapshot.birrPerUsd) * 100;
     return { index, amount: Math.floor(raw), remainder: raw - Math.floor(raw) };
@@ -73,7 +73,7 @@ function allocatePayment(deliveries, snapshot, direction) {
   for (const entry of values) deliveries[entry.index].paymentAmount = entry.amount / 100;
   return target / 100;
 }
-const allocateDollars = (deliveries, snapshot) => allocatePayment(deliveries, snapshot);
+const allocateDollars = (deliveries, snapshot, allowZero = false) => allocatePayment(deliveries, snapshot, undefined, allowZero);
 async function apply(models, rate, { source = "manual", providerAsOf = null, user = null, now = new Date(), expectedRevision, key = KEY } = {}) {
   const birrPerUsd = rateValue(rate);
   return models.SiteSetting.db.transaction(async (session) => {

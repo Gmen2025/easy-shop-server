@@ -2,7 +2,7 @@ const { getCoordinates, distanceMeters, DRIVER_RADIUS_METERS } = require("./fulf
 const { vehicleMatches } = require("./vehicle-delivery");
 
 function driverAvailable(driver) {
-  return driver?.approvalStatus === "approved" && !driver.isSuspended &&
+  return driver?.approvalStatus === "approved" && !driver.isSuspended && !driver.depositBlocked &&
     (driver.isAvailable === true || driver.availabilityStatus === true) &&
     !driver.exclusiveDelivery && !driver.activeRideTrip && !driver.pendingRideOffer &&
     driver.serviceModes?.delivery !== false;

@@ -15,10 +15,11 @@ router.get("/", endpoint(async (req, res) => {
   const state = fx.state(await fx.current(req.dbModels, null, req.exchangeKey), new Date(), req.exchangeKey);
   state.cardAvailable = req.exchangeKey === fx.KEY && Boolean(process.env.STRIPE_SECRET_KEY_ETHIOPIA_USD?.startsWith("sk_live_") &&
     process.env.STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD?.startsWith("pk_live_"));
+  state.telebirrAvailable = req.exchangeKey === fx.EXPORT_KEY && require("../helpers/checkout-telebirr").available();
   if (req.auth.isAdmin) res.json({ ...state, providers: Object.keys(fx.providers()) });
   else {
-    const { active, enabled, birrPerUsd, appliedAt, expiresAt, revision, source, message, cardAvailable } = state;
-    res.json({ active, enabled: Boolean(enabled), birrPerUsd, appliedAt, expiresAt, revision, source, message, cardAvailable });
+    const { active, enabled, birrPerUsd, appliedAt, expiresAt, revision, source, message, cardAvailable, telebirrAvailable } = state;
+    res.json({ active, enabled: Boolean(enabled), birrPerUsd, appliedAt, expiresAt, revision, source, message, cardAvailable, telebirrAvailable });
   }
 }));
 router.put("/", endpoint(async (req, res) => {

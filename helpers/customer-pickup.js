@@ -21,9 +21,10 @@ async function confirmPickup(models, groupId, orderId, auth, body) {
     if (order.fulfillmentStatus === "cancelled" || order.status === "4") throw conflict("This order was cancelled.");
     if (group.paymentMethod !== "cash" && order.paymentStatus !== "completed") throw conflict("Payment must be verified before confirming collection.");
     if (order.internationalShipping) {
+      const shipmentRoute = require("./international-shipping").route(group.international?.direction);
       const shipment = group.international?.shipments.find((entry) => entry.id === order.internationalShipping.shipmentId);
-      if (!shipment || !["arrived_ethiopia", "delivered"].includes(shipment.status) || order.deliveryStatus !== "Delivered") {
-        throw conflict("Wait until the shipment has arrived in Ethiopia before confirming collection.");
+      if (!shipment || ![shipmentRoute.stages[3], "delivered"].includes(shipment.status) || order.deliveryStatus !== "Delivered") {
+        throw conflict(`Wait until the shipment has arrived in ${shipmentRoute.destination} before confirming collection.`);
       }
     } else if (!["pending", "accepted", "completed"].includes(order.fulfillmentStatus) || order.driver || order.storeDispatchBatch) {
       throw conflict("This order is not awaiting collection from its supplying store.");

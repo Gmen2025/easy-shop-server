@@ -74,9 +74,15 @@ async function syncSource(models, type, source, session = null) {
   }
   const voided = source.refundStatus && source.refundStatus !== "not_required" ||
     !completed(type, source);
-  const cash = /cash|cod|pay.?on.?delivery/i.test(String(source.paymentMethod || source.methodName || ""));
+  const method = source.paymentMethod || source.methodName || "";
+  const cash = require("./payment-settings").normalizePaymentMethod(method) === "cash" ||
+    /cash|cod|pay.?on.?delivery/i.test(String(method));
   const collected = source.paymentStatus === "completed";
   await models.FinanceEntry.updateMany(base, { $set: { collected, cash, voided: Boolean(voided) } }, { session });
+  const wallet = require("./participant-wallet");
+  if (models.ParticipantWalletTransaction) {
+    await wallet.settleEntries(models, existing.map((entry) => ({ ...entry, collected, cash, voided: Boolean(voided) })), session);
+  }
   if (!completed(type, source) || voided || existing.length) {
     await clearSyncKey(models, type, source, session);
     return;
@@ -87,12 +93,16 @@ async function syncSource(models, type, source, session = null) {
   if (!["ETB", "USD"].includes(currency)) throw fail("Unsupported accounting currency.", 409);
   const completedAt = source.deliveredAt || source.completedAt || source.updatedAt || source.dateOrdered || new Date();
   const rows = [];
+  const walletEnabled = models.ParticipantWalletTransaction ? await wallet.lockConfig(models, session) : false;
   const add = async (category, participantType, participantId, gross) => {
     const Model = participantType === "store" ? models.Store : participantType === "driver" ? models.Driver : null;
     const participant = Model && participantId ? await Model.findOneAndUpdate({ _id: id(participantId) },
       { $inc: { financeVersion: 1 } }, { new: true, session }).lean() : null;
+    const values = allocation(gross, participant, category);
     rows.push({ ...base, category, participantType, participantId: id(participantId) || null,
-      currency, completedAt, ...allocation(gross, participant, category) });
+      currency, completedAt, ...values,
+      walletEligible: Boolean(walletEnabled && participant && wallet.policy(participant.depositPolicy).enabled && cash),
+      walletFeeMinor: participant ? wallet.feeMinor(values.grossMinor, values.fee) : 0 });
   };
   if (type === "order") {
     if (source.inventoryManaged || source.store) {
@@ -122,6 +132,7 @@ async function syncSource(models, type, source, session = null) {
     await models.FinanceEntry.updateOne(key, { $setOnInsert: row, $set: { collected, cash, voided: false } },
       { upsert: true, session });
   }
+  if (models.ParticipantWalletTransaction) await wallet.settleEntries(models, rows.map((row) => ({ ...row, collected, cash, voided: false })), session);
   await clearSyncKey(models, type, source, session);
 }
 

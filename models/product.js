@@ -36,6 +36,7 @@ const productSchema = new mongoose.Schema({
   },
   shippingReservationVersion: { type: Number, default: 0 },
   exportToEthiopia: { type: Boolean, default: false },
+  exportToUSA: { type: Boolean, default: false },
   category: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Category',

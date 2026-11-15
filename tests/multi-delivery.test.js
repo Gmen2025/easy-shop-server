@@ -396,6 +396,169 @@ function exportFixture() {
   shipping.recalculate(data.group);
   return { ...data, shippingConfig, exchangeConfig };
 }
+function reverseExportFixture() {
+  const data = usdFixture();
+  const shippingConfig = { enabled: true, revision: 2, hub: { ...address, country: "Ethiopia", zip: "", label: "Ethiopia hub" },
+    baseUsd: 10, minimumUsd: 15, perKgUsd: 5, volumetricDivisor: 5000, maxWeightKg: 100, maxDimensionCm: 200, finalDeliveryUsd: 8.01 };
+  const findSetting = data.models.SiteSetting.findOne;
+  data.models.SiteSetting.findOne = (filter) => filter.key === "ethiopia-usa-shipping" ?
+    query({ internationalShippingConfig: shippingConfig }) : findSetting(filter);
+  data.models.Product.find = () => query([{ ...product, exportToUSA: true }]);
+  for (const delivery of data.group.deliveries) {
+    delivery.address = { ...shippingConfig.hub, id: address.id, location: address.location };
+    delivery.quotedCargo = structuredClone(delivery.cargo);
+  }
+  data.group.kind = "products";
+  data.group.international = { direction: "ethiopia-to-usa", hub: shippingConfig.hub, tariff: shippingConfig, policyRevision: 2,
+    shipments: [{ id: address.id, recipient: address, shippingUsd: 30, billableKg: 4, status: "awaiting_hub", history: [] }] };
+  require("../helpers/international-shipping").recalculate(data.group);
+  return { ...data, shippingConfig };
+}
+
+test("Ethiopia USD exports quote USA recipients but route native drivers only to an Ethiopian hub; domestic USD remains local", async () => {
+  const f = reverseExportFixture();
+  f.models.Store.find = () => query(f.group.deliveries.map((delivery) => delivery.store));
+  f.models.StoreInventory.find = () => query(f.stocks);
+  const original = f.models.CheckoutGroup;
+  f.models.CheckoutGroup = function(fields) { Object.assign(this, fields); this.markModified = () => {}; this.save = async () => this; };
+  Object.assign(f.models.CheckoutGroup, original);
+  const payload = { cart: [line], addresses: [address], allocations: [{ key: line.key, addressId: address.id, quantity: 4 }],
+    paymentCurrency: "usd", destinationCountry: "USA", paymentAmount: 1, internationalShippingFee: 0 };
+  const routing = { geocode: async (entry) => entry.country === "USA" ? { coordinates: [-77, 38] } : address.location,
+    distance: async (origin, destination) => { assert.equal(destination, "0,0", "Driver must never route to the USA recipient"); return 2; } };
+  const quoted = await createQuote(f.models, userId, "E_Shopping", payload, routing);
+  assert.equal(quoted.international.direction, "ethiopia-to-usa");
+  assert.equal(quoted.international.shipments[0].recipient.country, "USA");
+  assert.equal(quoted.international.shippingFee, 30);
+  assert.equal(quoted.finalDeliveryFee, 8.01);
+  assert.equal(quoted.paymentAmount, Math.round((quoted.itemsSubtotal + quoted.deliveryFee) / 3 * 100) / 100 + 38.01);
+  assert.ok(quoted.deliveries.every((delivery) => delivery.address.country === "Ethiopia"));
+  const multiple = await createQuote(f.models, userId, "E_Shopping", { ...payload,
+    addresses: [address, { ...address, id: "second" }],
+    allocations: [{ key: line.key, addressId: address.id, quantity: 2 }, { key: line.key, addressId: "second", quantity: 2 }] }, routing);
+  assert.equal(multiple.international.shippingFee, 40, "Shipping is assessed once per recipient, not per pickup");
+  assert.equal(multiple.finalDeliveryFee, 16.02);
+  await assert.rejects(createQuote(f.models, userId, "E_Shopping", { ...payload, paymentCurrency: "etb" }, routing), /requires USD/);
+  await assert.rejects(createQuote(f.models, userId, "E_Shopping", { ...payload, addresses: [{ ...address, country: "Ethiopia" }] }, routing), /USA recipient/);
+  await assert.rejects(createQuote(f.models, userId, "E_Shopping", { ...payload, destinationCountry: undefined }, routing), /shopping region/);
+  f.models.CheckoutGroup.create = async (fields) => fields;
+  const domestic = await createQuote(f.models, userId, "E_Shopping", { ...payload, destinationCountry: "Ethiopia",
+    addresses: [{ ...address, country: "Ethiopia" }] }, routing);
+  assert.equal(domestic.international, undefined);
+  assert.equal(domestic.paymentAmount, Math.round(domestic.totalPrice / 3 * 100) / 100);
+});
+
+test("USD export bank transfers hold all Ethiopia inventory until Admin verifies the full goods, hub, shipping and USA delivery total", async () => {
+  const f = reverseExportFixture();
+  for (const method of ["cash", "telebirr"]) {
+    await assert.rejects(prepare(f.models, f.group._id, userId, "E_Shopping", { ...f.body, method }), /supports USD card or bank/);
+  }
+  await prepare(f.models, f.group._id, userId, "E_Shopping", { ...f.body, method: "bank", bankAccountId: id(40) });
+  assert.equal(f.group.paymentAmount, 52.68);
+  assert.deepEqual(f.orders.map((order) => order.paymentAmount), [26.35, 26.33]);
+  assert.ok(f.orders.every((order) => order.country === "Ethiopia" && order.internationalShipping.direction === "ethiopia-to-usa" &&
+    order.internationalShipping.recipient.country === "USA" && order.paymentCurrency === "usd" && order.fulfillmentStatus === "payment_pending"));
+  await activate(f.models, f.group._id, { bankReceipt: { sender: "Customer", reference: "USD-full-total" } });
+  assert.equal(f.group.status, "bank_review");
+  f.group.expiresAt = new Date(0);
+  await reconcile(f.models, f.group, "E_Shopping", { expire: true });
+  assert.deepEqual(f.stocks.map((stock) => stock.reserved), [2, 2]);
+  await activate(f.models, f.group._id, { bankVerified: true });
+  assert.equal(f.group.paymentStatus, "completed");
+  assert.ok(f.orders.every((order) => order.fulfillmentStatus === "pending"));
+});
+
+test("USD export Stripe charges the exact saved combined total and refunds only the cancelled delivery's saved USD share", async (t) => {
+  const previous = process.env.STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD;
+  process.env.STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD = "pk_live_fixture";
+  t.after(() => { if (previous === undefined) delete process.env.STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD; else process.env.STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD = previous; });
+  const f = reverseExportFixture();
+  await prepare(f.models, f.group._id, userId, "E_Shopping", f.body);
+  let intent;
+  let refunded;
+  stripeRouter.getStripe = (database) => {
+    assert.equal(database, "ETHIOPIA_USD");
+    return { stripe: { paymentIntents: {
+      create: async (fields) => { intent = { ...fields, id: "pi_export", status: "requires_payment_method", amount_received: fields.amount }; return intent; },
+      retrieve: async () => intent,
+    }, refunds: { list: async () => ({ data: [] }), create: async (fields) => { refunded = fields; return { ...fields, id: "refund_export", status: "succeeded" }; } } } };
+  };
+  await ensureIntent(f.models, f.group, "E_Shopping");
+  assert.equal(intent.amount, 5268);
+  assert.equal(intent.currency, "usd");
+  f.exchangeConfig.enabled = false;
+  intent.status = "succeeded";
+  await reconcile(f.models, f.group, "E_Shopping");
+  await cancelDelivery(f.models, f.group._id, f.orders[0]._id, userId, false);
+  await refundDelivery(f.models, f.group, f.orders[0]._id, "E_Shopping");
+  assert.equal(refunded.amount, 2635);
+  assert.equal(f.orders[1].fulfillmentStatus, "pending");
+});
+
+test("reverse export policy/rate changes and disabled methods fail before reservation; arrival tracking uses USA and keeps hub fulfillment separate", async () => {
+  const shipping = require("../helpers/international-shipping");
+  for (const change of ["tariff", "rate", "export", "card"]) {
+    const f = reverseExportFixture();
+    let method = "bank";
+    if (change === "tariff") f.shippingConfig.revision++;
+    if (change === "rate") f.exchangeConfig.revision++;
+    if (change === "export") f.models.Product.find = () => query([product]);
+    if (change === "card") {
+      method = "card";
+      const original = f.models.SiteSetting.findOne;
+      f.models.SiteSetting.findOne = (filter) => filter.key === "payment-methods" ? query({ paymentMethods: { card: false } }) : original(filter);
+    }
+    await assert.rejects(prepare(f.models, f.group._id, userId, "E_Shopping", { ...f.body, method, bankAccountId: id(40) }));
+    assert.deepEqual(f.stocks.map((stock) => stock.reserved), [0, 0]);
+  }
+  const f = reverseExportFixture();
+  await prepare(f.models, f.group._id, userId, "E_Shopping", { ...f.body, method: "bank", bankAccountId: id(40) });
+  await activate(f.models, f.group._id, { bankReceipt: { sender: "Customer", reference: "USD-paid" } });
+  await activate(f.models, f.group._id, { bankVerified: true });
+  await assert.rejects(shipping.updateShipment(f.models, f.group._id, address.id, { status: "at_hub" }, userId), /Ethiopia hub/);
+  f.orders.forEach((order) => { order.deliveryStatus = "Delivered"; });
+  for (const status of ["at_hub", "shipped", "arrived_usa", "delivered"]) {
+    await shipping.updateShipment(f.models, f.group._id, address.id, { status, carrier: "Carrier", trackingNumber: "TRACK", note: "Received by recipient" }, userId);
+  }
+  assert.equal(f.group.international.shipments[0].status, "delivered");
+  assert.ok(f.orders.every((order) => order.internationalShipping.status === "delivered"));
+});
+
+test("admin export configuration and product approval are independent for Ethiopia and USA regions", async (t) => {
+  const shipping = require("../helpers/international-shipping");
+  const settings = new Map();
+  const updates = [];
+  const models = {
+    SiteSetting: {
+      db: { transaction: (action) => action({}) },
+      findOne: ({ key }) => query(settings.get(key)),
+      findOneAndUpdate: async ({ key }, fields) => { settings.set(key, fields); return fields; },
+    },
+    Product: { findByIdAndUpdate: async (id, fields) => { updates.push(fields); return { _id: id, ...fields }; } },
+  };
+  t.mock.method(require("../helpers/multi-delivery"), "geocodeAddress", async () => address.location);
+  const router = require("../routers/multi-delivery");
+  const request = async (method, path, database, body, isAdmin = true) => {
+    const handler = router.stack.find((entry) => entry.route?.path === path && entry.route.methods[method]).route.stack[0].handle;
+    const res = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+    await handler({ dbName: database, dbModels: models, auth: { userId, isAdmin }, body, params: { id: productId } }, res);
+    return res;
+  };
+  const usa = exportFixture().shippingConfig;
+  const ethio = reverseExportFixture().shippingConfig;
+  assert.equal((await request("put", "/international-shipping-config", "E_Shopping", ethio, false)).code, 403);
+  assert.equal(settings.size, 0);
+  assert.equal((await request("put", "/international-shipping-config", "E_Shopping", usa)).code, 409);
+  await request("put", "/international-shipping-config", "E_ShopUSA", usa);
+  await request("put", "/international-shipping-config", "E_Shopping", ethio);
+  assert.equal(settings.get(shipping.KEY).internationalShippingConfig.hub.country, "USA");
+  assert.equal(settings.get(shipping.ETHIOPIA_USA_KEY).internationalShippingConfig.hub.country, "Ethiopia");
+  assert.equal((await request("get", "/international-shipping-config", "E_Shopping")).body.finalDeliveryUsd, 8.01);
+  assert.equal((await request("put", "/international-products/:id", "E_Shopping", { exportToEthiopia: true })).code, 409);
+  await request("put", "/international-products/:id", "E_Shopping", { exportToUSA: true });
+  await request("put", "/international-products/:id", "E_ShopUSA", { exportToEthiopia: true });
+  assert.deepEqual(updates, [{ exportToUSA: true }, { exportToEthiopia: true }]);
+});
 
 test("USA cash checkout reserves Car deliveries without a development flag and leaves payment pending until collection", async () => {
   const { models, group, body, orders, stocks } = fixture();
@@ -413,17 +576,96 @@ test("USA cash checkout reserves Car deliveries without a development flag and l
   assert.ok(orders.every((order) => order.fulfillmentStatus === "pending" && order.paymentStatus === "pending"));
 });
 
-test("development cash cannot bypass cross-currency or international bank-only payment rules", async () => {
+test("development cash cannot bypass cross-currency or international payment rules", async () => {
   const international = exportFixture();
   await assert.rejects(prepare(international.models, international.group._id, userId, "E_ShopUSA", {
     ...international.body, method: "cash", developmentCashOnDelivery: true,
-  }), /ETB bank transfer only/);
+  }), /ETB bank transfer or Telebirr/);
   assert.equal(international.orders.length, 0);
   const converted = usdFixture();
   await assert.rejects(prepare(converted.models, converted.group._id, userId, "E_Shopping", {
     ...converted.body, method: "cash", developmentCashOnDelivery: true,
   }), /not cash/);
   assert.equal(converted.orders.length, 0);
+});
+
+test("USA ETB Telebirr reserves exact converted totals and verifies gateway funds before fulfillment", async (t) => {
+  const gateway = require("../helpers/checkout-telebirr");
+  t.mock.method(gateway, "requireConfigured", () => {});
+  const f = exportFixture();
+  await prepare(f.models, f.group._id, userId, "E_ShopUSA", { ...f.body, method: "telebirr" });
+  assert.equal(f.group.paymentAmount, 11100);
+  assert.ok(f.orders.every((order) => order.paymentMethod === "4" && order.fulfillmentStatus === "payment_pending"));
+  await assert.rejects(activate(f.models, f.group._id), /not been verified/);
+  f.group.telebirrMerchantOrderId = `AG${f.group._id}`;
+  const verified = { merch_order_id: f.group.telebirrMerchantOrderId, order_status: "PAY_SUCCESS",
+    trans_currency: "ETB", total_amount: "11100.00", payment_order_id: "provider-transaction" };
+  for (const override of [{ total_amount: "1" }, { trans_currency: "USD" }, { merch_order_id: "other" }, { order_status: "WAIT_PAY" }]) {
+    await assert.rejects(activate(f.models, f.group._id, { telebirrPayment: { ...verified, ...override } }), /not been verified/);
+  }
+  t.mock.method(gateway, "query", async () => ({ ...verified, order_status: "WAIT_PAY" }));
+  await assert.rejects(reconcile(f.models, f.group, "E_ShopUSA", { expire: true }), /Stock stays held/);
+  assert.deepEqual(f.stocks.map((stock) => stock.reserved), [2, 2]);
+  // Admin disabling new payments must not prevent recovery of an existing gateway payment.
+  f.models.SiteSetting.findOne = () => query({ paymentMethods: { telebirr: false } });
+  t.mock.method(gateway, "query", async () => verified);
+  await reconcile(f.models, f.group, "E_ShopUSA");
+  assert.equal(f.group.status, "placed");
+  assert.equal(f.group.paymentStatus, "completed");
+  assert.ok(f.orders.every((order) => order.paymentProvider === "telebirr" && order.paymentTransactionId === "provider-transaction"));
+  await activate(f.models, f.group._id);
+  assert.deepEqual(f.stocks.map((stock) => stock.reserved), [2, 2]);
+});
+
+test("group payment endpoint returns the saved Telebirr link with client-specific redirects, never a Stripe intent", async (t) => {
+  const gateway = require("../helpers/checkout-telebirr");
+  const f = exportFixture();
+  f.group.paymentMethod = "telebirr";
+  f.group.status = "awaiting_payment";
+  const url = "https://gateway.example.test/checkout";
+  t.mock.method(gateway, "start", async (models, group, clientType) => {
+    assert.equal(models, f.models);
+    assert.equal(group._id, f.group._id);
+    assert.equal(clientType, "mobile");
+    return { group, paymentUrl: url };
+  });
+  const route = require("../routers/multi-delivery").stack.find((entry) =>
+    entry.route?.path === "/checkouts/:id/payment" && entry.route.methods.post).route.stack[0].handle;
+  const res = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+  await route({ auth: { userId }, params: { id: f.group._id }, dbName: "E_ShopUSA",
+    dbModels: f.models, body: { clientType: "mobile" } }, res);
+  assert.equal(res.code, 200);
+  assert.equal(res.body.paymentUrl, url);
+  assert.equal(res.body.group.paymentMethod, "telebirr");
+  assert.equal(res.body.group.paymentAmount, 11100);
+  assert.equal(res.body.clientSecret, undefined);
+});
+
+test("disabled and unconfigured Telebirr block new USA ETB reservations; native/USD payments cannot bypass currency rules", async (t) => {
+  const gateway = require("../helpers/checkout-telebirr");
+  const f = exportFixture();
+  t.mock.method(gateway, "requireConfigured", () => { throw Object.assign(new Error("Not configured"), { status: 503 }); });
+  await assert.rejects(prepare(f.models, f.group._id, userId, "E_ShopUSA", { ...f.body, method: "telebirr" }), /Not configured/);
+  assert.deepEqual(f.stocks.map((stock) => stock.reserved), [0, 0]);
+  f.models.SiteSetting.findOne = () => query({ paymentMethods: { telebirr: false } });
+  await assert.rejects(prepare(f.models, f.group._id, userId, "E_ShopUSA", { ...f.body, method: "telebirr" }), /temporarily unavailable/);
+  const native = fixture();
+  await assert.rejects(prepare(native.models, native.group._id, userId, "E_ShopUSA", { ...native.body, method: "telebirr" }), /only for USA products paid in ETB/);
+});
+
+test("closed Telebirr orders release holds, but status errors and unknown payments never release stock", async (t) => {
+  const gateway = require("../helpers/checkout-telebirr");
+  t.mock.method(gateway, "requireConfigured", () => {});
+  const f = exportFixture();
+  await prepare(f.models, f.group._id, userId, "E_ShopUSA", { ...f.body, method: "telebirr" });
+  f.group.telebirrMerchantOrderId = `AG${f.group._id}`;
+  t.mock.method(gateway, "query", async () => { throw new Error("Gateway unavailable"); });
+  await assert.rejects(reconcile(f.models, f.group, "E_ShopUSA", { expire: true }), /Gateway unavailable/);
+  assert.deepEqual(f.stocks.map((stock) => stock.reserved), [2, 2]);
+  t.mock.method(gateway, "query", async () => ({ order_status: "ORDER_CLOSED" }));
+  await reconcile(f.models, f.group, "E_ShopUSA", { expire: true });
+  assert.equal(f.group.status, "cancelled");
+  assert.deepEqual(f.stocks.map((stock) => stock.reserved), [0, 0]);
 });
 
 test("US products exported to Ethiopia charge USD goods/hub/shipping costs in birr and wait for Admin bank receipt", async () => {

@@ -97,6 +97,9 @@ const driverSchema = new mongoose.Schema({
     max: 1,
   },
   financeFees: { type: mongoose.Schema.Types.Mixed, default: {} },
+  depositPolicy: { type: mongoose.Schema.Types.Mixed, default: { enabled: false, lowBalance: 50, minimumBalance: 0 } },
+  depositBlocked: { type: Boolean, default: false },
+  depositNotice: { type: String, default: "" },
   payoutsEnabled: { type: Boolean, default: false },
   financeVersion: { type: Number, default: 0 },
   isSuspended: {

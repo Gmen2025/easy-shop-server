@@ -31,7 +31,7 @@ async function exists(model, filter, session) {
 async function assertNoActiveWork(models, userId, session) {
   const driverQuery = models.Driver.findOne({ user: userId })
     .select("_id walletBalance activeRideTrip pendingRideOffer profilePhotoUrl");
-  const storesQuery = models.Store.find({ owner: userId }).select("_id logo");
+  const storesQuery = models.Store.find({ owner: userId }).select("_id logo walletBalance");
   if (session) {
     driverQuery.session(session);
     storesQuery.session(session);
@@ -69,9 +69,17 @@ async function assertNoActiveWork(models, userId, session) {
       status: { $in: ["pending", "processing", "review_required"] } }, session));
   }
   if (storeIds.length) {
+    active.push(stores.some((store) => Number(store.walletBalance || 0) !== 0));
     active.push(await exists(models.StoreInventory, { store: { $in: storeIds }, reserved: { $gt: 0 } }, session));
     active.push(await exists(models.Payout, { store: { $in: storeIds },
       status: { $in: ["pending", "processing", "review_required"] } }, session));
+  }
+  if (models.ParticipantWalletTransaction && (driver || storeIds.length)) {
+    active.push(await exists(models.ParticipantWalletTransaction, { type: "deposit",
+      status: { $in: ["pending", "initiating", "awaiting_payment"] },
+      $or: [...(driver ? [{ kind: "driver", account: driver._id }] : []),
+        ...(storeIds.length ? [{ kind: "store", account: { $in: storeIds } }] : [])],
+    }, session));
   }
 
   if (active.some(Boolean)) {
@@ -170,12 +178,16 @@ async function removeAccountData(models, userId, session, { driver, stores }) {
   await models.Payout.updateMany({ processedBy: userId }, { $set: { processedBy: null } }, { session });
   await models.StoreDispatch.updateMany({ createdBy: userId }, { $set: { createdBy: null } }, { session });
   await models.DriverWalletTransaction.updateMany({ createdBy: userId }, { $set: { createdBy: null } }, { session });
+  if (models.ParticipantWalletTransaction) {
+    await models.ParticipantWalletTransaction.updateMany({ verifiedBy: userId }, { $unset: { verifiedBy: "" } }, { session });
+  }
 
   if (storeIds.length) {
     await models.Store.updateMany({ _id: { $in: storeIds } }, { $set: {
       owner: null, name: "Closed store", address: "", phone: "", email: "",
       city: "", country: "", location: null, description: "", logo: "",
       bankAccount: "", isOpen: false, payoutsEnabled: false,
+      "depositPolicy.enabled": false, depositBlocked: false, depositNotice: "off",
     } }, { session });
     await models.Payout.updateMany({ store: { $in: storeIds } }, { $set: { accountDetails: "" } }, { session });
   }
@@ -184,6 +196,7 @@ async function removeAccountData(models, userId, session, { driver, stores }) {
       name: "Deleted driver", email: `deleted-${driver._id}@deleted.invalid`,
       phone: "", profilePhotoUrl: "", address: "", isAvailable: false, isSuspended: true,
       payoutsEnabled: false, pushTokens: [], location: null, activeRideTrip: null,
+      "depositPolicy.enabled": false, depositBlocked: false, depositNotice: "off",
       pendingRideOffer: null, activeCartRoutes: [],
       vehicle: { type: "", make: "", model: "", year: null, plateNumber: "", color: "",
         insuranceProvider: "", insurancePolicyNumber: "", insuranceExpiresAt: null },

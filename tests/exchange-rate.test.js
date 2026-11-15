@@ -27,6 +27,18 @@ function request(method, path, models, body = {}, isAdmin = true, database = "E_
   const response = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
   return route.stack[0].handle({ dbModels: models, dbName: database, auth: { userId: "user", isAdmin }, body }, response).then(() => response);
 }
+test("exchange policy exposes Telebirr gateway readiness only for USA ETB exports and retains USD card readiness", async (t) => {
+  const gateway = require("../helpers/checkout-telebirr");
+  t.mock.method(gateway, "available", () => true);
+  const { models } = fixture();
+  const usa = await request("get", "/", models, {}, false, "E_ShopUSA");
+  const ethio = await request("get", "/", models, {}, false, "E_Shopping");
+  assert.equal(usa.body.telebirrAvailable, true);
+  assert.equal(ethio.body.telebirrAvailable, false);
+  assert.equal(usa.body.cardAvailable, false);
+  t.mock.method(gateway, "available", () => false);
+  assert.equal((await request("get", "/", models, {}, false, "E_ShopUSA")).body.telebirrAvailable, false);
+});
 test("USA manual and automatic unchanged applies record independent export updates; toggles never extend freshness", async (t) => {
   const original = process.env.EXCHANGE_RATE_PROVIDERS_JSON;
   t.after(() => { if (original === undefined) delete process.env.EXCHANGE_RATE_PROVIDERS_JSON; else process.env.EXCHANGE_RATE_PROVIDERS_JSON = original; });
