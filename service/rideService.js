@@ -70,7 +70,7 @@ const matchesRideOption = (driver, ride) => !ride.vehicleOption ||
 async function quoteRide(models, user, databaseName, body, {
   geocode = geocodeAddress, lookup = roadLeg, place = placeDetails, currentLocation = currentLocationAddress, compare = false,
 } = {}) {
-  await requireServiceAvailable(models, "rides");
+  await requireServiceAvailable(models, "rides", null, user);
   const config = (await models.SiteSetting.findOne({ key: CONFIG_KEY }).lean())?.rideConfig;
   if (!config?.enabled) throw conflict("Ride service is not enabled in this region.");
   let options;
@@ -131,7 +131,7 @@ async function requestRide(models, rideId, user, now = new Date()) {
       if (ride.status === "cancelled") throw conflict("This request was cancelled. Request a new quote.");
       return ride;
     }
-    await requireServiceAvailable(models, "rides", session);
+    await requireServiceAvailable(models, "rides", session, user);
     if (ride.expiresAt <= now) throw conflict("Ride quote expired. Calculate a new fare.");
     const config = await models.SiteSetting.findOne({ key: CONFIG_KEY }).session(session).lean();
     if (!config?.rideConfig?.enabled) throw conflict("Ride service is no longer enabled.");

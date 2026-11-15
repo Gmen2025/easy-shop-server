@@ -9,17 +9,21 @@ const { PROVIDERS, readSocialLoginSetting, updateSocialLoginSetting } = require(
 const { METHODS, readPaymentSettings, updatePaymentSettings } = require('../helpers/payment-settings');
 const { readFinancialHealthSetting, updateFinancialHealthSetting } = require('../helpers/financial-health');
 const { FEATURES, readServiceAvailability, updateServiceAvailability } = require('../helpers/service-availability');
+const { readTestingEmails, updateTestingEmails, requestUserId, canTest } = require('../helpers/testing-access');
+const { readMaintenance } = require('../helpers/maintenance');
 
 const MAINTENANCE_SETTING_KEY = 'maintenance-mode';
 const BANK_ACCOUNT_SETTING_KEY = 'bank-account-info';
 const DELIVERY_SETTING_KEY = 'delivery-config';
 
 router.get('/service-availability', async (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  try { res.json(await readServiceAvailability(req.dbModels)); }
+  res.set('Cache-Control', 'private, no-store');
+  res.vary('Authorization');
+  try { res.json({ ...await readServiceAvailability(req.dbModels),
+    testingAccess: await canTest(req.dbModels, requestUserId(req)) }); }
   catch (error) {
     console.error('Failed to read service availability:', error);
-    res.status(503).json({ message: 'Unable to load service availability. Please retry.' });
+    res.status(error.status || 503).json({ message: error.status ? error.message : 'Unable to load service availability. Please retry.' });
   }
 });
 
@@ -29,24 +33,60 @@ router.put('/service-availability', async (req, res) => {
   const features = req.body;
   if (!features || typeof features !== 'object' || Array.isArray(features) || !Object.keys(features).length ||
       Object.entries(features).some(([key, value]) => !FEATURES.includes(key) || typeof value !== 'boolean')) {
-    return res.status(400).json({ message: 'Provide boolean rides and/or services switches.' });
+    return res.status(400).json({ message: 'Provide boolean rides, services or financialHealth switches.' });
+  }
+  if (features.financialHealth !== undefined && Object.keys(features).length !== 1) {
+    return res.status(400).json({ message: 'Update Financial Health separately from the ride/service switches.' });
   }
   try {
     const admin = await req.dbModels.User.findOne({ _id: req.auth.userId, isAdmin: true }).select('_id').lean();
     if (!admin) return res.status(403).json({ message: 'Admin access required.' });
-    res.json(await updateServiceAvailability(req.dbModels, features, req.auth.userId));
+    res.json({ ...await updateServiceAvailability(req.dbModels, features, req.auth.userId),
+      testingAccess: await canTest(req.dbModels, req.auth.userId) });
   } catch (error) {
     console.error('Failed to save service availability:', error);
     res.status(503).json({ message: 'Unable to save service availability.' });
   }
 });
 
+async function requireCurrentAdmin(req) {
+  if (!req.auth?.userId) throw Object.assign(new Error('Sign in required.'), { status: 401 });
+  const admin = await req.dbModels.User.findOne({ _id: req.auth.userId, isAdmin: true }).select('_id').lean();
+  if (!admin) throw Object.assign(new Error('Admin access required.'), { status: 403 });
+}
+
+router.get('/testing-access', async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  try {
+    await requireCurrentAdmin(req);
+    res.json({ emails: await readTestingEmails(req.dbModels) });
+  } catch (error) {
+    console.error('Failed to read tester access:', error.message);
+    res.status(error.status || 503).json({ message: error.status ? error.message : 'Unable to load tester access.' });
+  }
+});
+router.put('/testing-access', async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  try {
+    await requireCurrentAdmin(req);
+    if (!req.body || Object.keys(req.body).some((key) => key !== 'emails')) {
+      throw Object.assign(new Error('Provide only the tester emails list.'), { status: 400 });
+    }
+    res.json({ emails: await updateTestingEmails(req.dbModels, req.body.emails, req.auth.userId) });
+  } catch (error) {
+    console.error('Failed to save tester access:', error.message);
+    res.status(error.status || 503).json({ message: error.status ? error.message : 'Unable to save tester access.' });
+  }
+});
+
 router.get('/financial-health', async (req, res) => {
-  res.set('Cache-Control', 'no-store');
-  try { res.json(await readFinancialHealthSetting(req.dbModels)); }
+  res.set('Cache-Control', 'private, no-store');
+  res.vary('Authorization');
+  try { res.json({ ...await readFinancialHealthSetting(req.dbModels),
+    testingAccess: await canTest(req.dbModels, requestUserId(req)) }); }
   catch (error) {
     console.error('Failed to read Financial Health availability:', error);
-    res.status(503).json({ message: 'Unable to load Financial Health availability. Please retry.' });
+    res.status(error.status || 503).json({ message: error.status ? error.message : 'Unable to load Financial Health availability. Please retry.' });
   }
 });
 
@@ -217,7 +257,8 @@ router.put('/social-login', async (req, res) => {
  * /api/v1/settings/maintenance:
  *   get:
  *     summary: Get maintenance mode status
- *     description: Returns whether site-wide maintenance mode is currently enabled.
+ *     description: Returns the selected region's maintenance flag and authenticated Admin/verified tester bypass. Personalized responses are private and uncached.
+ *     security: []
  *     tags: [Settings]
  *     responses:
  *       200:
@@ -230,7 +271,7 @@ router.put('/social-login', async (req, res) => {
  *               success: true
  *               enabled: false
  *               updatedAt: '2026-07-02T12:00:00.000Z'
- *       500:
+ *       503:
  *         description: Failed to read maintenance setting
  *         content:
  *           application/json:
@@ -238,23 +279,16 @@ router.put('/social-login', async (req, res) => {
  *               $ref: '#/components/schemas/Error'
  */
 router.get('/maintenance', async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  res.vary('Authorization');
   try {
-    const { SiteSetting } = req.dbModels;
-
-    const setting = await SiteSetting.findOne({ key: MAINTENANCE_SETTING_KEY })
-      .select('maintenanceEnabled updatedAt')
-      .lean();
-
-    return res.status(200).json({
-      success: true,
-      enabled: Boolean(setting?.maintenanceEnabled),
-      updatedAt: setting?.updatedAt || null,
-    });
+    return res.status(200).json({ ...await readMaintenance(req.dbModels),
+      testingAccess: await canTest(req.dbModels, requestUserId(req)) });
   } catch (error) {
-    return res.status(500).json({
+    console.error('Failed to read maintenance setting:', error.message);
+    return res.status(error.status || 503).json({
       success: false,
-      message: 'Failed to read maintenance setting.',
-      error: error.message,
+      message: error.status ? error.message : 'Failed to read maintenance setting.',
     });
   }
 });
@@ -294,7 +328,7 @@ router.get('/maintenance', async (req, res) => {
  *           application/json:
  *             schema:
  *               $ref: '#/components/schemas/Error'
- *       500:
+ *       503:
  *         description: Failed to update maintenance setting
  *         content:
  *           application/json:
@@ -302,13 +336,13 @@ router.get('/maintenance', async (req, res) => {
  *               $ref: '#/components/schemas/Error'
  */
 router.put('/maintenance', async (req, res) => {
-  if (!requireAdmin(req, res)) {
-    return;
-  }
-
   try {
+    await requireCurrentAdmin(req);
+    if (typeof req.body?.enabled !== 'boolean' || Object.keys(req.body).some((key) => key !== 'enabled')) {
+      return res.status(400).json({ success: false, message: 'enabled must be a boolean.' });
+    }
     const { SiteSetting } = req.dbModels;
-    const enabled = Boolean(req.body?.enabled);
+    const enabled = req.body.enabled;
     const userId = req.auth?.userId || null;
 
     const setting = await SiteSetting.findOneAndUpdate(
@@ -330,16 +364,17 @@ router.put('/maintenance', async (req, res) => {
     return res.status(200).json({
       success: true,
       enabled: Boolean(setting.maintenanceEnabled),
+      testingAccess: true,
       updatedAt: setting.updatedAt,
       message: enabled
         ? 'Maintenance mode enabled.'
         : 'Maintenance mode disabled.',
     });
   } catch (error) {
-    return res.status(500).json({
+    console.error('Failed to update maintenance setting:', error.message);
+    return res.status(error.status || 503).json({
       success: false,
-      message: 'Failed to update maintenance setting.',
-      error: error.message,
+      message: error.status ? error.message : 'Failed to update maintenance setting.',
     });
   }
 });

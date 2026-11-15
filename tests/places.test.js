@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { autocompletePlaces, placeDetails, currentLocationAddress } = require("../helpers/places");
-const { addressInput } = require("../helpers/multi-delivery");
+const { addressInput, geocodeAddress } = require("../helpers/multi-delivery");
 
 const reply = (body, status = 200) => async (url, init) => {
   reply.calls.push({ url: String(url), init });
@@ -101,6 +101,65 @@ test("ZIP is optional only for Ethiopian addresses", () => {
   assert.equal(addressInput({ ...base, country: "Ethiopia" }).zip, "");
   assert.equal(addressInput({ ...base, zip: "", country: "ET" }).zip, "");
   assert.throws(() => addressInput({ ...base, zip: "", country: "USA" }), /zip/);
+});
+
+test("saved delivery addresses retain selected place IDs and clear them after manual edits", async () => {
+  const mongoose = require("mongoose");
+  const { deliveryAddressSchema } = require("../models/delivery-address");
+  const DeliveryAddress = mongoose.models.PlaceSelectionAddress || mongoose.model("PlaceSelectionAddress", deliveryAddressSchema);
+  const router = require("../routers/multi-delivery");
+  const handler = (method, path) => router.stack.find((entry) =>
+    entry.route?.path === path && entry.route.methods[method]).route.stack[0].handle;
+  const address = { label: "Family", address1: "Edna Mall", address2: "", city: "Addis Ababa",
+    country: "Ethiopia", phone: "0911000000", placeId: PLACE,
+    location: { type: "Point", coordinates: [-77, 38] } };
+  let saved;
+  const dbModels = { DeliveryAddress: {
+    create: async (fields) => { saved = new DeliveryAddress(fields); return saved.toObject(); },
+    findOneAndUpdate: async (filter, fields) => { saved.set(fields); return saved.toObject(); },
+  } };
+  const res = { status() { return this; }, json(body) { this.body = body; } };
+  const auth = { userId: "000000000000000000000099" };
+  await handler("post", "/delivery-addresses")({ auth, dbModels, body: address }, res);
+  assert.equal(res.body.placeId, PLACE);
+  assert.equal(res.body.zip, "");
+  assert.equal(res.body.location, undefined, "Client coordinates must not be stored as verified");
+  const { placeId, ...edited } = address;
+  await handler("put", "/delivery-addresses/:id")({
+    auth, dbModels, params: { id: String(saved._id) }, body: { ...edited, address1: "Another street" },
+  }, res);
+  assert.equal(res.body.placeId, "");
+  assert.throws(() => addressInput({ ...address, placeId: {} }), /Invalid delivery place/);
+});
+
+test("delivery geocoding verifies selected places in the recipient country and reports country-specific manual failures", async (t) => {
+  const previous = process.env.GOOGLE_MAPS_API_KEY;
+  process.env.GOOGLE_MAPS_API_KEY = "server-key";
+  t.after(() => {
+    if (previous === undefined) delete process.env.GOOGLE_MAPS_API_KEY;
+    else process.env.GOOGLE_MAPS_API_KEY = previous;
+  });
+  const address = { address1: "Edna Mall", city: "Addis Ababa", country: "Ethiopia", placeId: PLACE,
+    location: { type: "Point", coordinates: [-77, 38] } };
+  let actualCountry = "ET";
+  const calls = [];
+  t.mock.method(global, "fetch", async (url) => {
+    calls.push(new URL(url));
+    return { ok: true, json: async () => url.searchParams.get("place_id") === PLACE ? {
+      status: "OK", results: [{ geometry: { location: { lng: 38.787, lat: 8.996 } },
+        address_components: [{ short_name: actualCountry, types: ["country"] }] }],
+    } : { status: "ZERO_RESULTS", results: [] } };
+  });
+  assert.deepEqual(await geocodeAddress(address), { type: "Point", coordinates: [38.787, 8.996] });
+  assert.equal(calls[0].searchParams.has("address"), false);
+  actualCountry = "US";
+  await assert.rejects(geocodeAddress(address), /different country/);
+  const { placeId, ...manual } = address;
+  await assert.rejects(geocodeAddress(manual), (error) =>
+    /Ethiopia.*could not be verified/.test(error.message) && /postal code is not required/.test(error.message) && !/USA/.test(error.message));
+  assert.equal(calls.at(-1).searchParams.get("components"), "country:ET");
+  await assert.rejects(geocodeAddress({ ...manual, country: "USA", zip: "12345" }), /USA.*ZIP code/);
+  assert.equal(calls.at(-1).searchParams.get("components"), "country:US");
 });
 
 test("current pickup reverse lookup verifies the region and keeps the exact GPS point", async (t) => {

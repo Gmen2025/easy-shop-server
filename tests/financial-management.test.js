@@ -471,7 +471,8 @@ test("Financial Health is OFF by default, admin-controlled by region, owner-priv
     req.dbModels = {
       ...region,
       User: { findOne(filter) { return { select() { return this; }, async lean() {
-        return [OWNER, OTHER].includes(filter._id) && (!filter.isAdmin || filter._id === OWNER) ? { _id: filter._id } : null;
+        return [OWNER, OTHER].includes(filter._id) && (!filter.isAdmin || filter._id === OWNER) ?
+          { _id: filter._id, isAdmin: filter._id === OWNER } : null;
       } }; } },
       SiteSetting: {
         findOne({ key }) { assert.equal(key, "financial-health"); return { lean: async () => {
@@ -504,8 +505,8 @@ test("Financial Health is OFF by default, admin-controlled by region, owner-priv
   const settings = "/settings/financial-health";
   const initial = await request(settings, { owner: null });
   assert.equal(initial.status, 200);
-  assert.equal(initial.headers.get("cache-control"), "no-store");
-  assert.deepEqual(await initial.json(), { enabled: false });
+  assert.equal(initial.headers.get("cache-control"), "private, no-store");
+  assert.deepEqual(await initial.json(), { enabled: false, testingAccess: false });
   assert.equal((await request("/financial-health/workspace", { owner: null })).status, 401);
   const blocked = await request("/financial-health/workspace");
   assert.equal(blocked.status, 403);
@@ -517,7 +518,7 @@ test("Financial Health is OFF by default, admin-controlled by region, owner-priv
   }
   assert.equal((await request(settings, { owner: OWNER, method: "PUT", body: { enabled: true } })).status, 200);
   assert.equal(regions.get("E_Shopping").setting.updatedBy, OWNER);
-  assert.deepEqual(await (await request(settings, { database: "E_ShopUSA" })).json(), { enabled: false });
+  assert.deepEqual(await (await request(settings, { database: "E_ShopUSA" })).json(), { enabled: false, testingAccess: false });
   assert.equal((await request("/financial-health/workspace", { owner: "333333333333333333333333" })).status, 403);
   assert.equal((await request("/financial-management/workspace")).status, 403);
 

@@ -62,21 +62,36 @@ set deployment.
 
 ## Regional ride and service availability
 
-Public, uncached `GET /api/v1/settings/service-availability` returns
-`{ rides: boolean, services: boolean }`. Current admins can `PUT` a partial
-object with either/both boolean switches. Settings are persisted independently
+Uncached `GET /api/v1/settings/service-availability` returns
+`{ rides: boolean, services: boolean, financialHealth: boolean, testingAccess: boolean }`.
+Current admins can `PUT` partial ride/service switches, or `{financialHealth: boolean}`
+separately. Financial Health uses the existing `financial-health` setting, retaining
+its OFF default; the other switches default ON. Settings are persisted independently
 in the database selected by `x-database-name` (`E_Shopping` for Ethiopia,
-`E_ShopUSA` for USA). Missing switches default ON for backward compatibility.
-Country maintenance mode and ride fare configuration are unchanged.
+`E_ShopUSA` for USA).
 
-OFF rejects ride quotes/comparisons and conversion of unrequested quotes to
+Admin-only `GET/PUT /settings/testing-access` manages `{emails: string[]}` for the
+selected database. One normalized, deduplicated email list is shared by disabled
+services and maintenance. Bypass requires a signed-in, currently existing account
+with a verified matching email, or current database Admin status. The list is never
+included in public responses; personalized availability is private and uncached.
+Removal takes effect on the next server request; both clients refresh within 30 seconds.
+Tester access never grants Admin privileges or access to another user's financial data.
+
+For ordinary users, OFF rejects ride quotes/comparisons and conversion of unrequested quotes to
 bookings, or new `POST /service-requests`, with 403. Settings read failures block
 new activity with 503. Existing requested rides can still dispatch, complete,
 cancel and settle; request history, updates and payments remain accessible.
 Re-enabling restores new requests without modifying saved fares or records.
 Deploy this backend before the matching mobile/website controls.
 
-Checks: `node --test tests/service-availability.test.js tests/rides.test.js`.
+Maintenance also enforces access on backend business routes. Authentication,
+status/settings endpoints and saved-payment recovery remain reachable; existing
+gateway callbacks and background reconciliation continue. Site maintenance flags
+remain independent of individual service switches. A tester cannot enable a disabled
+ride tariff: normal fare configuration and all other permissions still apply.
+
+Checks: `node --test tests/testing-access.test.js tests/service-availability.test.js tests/rides.test.js tests/financial-management.test.js`.
 
 ## Customer pickup or delivery
 
@@ -700,6 +715,13 @@ remain ETB. Conversion is `USD = ETB / birrPerUsd`, rounded to cents. Checkout
 groups retain native totals plus `paymentAmount` and an `exchangeRate` snapshot;
 child USD cents sum exactly to the group charge and are used for partial refunds.
 Do not reinterpret `totalPrice` as USD in reports.
+
+Payers may be in USA or elsewhere; domestic USD checkout still uses the Ethiopian
+recipient's address and Ethiopia delivery speeds. ZIP is not required in Ethiopia.
+Address suggestions retain their Google place ID in quotes and saved addresses;
+the server verifies that place's coordinates and country rather than re-searching
+its display text. Manual address lookups are restricted to the recipient's country.
+Only the explicit Ethiopia-to-USA shipping option accepts USA recipients.
 
 In Ethiopia, authenticated `GET /api/v1/exchange-rate/` returns current availability,
 rate, applied/expiry times, revision and explanation. Admin-only endpoints:

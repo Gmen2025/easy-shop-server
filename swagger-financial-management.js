@@ -66,13 +66,15 @@ const financialHealthPaths = Object.fromEntries(Object.entries(paths).map(([path
   path.replace("/financial-management", "/financial-health"),
   Object.fromEntries(Object.entries(operations).map(([method, operation]) => [method, {
     ...operation, tags: ["Customer Financial Health"],
-    description: "Signed-in regional account required and Financial Health must be enabled. Records are owner-private and stored separately from admin accounting. Same accounting contract: docs/financial-management.md.",
+    description: "Signed-in regional account required. Financial Health must be enabled unless the current database user is Admin or an approved verified tester. Records remain owner-private and separate from admin accounting. Same accounting contract: docs/financial-management.md.",
     responses: { ...operation.responses, 403: { description: "Account access denied or SERVICE_DISABLED by admin" } },
   }])),
 ]));
 const availabilityResponse = {
   description: "Regional Financial Health availability; defaults false",
-  content: { "application/json": { schema: { type: "object", required: ["enabled"], properties: { enabled: { type: "boolean" } } } } },
+  content: { "application/json": { schema: { type: "object", required: ["enabled"], properties: {
+    enabled: { type: "boolean" }, testingAccess: { type: "boolean", description: "Authenticated current Admin or approved verified tester may access the disabled service." },
+  } } } },
 };
 financialHealthPaths["/api/v1/settings/financial-health"] = {
   get: {

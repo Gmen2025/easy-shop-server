@@ -154,7 +154,7 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  try { await requireServiceAvailable(req.dbModels, 'services'); }
+  try { await requireServiceAvailable(req.dbModels, 'services', null, req.auth?.userId); }
   catch (error) {
     console.error('Service request availability check failed:', error.message);
     return res.status(error.status || 503).json({ success: false, message: error.status ? error.message : 'Unable to verify service availability. Please retry.' });

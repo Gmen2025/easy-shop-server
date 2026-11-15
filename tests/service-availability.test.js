@@ -10,6 +10,7 @@ const { siteSettingSchema } = require("../models/site-setting");
 
 const secret = "service-availability-test-only";
 const userId = "000000000000000000000001";
+const adminId = "000000000000000000000009";
 const requestId = "000000000000000000000002";
 function fixture() {
   const regions = new Map(), requests = new Map();
@@ -17,10 +18,10 @@ function fixture() {
   const models = (database) => ({
     SiteSetting: {
       findOne: ({ key }) => {
-        assert.equal(key, "service-availability");
+        assert.ok(["service-availability", "financial-health", "testing-access"].includes(key));
         const query = { session: () => query, lean: async () => {
           if (outage) throw new Error("Database unavailable");
-          return regions.get(database);
+          return key === "service-availability" ? regions.get(database) : null;
         } };
         return query;
       },
@@ -39,8 +40,8 @@ function fixture() {
       } }),
     },
     User: { findOne: (filter) => ({ select: () => ({ lean: async () => {
-      assert.equal(filter.isAdmin, true);
-      return filter._id === userId && adminExists ? { _id: userId } : null;
+      return filter._id === adminId && adminExists ? { _id: adminId, isAdmin: true } :
+        !filter.isAdmin && filter._id === userId ? { _id: userId } : null;
     } }) }) },
     ServiceRequest: {
       create: async (payload) => {
@@ -73,7 +74,7 @@ async function serve(t, state) {
   return (path, { database = "E_Shopping", admin, method = "GET", body } = {}) =>
     fetch(`http://127.0.0.1:${server.address().port}/api/v1${path}`, {
       method, headers: { "Content-Type": "application/json", "x-database-name": database,
-        ...(admin === undefined ? {} : { Authorization: `Bearer ${jwt.sign({ userId, isAdmin: admin }, secret)}` }) },
+        ...(admin === undefined ? {} : { Authorization: `Bearer ${jwt.sign({ userId: admin ? adminId : userId, isAdmin: admin }, secret)}` }) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
 }
@@ -82,8 +83,8 @@ test("public uncached defaults, partial independent regional updates and current
   const state = fixture(), request = await serve(t, state);
   const initial = await request(path);
   assert.equal(initial.status, 200);
-  assert.equal(initial.headers.get("cache-control"), "no-store");
-  assert.deepEqual(await initial.json(), { rides: true, services: true });
+  assert.equal(initial.headers.get("cache-control"), "private, no-store");
+  assert.deepEqual(await initial.json(), { rides: true, services: true, financialHealth: false, testingAccess: false });
   assert.equal((await request(path, { method: "PUT", body: { rides: false } })).status, 401);
   state.revokeAdmin();
   assert.equal((await request(path, { method: "PUT", admin: true, body: { rides: false } })).status, 403);
@@ -92,11 +93,11 @@ test("public uncached defaults, partial independent regional updates and current
   await Promise.all(["rides", "services"].map((key) => save(path, {
     method: "PUT", database: "E_ShopUSA", admin: true, body: { [key]: false },
   })));
-  assert.deepEqual(await (await save(path, { database: "E_ShopUSA" })).json(), { rides: false, services: false });
-  assert.deepEqual(await (await save(path)).json(), { rides: true, services: true });
-  assert.equal(active.regions.get("E_ShopUSA").updatedBy, userId);
+  assert.deepEqual(await (await save(path, { database: "E_ShopUSA" })).json(), { rides: false, services: false, financialHealth: false, testingAccess: false });
+  assert.deepEqual(await (await save(path)).json(), { rides: true, services: true, financialHealth: false, testingAccess: false });
+  assert.equal(active.regions.get("E_ShopUSA").updatedBy, adminId);
   await save(path, { method: "PUT", database: "E_ShopUSA", admin: true, body: { rides: true } });
-  assert.deepEqual(await (await save(path, { database: "E_ShopUSA" })).json(), { rides: true, services: false });
+  assert.deepEqual(await (await save(path, { database: "E_ShopUSA" })).json(), { rides: true, services: false, financialHealth: false, testingAccess: false });
 });
 test("malformed switches never write; storage failures never report enabled or saved", async (t) => {
   const state = fixture(), request = await serve(t, state);

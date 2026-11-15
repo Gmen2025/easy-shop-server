@@ -448,6 +448,40 @@ test("Ethiopia USD exports quote USA recipients but route native drivers only to
   assert.equal(domestic.paymentAmount, Math.round(domestic.totalPrice / 3 * 100) / 100);
 });
 
+test("Ethiopia USD domestic checkout verifies a selected Ethiopian landmark without ZIP and keeps Ethiopian delivery speeds", async (t) => {
+  const previous = process.env.GOOGLE_MAPS_API_KEY;
+  process.env.GOOGLE_MAPS_API_KEY = "server-key";
+  t.after(() => {
+    if (previous === undefined) delete process.env.GOOGLE_MAPS_API_KEY;
+    else process.env.GOOGLE_MAPS_API_KEY = previous;
+  });
+  const f = reverseExportFixture();
+  f.models.Store.find = () => query(f.group.deliveries.map((delivery) => delivery.store));
+  f.models.StoreInventory.find = () => query(f.stocks);
+  f.models.CheckoutGroup.create = async (fields) => fields;
+  const recipient = { ...address, address1: "Edna Mall", city: "Addis Ababa", country: "Ethiopia", zip: "",
+    placeId: "ChIJabcdefghijklmnop" };
+  t.mock.method(global, "fetch", async (url) => {
+    assert.equal(url.searchParams.get("place_id"), recipient.placeId, "Use the selected place, not a second text search");
+    assert.equal(url.searchParams.has("address"), false);
+    return { ok: true, json: async () => ({ status: "OK", results: [{
+      geometry: { location: { lng: 38.787, lat: 8.996 } },
+      address_components: [{ short_name: "ET", types: ["country"] }],
+    }] }) };
+  });
+  const quoted = await createQuote(f.models, userId, "E_Shopping", {
+    cart: [line], addresses: [recipient], allocations: [{ key: line.key, addressId: recipient.id, quantity: 4 }],
+    paymentCurrency: "usd", destinationCountry: "Ethiopia", deliveryMode: "EXPRESS",
+  }, { distance: async () => 2 });
+  assert.equal(quoted.currency, "usd");
+  assert.equal(quoted.international, undefined);
+  assert.equal(quoted.deliveryMode, "EXPRESS");
+  assert.equal(quoted.deliverySnapshot.policy.businessTimeZone, "Africa/Addis_Ababa");
+  assert.ok(quoted.deliveries.every((delivery) => delivery.address.placeId === recipient.placeId &&
+    delivery.address.country === "Ethiopia" && delivery.address.zip === ""));
+  assert.equal(quoted.paymentAmount, Math.round(quoted.totalPrice / 3 * 100) / 100);
+});
+
 test("USD export bank transfers hold all Ethiopia inventory until Admin verifies the full goods, hub, shipping and USA delivery total", async () => {
   const f = reverseExportFixture();
   for (const method of ["cash", "telebirr"]) {

@@ -8,6 +8,7 @@ const deliveryAddressSchema = new mongoose.Schema({
   zip: { type: String, default: "" },
   country: { type: String, required: true },
   phone: { type: String, required: true },
+  placeId: { type: String, default: "" },
 }, { timestamps: true });
 deliveryAddressSchema.index({ user: 1 });
 exports.deliveryAddressSchema = deliveryAddressSchema;

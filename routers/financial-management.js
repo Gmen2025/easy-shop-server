@@ -1,6 +1,7 @@
 const engine = require("../helpers/financial-management");
 const { workspace } = require("../helpers/financial-management-report");
 const { readFinancialHealthSetting } = require("../helpers/financial-health");
+const { canTest } = require("../helpers/testing-access");
 
 const handle = (action) => async (req, res) => {
   try { await action(req, res); }
@@ -76,7 +77,8 @@ function createRouter(customer = false) {
       engine.check(user, customer ? "Account access required." : "Administrator access required.", "FORBIDDEN", 403);
       if (customer) {
         const setting = await readFinancialHealthSetting(req.dbModels);
-        engine.check(setting.enabled, "Financial Health is currently disabled by the administrator.", "SERVICE_DISABLED", 403);
+        engine.check(setting.enabled || await canTest(req.dbModels, userId),
+          "Financial Health is currently disabled by the administrator.", "SERVICE_DISABLED", 403);
       }
       req.financialOwnerId = userId;
       next();

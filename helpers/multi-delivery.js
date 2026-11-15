@@ -34,6 +34,9 @@ function addressInput(body) {
         (field !== "address2" && !(field === "zip" && zipOptional) && !value.trim())) throw conflict(`Delivery ${field} is required and must be at most 300 characters.`);
     result[field] = value.trim();
   }
+  const placeId = body?.placeId ?? "";
+  if (typeof placeId !== "string" || placeId.trim().length > 300) throw conflict("Invalid delivery place selection. Search again.");
+  result.placeId = placeId.trim();
   return result;
 }
 
@@ -107,7 +110,12 @@ async function geocodeAddress(address) {
   const key = process.env.GOOGLE_MAPS_API_KEY;
   if (!key) throw conflict("Admin must configure GOOGLE_MAPS_API_KEY and enable Geocoding and Distance Matrix APIs.");
   const url = new URL("https://maps.googleapis.com/maps/api/geocode/json");
-  url.searchParams.set("address", [address.address1, address.address2, address.city, address.zip, address.country].filter(Boolean).join(", "));
+  if (address.placeId) {
+    url.searchParams.set("place_id", address.placeId);
+  } else {
+    url.searchParams.set("address", [address.address1, address.address2, address.city, address.zip, address.country].filter(Boolean).join(", "));
+    url.searchParams.set("components", `country:${countryCode(address.country)}`);
+  }
   url.searchParams.set("key", key);
   let response;
   try { response = await fetch(url, { signal: AbortSignal.timeout(8000) }); }
@@ -120,7 +128,9 @@ async function geocodeAddress(address) {
   const location = result?.geometry?.location;
   if (["REQUEST_DENIED", "OVER_QUERY_LIMIT"].includes(body.status)) throw conflict("Address verification is unavailable. Admin must check Google Geocoding permissions, quota and billing.");
   if (!response.ok || body.status !== "OK" || result?.partial_match || !Number.isFinite(location?.lng) || !Number.isFinite(location?.lat)) {
-    throw conflict("The address could not be verified. Enter a complete street address, city, country (and ZIP code in the USA), or choose a suggested place.");
+    throw conflict(countryCode(address.country) === "ET"
+      ? "The Ethiopia delivery address could not be verified. Enter a complete street address or landmark and city, or choose an Ethiopia address suggestion. A postal code is not required."
+      : "The USA delivery address could not be verified. Enter a complete street address, city and ZIP code, or choose a USA address suggestion.");
   }
   const actualCountry = result.address_components?.find((component) => component.types?.includes("country"))?.short_name;
   if (actualCountry !== countryCode(address.country)) throw conflict("The address lookup resolved to a different country. Correct the address before checkout.");

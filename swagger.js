@@ -442,6 +442,7 @@ const swaggerOptions = {
           properties: {
             success: { type: 'boolean', example: true },
             enabled: { type: 'boolean', example: false },
+            testingAccess: { type: 'boolean', description: 'Current database Admin or approved signed-in verified tester may bypass maintenance.' },
             updatedAt: { type: 'string', format: 'date-time', nullable: true },
             message: { type: 'string' }
           }

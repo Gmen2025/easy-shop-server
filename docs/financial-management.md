@@ -46,12 +46,18 @@ Public, uncached `GET /api/v1/settings/financial-health` returns
 database, not merely JWT claims. Settings are persisted under the regional
 `SiteSetting` key `financial-health` with `updatedBy`.
 
-Every customer read and mutation checks availability server-side. Off returns
+Every customer read and mutation checks availability server-side. For ordinary users, OFF returns
 403 `{error:{code:"SERVICE_DISABLED",message:...}}`; records remain intact.
 Re-enabling restores access. This switch never affects `/financial-management`
 or its admin authorization. Clients hide the mobile shopping badge and website
-Financial Health dropdown entry while off. Deploy the backend before clients
-and enable explicitly in Admin > Financial Health service after testing.
+Financial Health dropdown entry while OFF. Current regional Admins and approved,
+signed-in testers with verified listed emails can access their own customer
+workspace while OFF. The regional `/settings/testing-access` email list is shared
+with other disabled services and maintenance; removing an email revokes the bypass.
+Tester membership never grants Admin permissions or access to another owner's ledger.
+Admin > Service availability now includes the same Financial Health switch, backed
+by the existing setting. Both controls show the configured state, not the tester bypass.
+Deploy the backend before clients and enable explicitly after testing.
 
 The PERSONAL/BUSINESS selector supplies `entityId` to account creation and
 statement queries. PERSONAL is initialized on first use; create additional
