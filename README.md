@@ -182,6 +182,13 @@ fee is charged once per recipient shipment if any supplying store is delivery,
 and split only among its delivery orders. Quotes and payments snapshot these
 fees/addresses. Duties/customs remain excluded.
 
+Address validation accepts an omitted optional `address2` (apartment/unit), as
+well as an omitted Ethiopia postal code, as empty strings. Collection street,
+city, country, label and contact phone remain required. Clients use the saved
+destination collection/dispatch coordinates for final-delivery map previews;
+the preview does not change the tariff or use customer GPS. Configuration
+changes require a new unprepared quote; prepared payment snapshots stay fixed.
+
 International confirmation waits for arrival in Ethiopia and verified payment.
 US `Delivered` still means arrival at the US hub. All-pickup shipments finish
 after both confirmations for every active pickup order; mixed shipments also

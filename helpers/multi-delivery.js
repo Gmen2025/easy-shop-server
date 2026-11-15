@@ -29,7 +29,7 @@ function addressInput(body) {
   // Ethiopia has no postal-code system in everyday use, so ZIP is optional there.
   const zipOptional = countryCode(body?.country || "") === "ET";
   for (const field of ["label", "address1", "address2", "city", "zip", "country", "phone"]) {
-    const value = body?.[field] ?? (field === "zip" && zipOptional ? "" : undefined);
+    const value = body?.[field] ?? (field === "address2" || field === "zip" && zipOptional ? "" : undefined);
     if (typeof value !== "string" || value.trim().length > 300 ||
         (field !== "address2" && !(field === "zip" && zipOptional) && !value.trim())) throw conflict(`Delivery ${field} is required and must be at most 300 characters.`);
     result[field] = value.trim();

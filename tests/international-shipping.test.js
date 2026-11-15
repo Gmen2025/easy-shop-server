@@ -38,6 +38,21 @@ test("Ethiopia collection configuration is optional; final delivery defaults to 
   }
   assert.throws(() => shipping.validateConfig({ ...policy, ethiopiaPickup: hub }), /in Ethiopia/);
 });
+test("shipping settings accept untouched optional address fields but still require a real collection address", () => {
+  const { address2, ...hubWithoutUnit } = hub;
+  const ethiopiaPickup = { label: "Collection", address1: "Bole office", city: "Addis Ababa", country: "Ethiopia", phone: "123" };
+  const saved = shipping.validateConfig({ ...policy, hub: hubWithoutUnit, ethiopiaPickup });
+  assert.equal(saved.hub.address2, "");
+  assert.equal(saved.ethiopiaPickup.address2, "");
+  assert.equal(saved.ethiopiaPickup.zip, "");
+  for (const field of ["address1", "city", "phone"]) {
+    assert.throws(() => shipping.validateConfig({ ...policy, ethiopiaPickup: { ...ethiopiaPickup, [field]: "" } }), new RegExp(field));
+  }
+  assert.throws(() => shipping.validateConfig({ ...policy, ethiopiaPickup: { ...ethiopiaPickup, address2: 123 } }), /address2/);
+  const reverse = shipping.validateConfig({ ...policy, hub: ethiopiaPickup, usaPickup: hubWithoutUnit }, "ethiopia-to-usa");
+  assert.equal(reverse.usaPickup.address2, "");
+  assert.throws(() => shipping.validateConfig({ ...policy, hub: ethiopiaPickup, usaPickup: { ...hubWithoutUnit, zip: "" } }, "ethiopia-to-usa"), /zip/);
+});
 test("international mixed fulfillment keeps shipping once per shipment and apportions final-delivery cents only among delivery stores", () => {
   const group = { deliveries: ["a", "b", "c"].map((key) => ({ key, address: { id: "home" }, itemsSubtotal: 10,
     deliveryFee: 2, fulfillmentMethod: key === "a" ? "pickup" : "delivery" })),
