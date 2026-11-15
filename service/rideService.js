@@ -497,7 +497,7 @@ async function cancelRide(models, rideId, user) {
 }
 
 async function prepareRidePayment(models, rideId, user, body, databaseName) {
-  if (!["card", "bank", "cash"].includes(body.method)) throw conflict("Select a supported payment method.");
+  if (!["card", "bank", "cash", "telebirr"].includes(body.method)) throw conflict("Select a supported payment method.");
   return models.Ride.db.transaction(async (session) => {
     const ride = await models.Ride.findOne({ _id: rideId, user }).session(session);
     if (!ride || !payableRide(ride) || !ride.finalFare) throw conflict("Payment becomes available after your ride is completed or after an Admin-reviewed termination.");
@@ -506,6 +506,10 @@ async function prepareRidePayment(models, rideId, user, body, databaseName) {
       return ride;
     }
     await require("../helpers/payment-settings").requirePaymentMethod(models, body.method);
+    if (body.method === "telebirr") {
+      if (ride.currency !== "etb" || /usa/i.test(databaseName)) throw conflict("Telebirr ride payments require an Ethiopia ETB fare.");
+      require("../helpers/checkout-telebirr").requireConfigured();
+    }
     if (body.method === "card") {
       if (ride.currency !== "usd") throw conflict("Card payments are available only in USA.");
       stripeClient(databaseName);
@@ -521,6 +525,34 @@ async function prepareRidePayment(models, rideId, user, body, databaseName) {
     await ride.save({ session });
     return ride;
   });
+}
+
+async function rideTelebirrPayment(models, ride, clientType) {
+  if (!payableRide(ride) || ride.paymentMethod !== "telebirr" || ride.currency !== "etb") throw conflict("Choose Telebirr for a completed ETB ride first.");
+  if (ride.paymentStatus === "completed") return { ride };
+  if (ride.telebirrPaymentUrl) return { ride, paymentUrl: ride.telebirrPaymentUrl };
+  if (ride.telebirrMerchantOrderId) throw conflict("Telebirr initiation is unresolved. Check this ride's payment status; do not pay again.");
+  require("../helpers/checkout-telebirr").requireConfigured();
+  await require("../helpers/payment-settings").requirePaymentMethod(models, "telebirr");
+  const claimed = await models.Ride.findOneAndUpdate({
+    _id: ride._id, status: ride.status, paymentMethod: "telebirr", paymentStatus: "pending",
+    telebirrMerchantOrderId: { $exists: false },
+  }, { telebirrMerchantOrderId: `RD${ride._id}` }, { new: true });
+  if (!claimed) throw conflict("This ride payment already started or changed. Reload its status before paying.");
+  let result;
+  await require("./createOrder").createOrder({ body: {
+    title: `Ride ${claimed._id}`, amount: claimed.finalFare.toFixed(2), clientType,
+    merchantOrderId: claimed.telebirrMerchantOrderId, timeoutExpress: "120m",
+  } }, {
+    json(value) { result = value; },
+    status() { return { json(value) { throw conflict(value.error || "Telebirr initiation failed. Check this ride before retrying."); } }; },
+  });
+  if (!result?.prepay_id || !/^https:\/\//.test(result.paymentUrl || "")) throw conflict("Telebirr returned no secure link. Check this ride's payment status; do not pay again.");
+  const updated = await models.Ride.findOneAndUpdate({
+    _id: claimed._id, paymentMethod: "telebirr", paymentStatus: "pending", telebirrMerchantOrderId: claimed.telebirrMerchantOrderId,
+  }, { telebirrPaymentUrl: result.paymentUrl }, { new: true });
+  if (!updated) throw conflict("Ride payment changed. Reload its status before paying.");
+  return { ride: updated, paymentUrl: updated.telebirrPaymentUrl };
 }
 
 async function ridePaymentIntent(models, ride, databaseName) {
@@ -574,6 +606,18 @@ function verifyRidePayment(ride, intent, databaseName) {
 async function confirmRidePayment(models, ride, databaseName, body) {
   if (!payableRide(ride)) throw conflict("Only completed or Admin-reviewed terminated rides can be paid.");
   if (ride.paymentStatus === "completed") return ride;
+  if (ride.paymentMethod === "telebirr") {
+    if (ride.currency !== "etb" || !ride.telebirrMerchantOrderId) throw conflict("Start the saved Telebirr ride payment first.");
+    const gateway = require("../helpers/checkout-telebirr");
+    const payment = await gateway.query({ telebirrMerchantOrderId: ride.telebirrMerchantOrderId, totalPrice: ride.finalFare });
+    if (gateway.closed(payment)) throw conflict("Telebirr closed this ride payment without confirmed funds. Contact support to resolve this saved attempt; do not pay again.");
+    if (!gateway.paid(payment) || !payment.payment_order_id) throw conflict("Telebirr payment is not confirmed. Check this same ride again; do not pay twice.");
+    const updated = await models.Ride.findOneAndUpdate({
+      _id: ride._id, status: ride.status, paymentMethod: "telebirr", paymentStatus: "pending",
+      telebirrMerchantOrderId: ride.telebirrMerchantOrderId,
+    }, { paymentStatus: "completed", paymentPaidAt: new Date(), telebirrTransactionId: payment.payment_order_id }, { new: true });
+    return updated || models.Ride.findById(ride._id);
+  }
   if (ride.paymentMethod === "card") {
     if (!ride.paymentIntentId) ({ ride } = await ridePaymentIntent(models, ride, databaseName));
     if (ride.paymentStatus === "completed") return ride;
@@ -609,7 +653,13 @@ async function scanRides(models, databaseName, now = new Date()) {
       if (intent.status === "succeeded") await confirmRidePayment(models, ride, databaseName, {});
     } catch (error) { console.error(`[Ride:${databaseName}] Payment ${ride._id} recovery failed:`, error.message); }
   }
+  const telebirr = await models.Ride.find({ status: { $in: ["completed", "terminated"] }, paymentMethod: "telebirr",
+    paymentStatus: "pending", telebirrMerchantOrderId: { $exists: true } }).limit(25);
+  for (const ride of telebirr) {
+    try { await confirmRidePayment(models, ride, databaseName, {}); }
+    catch (error) { console.error(`[Ride:${databaseName}] Telebirr payment ${ride._id} recovery failed:`, error.message); }
+  }
 }
 
 module.exports = { id, modeEnabled, quoteRide, rideRoutePath, driverRoutePath, requestRide, driverPlan, dispatchRide, releaseOffer, acceptRide,
-  completeStop, terminateRide, reviewTermination, payableRide, closeSharedIntake, cancelRide, prepareRidePayment, ridePaymentIntent, confirmRidePayment, verifyRidePayment, scanRides };
+  completeStop, terminateRide, reviewTermination, payableRide, closeSharedIntake, cancelRide, prepareRidePayment, rideTelebirrPayment, ridePaymentIntent, confirmRidePayment, verifyRidePayment, scanRides };

@@ -2,6 +2,60 @@
 
 A comprehensive REST API for an e-commerce platform built with Node.js, Express, and MongoDB. Features include JWT authentication, payment gateway integrations (Stripe & Telebirr), order management, and email notifications.
 
+## Stripe and Telebirr: sandbox setup
+
+Use an isolated backend and test database, not production orders or pending
+payments. Existing local credentials are not automatically replaced or enabled.
+
+1. In the backend environment set `STRIPE_MODE=test`, and use Stripe sandbox
+   `sk_test_*` credentials for `STRIPE_KEY_E_SHOPUSA` (or its existing USA alias).
+   No live key is used as a fallback in test mode. Omitted `STRIPE_MODE` retains
+   live-only behavior; invalid modes and mismatched keys block payment.
+2. Set the matching sandbox `pk_test_*` in website
+   `VITE_STRIPE_PUBLISHABLE_KEY` and mobile
+   `EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY`. Never put secret keys in clients.
+   Ethiopia products/services charged in USD require the dedicated
+   `STRIPE_SECRET_KEY_ETHIOPIA_USD` and `STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD`,
+   both matching `STRIPE_MODE`; configure a current Admin FX quote as well.
+3. Configure Telebirr with the **sandbox credentials and exact API/checkout
+   URLs supplied by Telebirr**: `TELEBIRR_BASE_URL`, `TELEBIRR_WEB_BASE_URL`,
+   `TELEBIRR_APP_ID`, `TELEBIRR_FABRIC_APP_ID`, `TELEBIRR_MERCHANT_APP_ID`,
+   `TELEBIRR_MERCHANT_CODE`, and `TELEBIRR_PRIVATE_KEY`. Register a public HTTPS
+   `NOTIFY_URL` ending in `/api/v1/telebirr/webhook`, an approved
+   `WEB_REDIRECT_URL`, and `MOBILE_REDIRECT_URL=addugeneteshop://payment-success`.
+   Set `USE_MOCK_TELEBIRR=false`, `USE_MOCK_SIGNING=false`, and
+   `TELEBIRR_ALLOW_INSECURE_TLS=false`. These verified flows query the actual
+   configured gateway, including its sandbox; mock success is never accepted.
+   `STRIPE_MODE` does not select Telebirr's environment.
+4. Configure HTTPS `WALLET_PAYMENT_RETURN_URL` to an existing website Income or
+   profile page. Enable the regional and individual deposit requirement only
+   for test driver/store accounts that need wallet deposits.
+5. Point both clients at this backend (`VITE_API_BASE_URL` and mobile
+   `EXPO_PUBLIC_API_URL`, including `/api/v1/`), restart the backend and rebuild
+   clients. Mobile card entry needs a native development/production build,
+   not Expo Go. Enable card/Telebirr independently in each region's Admin
+   payment-method settings.
+
+USA cards and wallet deposits charge USD. Ethiopia domestic product checkout
+(including grouped/multi-delivery), completed/Admin-reviewed ETB rides and ETB
+driver/store deposits support Telebirr. USA-to-Ethiopia ETB export payments
+remain supported. Telebirr never charges USD; Ethiopia rides and wallets stay
+ETB, without automatic USD conversion. Ethiopia USD card support remains
+limited to eligible quoted product/service checkouts.
+
+Test a successful payment, decline, interrupted return, repeated status checks,
+disabled method and wallet credit exactly once. Use Stripe sandbox test cards
+only (see https://docs.stripe.com/testing/overview) and Telebirr's approved test
+accounts. Redirects alone do not prove payment. Never create another charge
+to resolve uncertainty. Telebirr ride IDs are saved before gateway initiation;
+ambiguous or failed/closed ride attempts require status recovery/support, not
+another ride or an unverified manual payment confirmation.
+
+For production, deploy separately with `STRIPE_MODE=live`, matching live
+merchant/public keys and approved Telebirr production settings. Do not switch
+merchant, database or environment while payments/refunds are outstanding.
+Local automated tests do not establish merchant approval or gateway readiness.
+
 ## Prepaid cash/off-platform fee deposits
 
 The **Income dashboard** on website/mobile has a separate deposit wallet for
@@ -24,9 +78,9 @@ Amount, deposited time, submission time, verification time and balance after
 credit appear in history. Completed bank/receipt references must be unique
 within the region/currency; include the bank name in non-globally-unique references.
 
-USD card deposits use Stripe hosted Checkout with the existing regional live
-Stripe credentials. Configure `WALLET_PAYMENT_RETURN_URL` to an HTTPS website
-account/profile URL. ETB deposits use the configured live Telebirr H5 gateway;
+USD card deposits use Stripe hosted Checkout with regional credentials matching
+`STRIPE_MODE`. Configure `WALLET_PAYMENT_RETURN_URL` to an HTTPS website
+account/profile URL. ETB deposits use the configured Telebirr H5 gateway;
 mock signing/payments and insecure TLS are not accepted. Existing regional
 bank/card/Telebirr availability switches apply to new deposits/payments.
 `POST .../wallet/deposits/:id/start` resumes a saved gateway attempt;
@@ -500,7 +554,8 @@ method re-enabled before submission. Switches do not replace actual provider
 configuration or currency support: USA-to-Ethiopia product checkout supports
 ETB bank transfer and live Telebirr; Ethiopia USD products support the dedicated
 USD Stripe merchant and USD bank transfer. Converted/service payments exclude
-cash; Telebirr is not offered for grouped domestic checkout, rides or USD.
+cash. Ethiopia domestic ETB products and completed ETB rides also support
+Telebirr when configured; Telebirr is never offered for USD.
 
 ### Telebirr for USA products paid in ETB
 
@@ -811,8 +866,8 @@ and fulfillment in staging before rollout.
 
 Ethiopia USD cards require an explicitly configured USD-capable merchant:
 `STRIPE_SECRET_KEY_ETHIOPIA_USD` and matching
-`STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD` (both live, as in the existing production
-card policy). No generic or USA merchant fallback is permitted. The public key
+`STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD` (both matching `STRIPE_MODE`, live in
+production). No generic or USA merchant fallback is permitted. The public key
 is saved with the prepared checkout; native confirmation initializes that key
 and then restores the app's usual key. Retain the same merchant credentials
 while its payments/refunds are outstanding. Validate native card confirmation,
@@ -1016,7 +1071,8 @@ Authenticated APIs (all paths below are relative to `/api/v1/stores/`):
   configuration change is performed automatically.
 - `POST checkouts/:id/payment` creates/reuses a server-priced Stripe intent
   with a checkout-specific idempotency key, never a client-supplied amount.
-  Stripe remains USA-only with the existing **live secret key** policy.
+  Stripe supports USA USD and eligible Ethiopia USD quotes with credentials
+  matching `STRIPE_MODE` (live by default).
   `POST checkouts/:id/confirm` verifies Stripe status, amount received,
   currency, intent ID, checkout metadata and owner before store assignments
   become actionable. For bank payments, confirmation takes `{ sender, reference }`;
@@ -1236,17 +1292,21 @@ refreshed at its own pickup, minus the agreed discount; other customers'
 detours, waits and payments are never charged to this payer. Consequently the
 quote is an estimate, not a guaranteed final fare.
 
-`POST :id/payment-method` chooses card (USA native Stripe), bank transfer
-(configured active account) or cash (outside USA). The selected method is stable
-for recovery. `POST :id/payment` returns the existing/server-priced Stripe
-attempt; intents lost before persistence are recovered by ride metadata before
+`POST :id/payment-method` chooses card (USA native Stripe), Telebirr (Ethiopia
+ETB), bank transfer (configured active account) or cash (both regions).
+The selected method is stable for recovery. `POST :id/payment` returns a saved
+Telebirr `paymentUrl` or existing/server-priced Stripe attempt; Stripe intents
+lost before persistence are recovered by ride metadata before
 creating another, including after provider idempotency retention. Confirmation
 verifies intent, payer, region, amount received and currency. `POST
-:id/payment-confirm` verifies card or saves bank `{ sender, reference }`, leaving
+:id/payment-confirm` verifies card/Telebirr or saves bank `{ sender, reference }`, leaving
 bank payment pending. `POST :id/received-payment` is Admin-only for bank funds
 and assigned-driver/Admin-only for cash. Admin uses `GET admin/payments` and
 `GET/PUT admin/drivers[/:id]` for payment verification and passenger seats.
-Card payments retain the backend's existing live-secret-key requirement.
+Card payments require credentials matching `STRIPE_MODE`. Telebirr confirmation
+queries the authenticated provider and verifies the saved merchant ID, ETB
+currency, exact fare and transaction ID. The scheduler retries saved attempts;
+neither Admin nor drivers can mark an online payment received manually.
 
 Delivery assignment now writes the driver dispatch version and order together
 in a MongoDB transaction. **Deploy on a replica set / Atlas; standalone MongoDB

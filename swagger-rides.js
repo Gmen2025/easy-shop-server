@@ -101,6 +101,7 @@ const schemas = {
   RideConfig: {
     ...object({
       enabled: bool,
+      telebirrAvailable: { type: "boolean", readOnly: true, description: "GET-only configured Telebirr gateway readiness for Ethiopia ETB fares; Admin payment switches still apply." },
       sharedDiscountPercent: { type: "number", minimum: 0, maximum: 90 },
       maxPickupMinutes: { type: "number", exclusiveMinimum: true, minimum: 0, maximum: 120 },
       maxDetourMinutes: { type: "number", minimum: 0, maximum: 120 },
@@ -143,7 +144,8 @@ const schemas = {
       requestedAt: date, expiresAt: date, pickedUpAt: date, completedAt: date,
       pickupBy: date, promisedDropoffAt: date, offeredAt: date, offerDeadline: { ...date, nullable: true },
       termination: ref("RideTermination"),
-      paymentMethod: { type: "string", enum: ["card", "bank", "cash"] },
+      paymentMethod: { type: "string", enum: ["card", "bank", "cash", "telebirr"] },
+      telebirrMerchantOrderId: text, telebirrPaymentUrl: text, telebirrTransactionId: text,
       paymentStatus: { type: "string", enum: ["pending", "completed", "review_required", "waived"] },
       bankAccount: ref("RideBankAccount"), bankSender: text, bankReference: text, paymentPaidAt: date,
       createdAt: date, updatedAt: date,
@@ -201,7 +203,7 @@ const schemas = {
     vehicleOption: option, finalFare: number, estimate: number,
     status: { type: "string", enum: ["completed", "terminated"] }, termination: ref("RideTermination"),
     paymentStatus: { type: "string", enum: ["pending", "completed", "review_required", "waived"] },
-    paymentMethod: { type: "string", enum: ["card", "bank", "cash"] }, bankReference: text, completedAt: date,
+    paymentMethod: { type: "string", enum: ["card", "bank", "cash", "telebirr"] }, bankReference: text, completedAt: date,
   }),
   RideDriverDashboard: object({
     driver: ref("RideDriverSelf"), trip: nullableRef("RideTrip"), offer: nullableRef("RidePublic"),
@@ -242,13 +244,14 @@ const schemas = {
   }),
   RidePaymentMethodInput: {
     ...object({
-      method: { type: "string", enum: ["card", "bank", "cash"] },
+      method: { type: "string", enum: ["card", "bank", "cash", "telebirr"] },
       bankAccountId: { ...id, description: "Required for bank: select an active account whose currency matches this ride." },
     }, ["method"]),
-    description: "Card is USA/USD only; cash is unavailable in USA; bank must have a configured active account. A selected method cannot be switched through this API.",
+    description: "Card is USA/USD only; Telebirr is Ethiopia/ETB only; cash is supported in both regions; bank must have a configured active account. A selected method cannot be switched through this API.",
   },
   RidePaymentIntentResult: object({
     ride: ref("RidePublic"),
+    paymentUrl: { type: "string", description: "Saved HTTPS Telebirr payment link; absent for Stripe or completed payments." },
     clientSecret: {
       type: "string", nullable: true,
       description: "Stripe client secret for a pending attempt. Omitted when payment is already completed or a recovered intent has succeeded. Returned only by this endpoint; never a paymentIntentId field on the public ride.",
@@ -259,7 +262,7 @@ const schemas = {
       sender: { type: "string", minLength: 1, maxLength: 300 },
       reference: { type: "string", minLength: 1, maxLength: 300 },
     }),
-    description: "Bank payments require both nonblank strings; they are trimmed (raw length must be at most 300). Card confirmation ignores these fields and verifies the server-stored Stripe attempt; no client-supplied intent ID or success flag is accepted as proof.",
+    description: "Bank payments require both nonblank strings; they are trimmed (raw length must be at most 300). Card/Telebirr confirmation ignores these fields and queries the saved provider attempt; no client-supplied success flag is proof.",
   },
 };
 
@@ -308,7 +311,7 @@ const sessionParam = {
 };
 
 add("/config", "get", "ridesGetConfig", "Get regional ride configuration",
-  "Any authenticated user. Returns the stored regional ride policy or {enabled:false} when unconfigured.",
+  "Any authenticated user. Returns the stored regional ride policy (enabled:false when unconfigured) plus read-only telebirrAvailable gateway readiness.",
   ref("RideConfig"));
 add("/config", "put", "ridesPutConfig", "Replace regional ride configuration",
   "Admin only. Validates and replaces the complete rideConfig; persists the Admin as updatedBy. No partial update semantics. Fare distance is billed per mile for USD and per km for ETB.",
@@ -417,18 +420,18 @@ add("/{id}/cancel", "post", "ridesCancel", "Cancel my booking before pickup",
   "Rider must own the booking (also enforced for Admin). Allows quote/waiting/offered/assigned states; already-cancelled rides are returned unchanged. Onboard/completed/terminated rides cannot be cancelled. Releases offers/removes trip stops as necessary. No fare is due for a pre-pickup cancellation.",
   ref("RidePublic"), { parameters: [idParam()], errors: ownedErrors });
 add("/{id}/payment-method", "post", "ridesSelectPaymentMethod", "Select and lock a ride payment method",
-  `Rider must own the ride (also enforced for Admin). ${payable}Requires a nonzero finalFare. Card is only USD/USA; cash is not available in USA. Bank requires a selected active account matching the ride currency and snapshots its public bank details. Re-selecting the same method resumes it; selecting a different one conflicts. Does not collect payment or confirm receipt.`,
+  `Rider must own the ride (also enforced for Admin). ${payable}Requires a nonzero finalFare. Card is only USD/USA; Telebirr is only ETB/Ethiopia and requires configured gateway credentials. Cash is supported in both regions. Bank requires a selected active account matching the ride currency and snapshots its public bank details. Re-selecting the same method resumes it; selecting a different one conflicts. Does not collect payment or confirm receipt.`,
   ref("RidePublic"), { parameters: [idParam()], body: ref("RidePaymentMethodInput"), errors: ownedErrors });
-add("/{id}/payment", "post", "ridesPaymentIntent", "Create or recover the ride's Stripe payment attempt",
-  `${ownerScope}${payable}Choose card via payment-method first. Uses the server's finalFare/currency and a ride-specific idempotency key; recovers existing attempts before creating one. Returns a clientSecret when further client action is needed, not proof of payment. If a recovered attempt has succeeded, verifies amount/currency/metadata and records completed payment; then clientSecret is omitted. Mismatched/cancelled attempts conflict: resume/recover status instead of paying again. No request body is read.`,
-  ref("RidePaymentIntentResult"), { parameters: [idParam()], errors: ownedErrors });
-add("/{id}/payment-confirm", "post", "ridesConfirmPayment", "Verify card payment or submit bank transfer details",
-  `${ownerScope}${payable}Already-completed payments return unchanged. For card, the server retrieves its stored Stripe attempt (creating/recovering it if absent), requires succeeded status and exact intent/amount/received amount/currency/ride/user/database metadata matches before marking paid. Client assertions do not confirm a charge. For bank, requires sender/reference and records them while payment remains pending until Admin receipt confirmation. Cash is rejected here; use received-payment after receipt.`,
+add("/{id}/payment", "post", "ridesPaymentIntent", "Create or recover the ride's gateway payment attempt",
+  `${ownerScope}${payable}Choose card or Telebirr via payment-method first. Stripe uses the server's finalFare/currency and a ride-specific idempotency key; recovers existing attempts before creating one. Returns a clientSecret when further client action is needed, not proof of payment. If a recovered attempt succeeded, verifies it and omits clientSecret. Telebirr persists one merchant order ID before gateway initiation and returns its saved paymentUrl for the locked ETB fare. An unresolved initiation cannot create another charge. Optional clientType selects the approved web/mobile Telebirr return URL.`,
+  ref("RidePaymentIntentResult"), { parameters: [idParam()], body: object({ clientType: { type: "string", enum: ["web", "mobile"] } }), bodyRequired: false, errors: ownedErrors });
+add("/{id}/payment-confirm", "post", "ridesConfirmPayment", "Verify gateway payment or submit bank transfer details",
+  `${ownerScope}${payable}Already-completed payments return unchanged. Card confirmation verifies the saved Stripe intent, payer, region, exact amount received and currency. Telebirr queries the authenticated gateway and verifies the saved merchant order ID, ETB amount/currency and successful transaction ID before marking paid. Client assertions or redirects never confirm a charge. Bank requires sender/reference; payment stays pending until Admin receipt confirmation. Cash is rejected here; use received-payment after receipt.`,
   ref("RidePublic"), {
     parameters: [idParam()], body: ref("RidePaymentConfirmInput"), bodyRequired: false, errors: ownedErrors,
   });
 add("/{id}/received-payment", "post", "ridesRecordReceipt", "Record actual cash or bank payment received",
-  `${payable}Bank: Admin only, and rider must have submitted bankReference. Cash: Admin or the assigned company driver only. Card is always rejected and must be verified through Stripe instead. Checks the current method/reference/state before atomically marking pending payment completed and recording paymentPaidAt; already-completed results may be returned unchanged. This endpoint records receipt, it does not initiate any transfer or charge. Unlike rider endpoints, no rider-ownership lookup is performed.`,
+  `${payable}Bank: Admin only, and rider must have submitted bankReference. Cash: Admin or the assigned company driver only. Card/Telebirr are always rejected and must be verified through their gateway instead. Checks the current method/reference/state before atomically marking pending payment completed and recording paymentPaidAt; already-completed results may be returned unchanged. This endpoint records receipt, it does not initiate any transfer or charge. Unlike rider endpoints, no rider-ownership lookup is performed.`,
   ref("RidePublic"), {
     parameters: [idParam()],
     errors: { 403: error("Bank receipt requires Admin; cash receipt requires Admin or the assigned company driver.") },

@@ -466,7 +466,9 @@ async function prepare(models, groupId, user, databaseName, body) {
       await require("./international-shipping").lockConfig(models, group, session);
     }
     if (body.method === "telebirr") {
-      if (!group.international || group.currency !== "etb") throw conflict("Telebirr is available here only for USA products paid in ETB.");
+      if (group.currency !== "etb" || (!group.international && (/usa/i.test(databaseName) || group.exchangeRate || group.kind === "service"))) {
+        throw conflict("Telebirr requires an Ethiopia ETB product checkout or USA products paid in ETB.");
+      }
       require("./checkout-telebirr").requireConfigured();
     }
     if (body.method === "card" && !/usa/i.test(databaseName) && !group.exchangeRate) throw conflict("Ethiopia card payment requires an enabled USD quote.");
@@ -734,14 +736,14 @@ async function notifyStores(models, group) {
 }
 
 function usdPublishableKey() {
-  const key = process.env.STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD || "";
-  if (!key.startsWith("pk_live_")) throw conflict("Admin must configure the matching live STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD for Ethiopia USD card payments.");
+  const key = require("../routers/stripe").getPublishableKey("ETHIOPIA_USD");
+  if (!key) throw conflict("Admin must configure STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD to match STRIPE_MODE for Ethiopia USD card payments.");
   return key;
 }
 function stripeClient(databaseName, group) {
   const configuration = require("../routers/stripe").getStripe(group?.exchangeRate ? "ETHIOPIA_USD" : databaseName);
   if (!configuration.stripe) {
-    throw conflict("Card payment is not configured for this region. Admin must configure a live Stripe secret key and a matching mobile publishable key.");
+    throw conflict("Card payment is not configured for this region. Admin must configure a Stripe secret key matching STRIPE_MODE and the client publishable key.");
   }
   return configuration.stripe;
 }

@@ -201,7 +201,7 @@ async function deposit(models, kind, accountId, database, body) {
 }
 function stripe(database) {
   const result = require("../routers/stripe").getStripe(database);
-  if (!result.stripe) throw fail("Live USD card deposits are not configured.", 503);
+  if (!result.stripe) throw fail("USD card deposits require Stripe credentials matching STRIPE_MODE.", 503);
   return result.stripe;
 }
 function returnUrl() {

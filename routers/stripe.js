@@ -64,22 +64,21 @@ function getStripeKeyCandidates(dbName) {
 }
 
 function resolveStripeConfig(dbName) {
+  const mode = process.env.STRIPE_MODE || 'live';
   const keyCandidates = getStripeKeyCandidates(dbName);
   const configuredEntries = keyCandidates
     .filter((name) => !!process.env[name])
     .map((name) => ({ name, value: String(process.env[name]).trim() }));
 
-  // Prefer live secret keys when multiple keys are configured.
-  const liveSecretEntry = configuredEntries.find((entry) => isStripeLiveKey(entry.value));
-  const secretEntry = configuredEntries.find((entry) => isStripeSecretKey(entry.value));
-  const selectedEntry = liveSecretEntry || secretEntry || configuredEntries[0] || null;
+  const selectedEntry = configuredEntries.find((entry) => entry.value.startsWith(`sk_${mode}_`)) ||
+    configuredEntries[0] || null;
 
   return {
     apiKey: selectedEntry ? selectedEntry.value : null,
     resolvedKeyName: selectedEntry ? selectedEntry.name : null,
     keyCandidates,
-    isLiveKey: !!liveSecretEntry,
-    isSecretKey: !!secretEntry,
+    mode,
+    isSecretKey: !!selectedEntry && isStripeSecretKey(selectedEntry.value),
   };
 }
 
@@ -87,8 +86,11 @@ function isStripeSecretKey(apiKey) {
   return typeof apiKey === 'string' && /^sk_(test|live)_/.test(apiKey);
 }
 
-function isStripeLiveKey(apiKey) {
-  return typeof apiKey === 'string' && apiKey.startsWith('sk_live_');
+function getPublishableKey(dbName) {
+  const mode = process.env.STRIPE_MODE || 'live';
+  const name = dbName === 'ETHIOPIA_USD' ? 'STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD' : 'STRIPE_PUBLISHABLE_KEY';
+  const key = String(process.env[name] || '').trim();
+  return ['test', 'live'].includes(mode) && key.startsWith(`pk_${mode}_`) ? key : null;
 }
 
 function getStripe(dbName) {
@@ -97,9 +99,12 @@ function getStripe(dbName) {
     resolvedKeyName,
     keyCandidates,
     isSecretKey,
-    isLiveKey,
+    mode,
   } = resolveStripeConfig(dbName);
 
+  if (!['test', 'live'].includes(mode)) {
+    return { stripe: null, resolvedKeyName, keyCandidates, keyInvalidReason: 'invalid_mode' };
+  }
   if (!apiKey) {
     return {
       stripe: null,
@@ -118,12 +123,12 @@ function getStripe(dbName) {
     };
   }
 
-  if (!isLiveKey) {
+  if (!apiKey.startsWith(`sk_${mode}_`)) {
     return {
       stripe: null,
       resolvedKeyName,
       keyCandidates,
-      keyInvalidReason: 'not_live_key',
+      keyInvalidReason: 'mode_mismatch',
     };
   }
 
@@ -193,14 +198,11 @@ router.post('/create-payment-intent', async (req, res) => {
       });
     }
 
-    if (keyInvalidReason === 'not_live_key') {
+    if (keyInvalidReason === 'invalid_mode' || keyInvalidReason === 'mode_mismatch') {
       return res.status(503).json({
-        code: 'STRIPE_LIVE_KEY_REQUIRED',
-        message: 'Stripe live secret key is required.',
+        code: 'STRIPE_MODE_MISMATCH',
+        message: 'Stripe requires a secret key matching STRIPE_MODE (test or live).',
         canSwitchPaymentMethod: true,
-        details: resolvedKeyName
-          ? `Current key ${resolvedKeyName} is a test key. Set it to an sk_live_* value.`
-          : undefined,
         expectedEnv: keyCandidates,
       });
     }
@@ -253,3 +255,4 @@ router.post('/create-payment-intent', async (req, res) => {
 
 module.exports = router;
 module.exports.getStripe = getStripe;
+module.exports.getPublishableKey = getPublishableKey;

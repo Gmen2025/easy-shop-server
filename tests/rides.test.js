@@ -754,6 +754,73 @@ test("USA rides support cash to the driver in production", async () => {
   assert.equal(prepared.paymentMethod, "cash");
   assert.equal(prepared.paymentStatus, "pending");
 });
+test("Telebirr rides enforce ETB, ownership, completion and regional availability", async (t) => {
+  const gateway = require("../helpers/checkout-telebirr");
+  t.mock.method(gateway, "requireConfigured", () => {});
+  const f = fixture(), ride = await f.booking({ currency: "etb" });
+  await assert.rejects(service.prepareRidePayment(f.models, ride._id, userId, { method: "telebirr" }, "E_Shopping"), /after.*completed/);
+  await f.models.Ride.findByIdAndUpdate(ride._id, { status: "completed", finalFare: 150 });
+  await assert.rejects(service.prepareRidePayment(f.models, ride._id, id(99), { method: "telebirr" }, "E_Shopping"), /after.*completed/);
+  await assert.rejects(service.prepareRidePayment(f.models, ride._id, userId, { method: "telebirr" }, "E_ShopUSA"), /Ethiopia ETB/);
+  const usd = await f.booking({ status: "completed", finalFare: 8 });
+  await assert.rejects(service.prepareRidePayment(f.models, usd._id, userId, { method: "telebirr" }, "E_Shopping"), /Ethiopia ETB/);
+  t.mock.method(gateway, "requireConfigured", () => { throw new Error("Gateway not configured"); });
+  await assert.rejects(service.prepareRidePayment(f.models, ride._id, userId, { method: "telebirr" }, "E_Shopping"), /not configured/);
+});
+
+test("Telebirr ride initiation persists identity once, resumes its link and verifies via the gateway", async (t) => {
+  const gateway = require("../helpers/checkout-telebirr"), orders = require("../service/createOrder");
+  t.mock.method(gateway, "requireConfigured", () => {});
+  const f = fixture(), ride = await f.booking({ status: "completed", finalFare: 150, currency: "etb" });
+  const prepared = await service.prepareRidePayment(f.models, ride._id, userId, { method: "telebirr" }, "E_Shopping");
+  let starts = 0;
+  t.mock.method(orders, "createOrder", async (req, res) => {
+    starts++;
+    assert.equal(f.tables.Ride[0].telebirrMerchantOrderId, req.body.merchantOrderId);
+    assert.equal(req.body.amount, "150.00");
+    assert.equal(req.body.clientType, "mobile");
+    res.json({ prepay_id: "prepay", paymentUrl: "https://gateway.example.test/ride" });
+  });
+  const attempts = await Promise.allSettled([
+    service.rideTelebirrPayment(f.models, prepared, "mobile"),
+    service.rideTelebirrPayment(f.models, prepared, "mobile"),
+  ]);
+  assert.equal(attempts.filter((attempt) => attempt.status === "fulfilled").length, 1);
+  assert.equal(starts, 1);
+  const saved = await f.models.Ride.findById(ride._id);
+  f.tables.SiteSetting.push({ key: "payment-methods", paymentMethods: { telebirr: false } });
+  assert.equal((await service.rideTelebirrPayment(f.models, saved, "web")).paymentUrl, saved.telebirrPaymentUrl);
+  t.mock.method(gateway, "query", async (group) => {
+    assert.equal(group.totalPrice, 150);
+    assert.equal(group.telebirrMerchantOrderId, saved.telebirrMerchantOrderId);
+    return { order_status: "WAIT_PAY" };
+  });
+  await assert.rejects(service.confirmRidePayment(f.models, saved, "E_Shopping", {}), /not confirmed/);
+  t.mock.method(gateway, "query", async () => ({ order_status: "ORDER_CLOSED" }));
+  await assert.rejects(service.confirmRidePayment(f.models, saved, "E_Shopping", {}), /closed.*Contact support/);
+  assert.equal((await f.models.Ride.findById(ride._id)).paymentStatus, "pending");
+  t.mock.method(gateway, "query", async () => ({ order_status: "PAY_SUCCESS", payment_order_id: "verified-transaction" }));
+  const paid = await service.confirmRidePayment(f.models, saved, "E_Shopping", {});
+  assert.equal(paid.paymentStatus, "completed");
+  assert.equal(paid.telebirrTransactionId, "verified-transaction");
+  assert.equal((await service.confirmRidePayment(f.models, paid, "E_Shopping", {})).paymentStatus, "completed");
+});
+
+test("ambiguous Telebirr ride starts never create another payment and disabled switches block new starts", async (t) => {
+  const gateway = require("../helpers/checkout-telebirr"), orders = require("../service/createOrder");
+  t.mock.method(gateway, "requireConfigured", () => {});
+  const f = fixture(), ride = await f.booking({ status: "completed", finalFare: 150, currency: "etb", paymentMethod: "telebirr" });
+  f.tables.SiteSetting.push({ key: "payment-methods", paymentMethods: { telebirr: false } });
+  await assert.rejects(service.rideTelebirrPayment(f.models, ride, "web"), /temporarily unavailable/);
+  f.tables.SiteSetting.pop();
+  let starts = 0;
+  t.mock.method(orders, "createOrder", async () => { starts++; throw new Error("Gateway timeout"); });
+  await assert.rejects(service.rideTelebirrPayment(f.models, ride, "web"), /Gateway timeout/);
+  const saved = await f.models.Ride.findById(ride._id);
+  assert.ok(saved.telebirrMerchantOrderId);
+  await assert.rejects(service.rideTelebirrPayment(f.models, saved, "web"), /unresolved/);
+  assert.equal(starts, 1);
+});
 test("disabled ride methods block new payment selection while saved methods remain recoverable", async () => {
   const f = fixture(), ride = await f.booking({ status: "completed", finalFare: 8, completedAt: new Date() });
   const original = f.models.SiteSetting.findOne;

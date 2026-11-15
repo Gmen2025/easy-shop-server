@@ -15,7 +15,7 @@ function available() {
 }
 
 function requireConfigured() {
-  if (!available()) throw Object.assign(new Error("Live Telebirr gateway is not configured. Contact Admin or choose bank transfer."), { status: 503 });
+  if (!available()) throw Object.assign(new Error("Telebirr gateway is not configured for verified payments. Contact Admin or choose bank transfer."), { status: 503 });
 }
 
 async function query(group) {

@@ -684,7 +684,24 @@ test("disabled and unconfigured Telebirr block new USA ETB reservations; native/
   f.models.SiteSetting.findOne = () => query({ paymentMethods: { telebirr: false } });
   await assert.rejects(prepare(f.models, f.group._id, userId, "E_ShopUSA", { ...f.body, method: "telebirr" }), /temporarily unavailable/);
   const native = fixture();
-  await assert.rejects(prepare(native.models, native.group._id, userId, "E_ShopUSA", { ...native.body, method: "telebirr" }), /only for USA products paid in ETB/);
+  await assert.rejects(prepare(native.models, native.group._id, userId, "E_ShopUSA", { ...native.body, method: "telebirr" }), /requires an Ethiopia ETB/);
+});
+
+test("domestic Ethiopia ETB checkout reserves and activates only after verified Telebirr payment", async (t) => {
+  const gateway = require("../helpers/checkout-telebirr");
+  t.mock.method(gateway, "requireConfigured", () => {});
+  const f = fixture();
+  f.group.currency = "etb";
+  await prepare(f.models, f.group._id, userId, "E_Shopping", { ...f.body, method: "telebirr" });
+  assert.equal(f.group.status, "awaiting_payment");
+  assert.deepEqual(f.stocks.map((stock) => stock.reserved), [2, 2]);
+  f.group.telebirrMerchantOrderId = `AG${f.group._id}`;
+  const payment = { merch_order_id: f.group.telebirrMerchantOrderId, order_status: "PAY_SUCCESS",
+    trans_currency: "ETB", total_amount: String(f.group.totalPrice), payment_order_id: "domestic-payment" };
+  await assert.rejects(activate(f.models, f.group._id, { telebirrPayment: { ...payment, total_amount: "1" } }), /not been verified/);
+  await activate(f.models, f.group._id, { telebirrPayment: payment });
+  assert.equal(f.group.paymentStatus, "completed");
+  assert.ok(f.orders.every((order) => order.paymentTransactionId === "domestic-payment"));
 });
 
 test("closed Telebirr orders release holds, but status errors and unknown payments never release stock", async (t) => {

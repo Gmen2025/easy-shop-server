@@ -55,7 +55,8 @@ async function dispatch(req, rideId) {
 }
 
 router.get("/config", endpoint(async (req, res) => {
-  res.json((await req.dbModels.SiteSetting.findOne({ key: CONFIG_KEY }).lean())?.rideConfig || { enabled: false });
+  const config = (await req.dbModels.SiteSetting.findOne({ key: CONFIG_KEY }).lean())?.rideConfig || { enabled: false };
+  res.json({ ...config, telebirrAvailable: !/usa/i.test(req.dbName) && require("../helpers/checkout-telebirr").available() });
 }));
 router.post("/quote-options", endpoint(async (req, res) => {
   const quotes = await service.quoteRide(req.dbModels, req.auth.userId, req.dbName, req.body, { compare: true });
@@ -369,8 +370,10 @@ router.post("/:id/payment-method", endpoint(async (req, res) => {
 }));
 router.post("/:id/payment", endpoint(async (req, res) => {
   const ride = await ownedRide(req);
-  const result = await service.ridePaymentIntent(req.dbModels, ride, req.dbName);
-  res.json({ ride: publicRide(result.ride), clientSecret: result.clientSecret });
+  const result = ride.paymentMethod === "telebirr"
+    ? await service.rideTelebirrPayment(req.dbModels, ride, req.body?.clientType)
+    : await service.ridePaymentIntent(req.dbModels, ride, req.dbName);
+  res.json({ ride: publicRide(result.ride), clientSecret: result.clientSecret, paymentUrl: result.paymentUrl });
 }));
 router.post("/:id/payment-confirm", endpoint(async (req, res) => {
   const ride = await ownedRide(req);
@@ -388,7 +391,7 @@ router.post("/:id/received-payment", endpoint(async (req, res) => {
       const driver = await selfDriver(req);
       if (service.id(ride.driver) !== service.id(driver)) throw Object.assign(new Error("Only the assigned driver can confirm cash received."), { status: 403 });
     }
-  } else throw conflict("Card payments must be verified through Stripe.");
+  } else throw conflict("Online payments must be verified through their gateway.");
   const updated = await req.dbModels.Ride.findOneAndUpdate({ _id: ride._id, status: ride.status,
     paymentStatus: "pending", paymentMethod: ride.paymentMethod,
     ...(ride.paymentMethod === "bank" ? { bankReference: ride.bankReference } : {}),

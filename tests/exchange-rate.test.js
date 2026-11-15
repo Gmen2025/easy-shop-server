@@ -27,14 +27,14 @@ function request(method, path, models, body = {}, isAdmin = true, database = "E_
   const response = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; return this; } };
   return route.stack[0].handle({ dbModels: models, dbName: database, auth: { userId: "user", isAdmin }, body }, response).then(() => response);
 }
-test("exchange policy exposes Telebirr gateway readiness only for USA ETB exports and retains USD card readiness", async (t) => {
+test("exchange policy exposes Telebirr gateway readiness for Ethiopia ETB and USA ETB exports", async (t) => {
   const gateway = require("../helpers/checkout-telebirr");
   t.mock.method(gateway, "available", () => true);
   const { models } = fixture();
   const usa = await request("get", "/", models, {}, false, "E_ShopUSA");
   const ethio = await request("get", "/", models, {}, false, "E_Shopping");
   assert.equal(usa.body.telebirrAvailable, true);
-  assert.equal(ethio.body.telebirrAvailable, false);
+  assert.equal(ethio.body.telebirrAvailable, true);
   assert.equal(usa.body.cardAvailable, false);
   t.mock.method(gateway, "available", () => false);
   assert.equal((await request("get", "/", models, {}, false, "E_ShopUSA")).body.telebirrAvailable, false);

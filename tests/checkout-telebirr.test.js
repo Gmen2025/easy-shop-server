@@ -124,5 +124,5 @@ test("status queries use authenticated gateway responses and reject mismatched o
   assert.equal(gateway.closed({ order_status: "PAY_FAILED" }), true);
   process.env.USE_MOCK_TELEBIRR = "true";
   assert.equal(gateway.available(), false);
-  await assert.rejects(gateway.query(group), /Live Telebirr gateway is not configured/);
+  await assert.rejects(gateway.query(group), /Telebirr gateway is not configured/);
 });
