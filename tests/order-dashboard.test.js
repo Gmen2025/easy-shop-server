@@ -196,8 +196,8 @@ test("store dashboard returns pending scheduled orders and keeps completed-sales
     auth: { userId: "owner-a" },
     dbModels: {
       Store: { find: () => query([]), findOne(filter) {
-        assert.deepEqual(filter, { owner: "owner-a", isCompanyOwned: true });
-        return query({ _id: storeId, name: "Company store" });
+        assert.deepEqual(filter, { owner: "owner-a", approvalStatus: "approved" });
+        return query({ _id: storeId, name: "Independent store", isCompanyOwned: false });
       } },
       Product: { find: () => query([]), countDocuments: async () => 0 },
       OrderItem: { find: () => query([]) },

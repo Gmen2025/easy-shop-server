@@ -124,19 +124,25 @@ test("available balances exclude unpaid, cash, refunded, other-currency and alre
 });
 
 test("reports separate owned revenue, independent fees, services and unallocated amounts without double counting", () => {
-  const row = { category: "products", voided: false, ...finance.allocation(100, {}, "products") };
+  const row = { category: "products", voided: false, ...finance.allocation(100,
+    { isCompanyOwned: false, financeFees: { products: { type: "percent", value: 5 } } }, "products") };
   const report = finance.summarizeEntries([
-    row, { category: "rides", ...finance.allocation(50, { isCompanyOwned: true }, "rides") },
+    row,
+    { category: "delivery", ...finance.allocation(10, { isCompanyOwned: false,
+      financeFees: { delivery: { type: "percent", value: 15 } } }, "delivery") },
+    { category: "rides", ...finance.allocation(50, { isCompanyOwned: true }, "rides") },
+    { category: "rides", ...finance.allocation(20, { isCompanyOwned: false,
+      financeFees: { rides: { type: "fixed", value: 2 } } }, "rides") },
     { category: "services", ...finance.allocation(20, null, "services") },
     { category: "delivery", ...finance.allocation(10, null, "delivery") }, { ...row, voided: true },
   ]);
-  assert.equal(report.gross, 180);
-  assert.equal(report.adduGenetIncome, 75);
-  assert.equal(report.independentIncome, 95);
+  assert.equal(report.gross, 210);
+  assert.equal(report.adduGenetIncome, 78.5);
+  assert.equal(report.independentIncome, 121.5);
   assert.equal(report.unallocatedIncome, 10);
   assert.equal(report.ownedIncome, 50);
   assert.equal(report.serviceIncome, 20);
-  assert.equal(report.platformFees, 5);
+  assert.equal(report.platformFees, 8.5);
 });
 
 test("concurrent payout requests reserve at most available funds and route excess requests to unreserved review", async () => {

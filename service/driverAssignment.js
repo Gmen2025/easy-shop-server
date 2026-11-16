@@ -28,8 +28,8 @@ async function change(models, orderId, { admin = false, ownerId, respondingDrive
     }
     if (!admin) {
       if (respondingDriver) {
-        if (!respondingDriver.isCompanyOwned || orders.some((entry) =>
-          id(entry.driver || entry.companyOfferDriver) !== id(respondingDriver))) {
+        if (orders.some((entry) => id(entry.driver || entry.companyOfferDriver) !== id(respondingDriver)) ||
+            !respondingDriver.isCompanyOwned && orders.some((entry) => !entry.driver)) {
           throw Object.assign(new Error("This delivery is not assigned or offered to you."), { status: 403 });
         }
       } else {

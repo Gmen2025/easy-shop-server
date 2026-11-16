@@ -815,7 +815,7 @@ router.put("/:id/company-claim", async (req, res) => {
  * @swagger
  * /api/v1/orders/{id}/company-reject:
  *   put:
- *     summary: Company driver flags a delivery for non-blocking Admin review, leaving it available to other drivers
+ *     summary: Assigned driver releases or flags a delivery before pickup, leaving it available to other drivers
  *     tags: [Orders]
  *     security:
  *       - bearerAuth: []
@@ -828,14 +828,16 @@ const respondToCompanyOffer = async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid order id." });
     }
 
-    const driver = await Driver.findOne({ user: req.auth?.userId, isCompanyOwned: true });
+    const driver = await Driver.findOne({ user: req.auth?.userId });
     if (!driver) {
-      return res.status(403).json({ success: false, message: "Only company drivers can reject deliveries." });
+      return res.status(403).json({ success: false, message: "A driver profile is required to respond to deliveries." });
     }
-
     const order = await Order.findById(req.params.id);
     if (!order) {
       return res.status(404).json({ success: false, message: "Order not found." });
+    }
+    if (!order.driver && !driver.isCompanyOwned && String(order.companyOfferDriver) !== String(driver._id)) {
+      return res.status(403).json({ success: false, message: "This delivery is not assigned or offered to you." });
     }
     if (order.cartRouteVersion === 1 || order.storeDispatchBatch) {
       const action = req.path.endsWith("/company-reroute") ? "reroute" : "reject";

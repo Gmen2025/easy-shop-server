@@ -47,7 +47,7 @@ function match(record, filter) {
     return String(value) === String(expected);
   });
 }
-function fixture() {
+function fixture({ companyOwned = true } = {}) {
   const tables = {};
   const models = {};
   let nextId = 100;
@@ -116,7 +116,7 @@ function fixture() {
   }
   tables.SiteSetting.push({ _id: id(10), key: routing.CONFIG_KEY, rideConfig: config },
     { _id: id(11), key: "bank-account-info", bankAccounts: [{ _id: id(12), bankName: "Bank", accountNumber: "123", isActive: true }] });
-  tables.Driver.push({ _id: driverId, user: id(3), name: "Driver", isCompanyOwned: true, approvalStatus: "approved",
+  tables.Driver.push({ _id: driverId, user: id(3), name: "Driver", isCompanyOwned: companyOwned, approvalStatus: "approved",
     isAvailable: true, serviceModes: { delivery: true, regular: true, shared: true }, sharedIntakeOpen: true,
     passengerSeats: 3, vehicleType: "car", profilePhotoUrl: "https://res.cloudinary.com/test/image/upload/v1/driver.jpg",
     rideProfilePhotoUpdatedAt: new Date(), location: point(0), rideLocationUpdatedAt: new Date() });
@@ -132,6 +132,18 @@ async function assigned(f, overrides) {
   await service.acceptRide(f.models, ride._id, driverId, { lookup });
   return f.models.Ride.findById(ride._id);
 }
+
+test("approved independent drivers can provide rides under the same vehicle, photo and availability checks", async () => {
+  const f = fixture({ companyOwned: false });
+  const ride = await assigned(f);
+  assert.equal(ride.status, "assigned");
+  assert.equal(ride.driver, driverId);
+  f.tables.Driver[0].isAvailable = false;
+  const next = await f.booking({ user: id(40) });
+  await service.requestRide(f.models, next._id, id(40));
+  await service.dispatchRide(f.models, next._id, { lookup });
+  assert.equal((await f.models.Ride.findById(next._id)).status, "waiting");
+});
 
 test("ride availability blocks quotes and stale quote requests, but preserves dispatch, completion and settlement", async () => {
   for (const database of ["E_Shopping", "E_ShopUSA"]) {

@@ -198,7 +198,9 @@ async function dispatch(models, order, io, { companyDriverId, sharedDriverId, ma
 
 async function respond(models, order, driver, action = "reject") {
   if (!["reject", "reroute"].includes(action)) throw Object.assign(new Error("Invalid delivery response."), { status: 400 });
-  if (!driver.isCompanyOwned) throw Object.assign(new Error("Only company drivers can respond to deliveries."), { status: 403 });
+  if (!order.driver && !driver.isCompanyOwned && id(order.companyOfferDriver) !== id(driver)) {
+    throw Object.assign(new Error("This delivery is not assigned or offered to you."), { status: 403 });
+  }
   if (order.driver) {
     if (id(order.driver) !== id(driver)) throw conflict("This delivery is assigned to another driver.");
     const result = await require("./driverAssignment").reroute(models, order._id, { respondingDriver: driver, action });
@@ -208,7 +210,8 @@ async function respond(models, order, driver, action = "reject") {
   await models.Order.db.transaction(async (session) => {
     const { group, orders } = await loadCart(models, order, session);
     if (!ready(orders) || group.routeDriver || liveOrders(orders).some((entry) => driverRejected(entry, driver)) ||
-        group.store && liveOrders(orders).some((entry) => id(entry.companyOfferDriver) !== id(driver))) {
+        group.store && liveOrders(orders).some((entry) => id(entry.companyOfferDriver) !== id(driver)) ||
+        !driver.isCompanyOwned && liveOrders(orders).some((entry) => id(entry.companyOfferDriver) !== id(driver))) {
       throw conflict("This complete cart is no longer available or you have already responded.");
     }
     await groupModel(models, group).updateOne({ _id: group._id }, { $inc: { fulfillmentRevision: 1 } }, { session });

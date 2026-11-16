@@ -22,13 +22,16 @@ router.use(["/login", "/driver-login", "/store-owner-login"], async (req, res, n
 });
 
 const getCompanyStoreRole = async (req, user) => {
-  const store = await req.dbModels.Store.findOne({
+  const [companyStore, linkedStore] = await Promise.all([
+    req.dbModels.Store.findOne({
     owner: user._id, isCompanyOwned: true,
-  }).select("isCompanyOwned approvalStatus");
+    }).select("isCompanyOwned approvalStatus"),
+    req.dbModels.Store.findOne({ owner: user._id, approvalStatus: "approved" }).select("approvalStatus"),
+  ]);
   return {
-    isCompanyOwnedStore: Boolean(store),
-    isStoreOwner: Boolean(user.isStoreOwner || store),
-    storeOwnerApprovalStatus: store?.approvalStatus || user.storeOwnerApprovalStatus || null,
+    isCompanyOwnedStore: Boolean(companyStore),
+    isStoreOwner: Boolean(user.isStoreOwner || linkedStore || companyStore),
+    storeOwnerApprovalStatus: companyStore?.approvalStatus || linkedStore?.approvalStatus || user.storeOwnerApprovalStatus || null,
   };
 };
 

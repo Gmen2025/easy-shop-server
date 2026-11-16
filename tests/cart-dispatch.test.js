@@ -179,8 +179,17 @@ test("only the designated driver can reject or reroute a store batch; nearby par
   await dispatch(f.models, f.orders[0], f.io, f.options);
   await assert.rejects(respond(f.models, f.orders[0], f.drivers[1]), { status: 409 });
   f.drivers[1].isCompanyOwned = false;
+  await assert.rejects(respond(f.models, f.orders[0], f.drivers[1]), { status: 403 });
   const result = await dispatch(f.models, f.orders[0], f.io, { ...f.options, sharedDriverId: "d2" });
   assert.equal(result.driverId, "d2");
+});
+
+test("independent drivers can release their assigned cart before pickup", async () => {
+  const f = fixture({ partner: true });
+  await dispatch(f.models, f.orders[0], f.io, { ...f.options, sharedDriverId: "d1" });
+  await respond(f.models, f.orders[0], f.drivers[0], "reroute");
+  assert.ok(f.orders.every((order) => !order.driver && order.companyDriverResponses[0].action === "reroute"));
+  assert.equal(f.group.deliveryFee, 10);
 });
 
 test("dispatching-store owners can reroute an accepted whole batch, but never after any pickup", async () => {
@@ -494,7 +503,7 @@ test("offline company responses release unclaimed carts without an offer or anot
   await assert.rejects(respond(f.models, f.orders[0], f.drivers[0]), { status: 409 });
 });
 
-test("company responses cannot release assigned, store-pending, admin-review or future carts; partners cannot respond", async () => {
+test("company responses cannot release invalid carts; partners cannot respond to unassigned offers", async () => {
   for (const change of [
     (f) => { f.group.routeDriver = "d2"; },
     (f) => { f.orders[1].driver = "d2"; },
@@ -576,6 +585,10 @@ test("shared queue API blocks every address until its own cart pickups finish, i
   orders[1].deliveryStatus = "Picked Up";
   await handler(req, res);
   assert.ok(res.body.queue.every((entry) => entry.dropoffReady));
+  orders.forEach((order) => { order.deliveryStatus = "Driver Assigned"; });
+  req.dbModels.Driver.findOne = () => query({ _id: "driver", isCompanyOwned: false, location: point(0) });
+  await handler(req, res);
+  assert.ok(res.body.queue.every((entry) => entry.canRerouteBeforePickup));
 });
 
 test("unclaimed carts are shared across available company and nearby partner drivers, regardless of designated offer", async () => {

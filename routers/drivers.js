@@ -670,7 +670,7 @@ operatorGet(router, "/me/queue", "/admin/:accountId/queue", async (req, res) => 
           order.cartRouteVersion === 1 ? pendingCartPickups(orders, order.checkoutGroup) : [];
         return {
           ...buildDriverOrderSummary(order, { forceReveal }),
-          canRerouteBeforePickup: forceReveal && orders.filter((entry) =>
+          canRerouteBeforePickup: orders.filter((entry) =>
             require("../service/cartDispatch").unit(entry) === require("../service/cartDispatch").unit(order))
             .every((entry) => entry.deliveryStatus === "Driver Assigned"),
           ...(order.cartRouteVersion === 1 || order.storeDispatchBatch ? {

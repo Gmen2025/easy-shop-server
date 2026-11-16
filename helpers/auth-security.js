@@ -189,7 +189,8 @@ async function buildLoginResponse(req, user, kind, extra) {
     const store = await req.dbModels.Store.findOne({ owner: user._id });
     if (!store || store.approvalStatus !== "approved") throw fail("Store account is not approved", 403);
     claims.role = "store_owner";
-    response = { ...common, role: "store_owner", storeId: store._id, isCompanyOwned: Boolean(store.isCompanyOwned) };
+    response = { ...common, role: "store_owner", storeId: store._id, isStoreOwner: true,
+      isCompanyOwnedStore: Boolean(store.isCompanyOwned), isCompanyOwned: Boolean(store.isCompanyOwned) };
   } else if (kind === "upgrade") {
     claims = { ...claims, isDriver: true, role: "driver" };
     response = { ...extra, user: { ...common, isAdmin: user.isAdmin, isDriver: user.isDriver, role: user.role } };
@@ -197,13 +198,16 @@ async function buildLoginResponse(req, user, kind, extra) {
     claims.isAdmin = false;
     response = extra;
   } else {
-    const store = await req.dbModels.Store.findOne({ owner: user._id, isCompanyOwned: true }).select("isCompanyOwned approvalStatus");
+    const [companyStore, linkedStore] = await Promise.all([
+      req.dbModels.Store.findOne({ owner: user._id, isCompanyOwned: true }).select("isCompanyOwned approvalStatus"),
+      req.dbModels.Store.findOne({ owner: user._id, approvalStatus: "approved" }).select("approvalStatus"),
+    ]);
     const driver = user.isDriver ? await req.dbModels.Driver.findOne({ user: user._id }).select("isCompanyOwned") : null;
     response = {
       ...common, isAdmin: user.isAdmin, isDriver: user.isDriver, role: user.role,
       isEmailVerified: user.isEmailVerified, isCompanyOwnedDriver: Boolean(driver?.isCompanyOwned),
-      isCompanyOwnedStore: Boolean(store), isStoreOwner: Boolean(user.isStoreOwner || store),
-      storeOwnerApprovalStatus: store?.approvalStatus || user.storeOwnerApprovalStatus || null,
+      isCompanyOwnedStore: Boolean(companyStore), isStoreOwner: Boolean(user.isStoreOwner || linkedStore || companyStore),
+      storeOwnerApprovalStatus: companyStore?.approvalStatus || linkedStore?.approvalStatus || user.storeOwnerApprovalStatus || null,
     };
   }
   return { ...response, token: jwt.sign(claims, process.env.secret, { expiresIn: kind === "register-store" ? "7d" : "1d" }) };

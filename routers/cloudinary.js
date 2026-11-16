@@ -94,8 +94,8 @@ router.post('/sign', async (req, res) => {
       if (Object.keys(req.body).some((key) => key !== 'folder')) {
         return res.status(400).json({ message: 'Ride photo uploads only accept a folder.' });
       }
-      if (folder === 'driver_profiles' && !isAdmin && !await req.dbModels.Driver.exists({ user: req.auth.userId, isCompanyOwned: true })) {
-        return res.status(403).json({ message: 'A linked company driver is required.' });
+      if (folder === 'driver_profiles' && !isAdmin && !await req.dbModels.Driver.exists({ user: req.auth.userId })) {
+        return res.status(403).json({ message: 'A linked driver account is required.' });
       }
     } else if (isStoreOwner && !isAdmin) {
       if (paramsToSign.folder !== 'eshop/products' || !req.auth?.userId) {

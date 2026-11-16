@@ -268,9 +268,9 @@ operatorGet(router, "/me/dashboard", "/admin/:accountId/dashboard", async (req, 
       return res.status(401).json({ success: false, message: "Unauthorized" });
     }
 
-    const store = await Store.findOne(operatorScope(req, "store", { owner: userId, isCompanyOwned: true })).select("_id name");
+    const store = await Store.findOne(operatorScope(req, "store", { owner: userId, approvalStatus: "approved" })).select("_id name");
     if (!store) {
-      return res.status(404).json({ success: false, message: "Company store profile not found." });
+      return res.status(404).json({ success: false, message: "Approved store profile not found." });
     }
 
     await reconcileUnassignedPickupStores(req.dbModels);

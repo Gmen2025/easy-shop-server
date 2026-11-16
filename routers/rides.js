@@ -33,8 +33,8 @@ async function ownedRide(req) {
   return ride;
 }
 async function selfDriver(req) {
-  const driver = await req.dbModels.Driver.findOne({ user: req.auth.userId, isCompanyOwned: true });
-  if (!driver) throw Object.assign(new Error("Only company drivers can manage ride assignments."), { status: 403 });
+  const driver = await req.dbModels.Driver.findOne({ user: req.auth.userId, approvalStatus: "approved" });
+  if (!driver) throw Object.assign(new Error("An approved driver profile is required to manage ride assignments."), { status: 403 });
   return driver;
 }
 function publicRide(ride) {
@@ -70,13 +70,13 @@ router.put("/config", endpoint(async (req, res) => {
 }));
 router.get("/admin/drivers", endpoint(async (req, res) => {
   admin(req);
-  res.json(await req.dbModels.Driver.find({ isCompanyOwned: true }).select("name vehicleType vehicle.type pendingVehicleType carClass passengerSeats serviceModes sharedIntakeOpen activeRideTrip").lean());
+  res.json(await req.dbModels.Driver.find({}).select("name isCompanyOwned vehicleType vehicle.type pendingVehicleType carClass passengerSeats serviceModes sharedIntakeOpen activeRideTrip").lean());
 }));
 router.put("/admin/drivers/:id", endpoint(async (req, res) => {
   admin(req);
   checkId(req.params.id);
-  const driver = await req.dbModels.Driver.findOne({ _id: req.params.id, isCompanyOwned: true });
-  if (!driver) throw conflict("Company driver not found.");
+  const driver = await req.dbModels.Driver.findById(req.params.id);
+  if (!driver) throw conflict("Driver not found.");
   await req.dbModels.Driver.db.transaction(async (session) => {
     const current = await req.dbModels.Driver.findById(driver._id).session(session);
     const type = req.body.vehicleType === undefined ? vehicleName(current) : req.body.vehicleType;

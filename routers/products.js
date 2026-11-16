@@ -754,7 +754,7 @@ router.get('/admin/company-fulfillable', requireAdmin, async (req, res) => {
  * @swagger
  * /api/v1/products/company/my-products:
  *   get:
- *     summary: Self-service list of products for the authenticated company store to mark ready/reject
+ *     summary: Self-service list of products for the authenticated approved store to mark ready/reject
  *     tags: [Products]
  *     security:
  *       - bearerAuth: []
@@ -767,9 +767,9 @@ operatorGet(router, '/company/my-products', '/admin/stores/:accountId/fulfillmen
             return res.status(401).json({ success: false, message: 'Unauthorized' });
         }
 
-        const store = await Store.findOne(operatorScope(req, "store", { owner: userId, isCompanyOwned: true }));
+        const store = await Store.findOne(operatorScope(req, "store", { owner: userId, approvalStatus: "approved" }));
         if (!store) {
-            return res.status(403).json({ success: false, message: 'Only company stores can access this list.' });
+            return res.status(403).json({ success: false, message: 'An approved store is required to access this list.' });
         }
         if (req.params?.accountId && await inventoryEnabled(req.dbModels)) return res.json({ success: true, products: [] });
 
@@ -808,7 +808,7 @@ operatorGet(router, '/company/my-products', '/admin/stores/:accountId/fulfillmen
  * @swagger
  * /api/v1/products/{id}/company-ready:
  *   put:
- *     summary: Authenticated company store marks a product ready for fulfillment
+ *     summary: Approved store owner marks an eligible product ready for fulfillment
  *     tags: [Products]
  *     security:
  *       - bearerAuth: []
@@ -816,13 +816,16 @@ operatorGet(router, '/company/my-products', '/admin/stores/:accountId/fulfillmen
 router.put('/:id/company-ready', async (req, res) => {
     try {
         const { Product, Store } = req.dbModels;
+        if (!req.auth?.userId) {
+            return res.status(401).json({ success: false, message: 'Sign in as a store owner to respond to product fulfillment.' });
+        }
         if (!mongoose.isValidObjectId(req.params.id)) {
             return res.status(400).json({ success: false, message: 'Invalid product id.' });
         }
 
-        const store = await Store.findOne({ owner: req.auth?.userId, isCompanyOwned: true });
+        const store = await Store.findOne({ owner: req.auth?.userId, approvalStatus: 'approved' });
         if (!store) {
-            return res.status(403).json({ success: false, message: 'Only company stores can accept products.' });
+            return res.status(403).json({ success: false, message: 'An approved store is required to accept products.' });
         }
 
         const product = await Product.findById(req.params.id);
@@ -849,7 +852,7 @@ router.put('/:id/company-ready', async (req, res) => {
  * @swagger
  * /api/v1/products/{id}/company-reject:
  *   put:
- *     summary: Authenticated company store rejects a product (does not delete it)
+ *     summary: Approved store owner rejects an eligible product (does not delete it)
  *     tags: [Products]
  *     security:
  *       - bearerAuth: []
@@ -857,13 +860,16 @@ router.put('/:id/company-ready', async (req, res) => {
 router.put('/:id/company-reject', async (req, res) => {
     try {
         const { Product, Store } = req.dbModels;
+        if (!req.auth?.userId) {
+            return res.status(401).json({ success: false, message: 'Sign in as a store owner to respond to product fulfillment.' });
+        }
         if (!mongoose.isValidObjectId(req.params.id)) {
             return res.status(400).json({ success: false, message: 'Invalid product id.' });
         }
 
-        const store = await Store.findOne({ owner: req.auth?.userId, isCompanyOwned: true });
+        const store = await Store.findOne({ owner: req.auth?.userId, approvalStatus: 'approved' });
         if (!store) {
-            return res.status(403).json({ success: false, message: 'Only company stores can reject products.' });
+            return res.status(403).json({ success: false, message: 'An approved store is required to reject products.' });
         }
 
         const product = await Product.findById(req.params.id);
@@ -890,7 +896,7 @@ router.put('/:id/company-reject', async (req, res) => {
  * @swagger
  * /api/v1/products/admin/company-rejections:
  *   get:
- *     summary: Admin lists products rejected by company stores
+ *     summary: Admin lists products rejected by stores
  *     tags: [Products]
  *     security:
  *       - bearerAuth: []

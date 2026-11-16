@@ -917,12 +917,31 @@ test("company responses reject stale or ineligible legacy requests and cannot ov
   }
   const f = dispatchFixture({ partner: true });
   f.models.Driver.findOne = (filter) => {
-    assert.equal(filter.isCompanyOwned, true);
+    assert.equal(filter.user, f.candidate.user);
     return query(null);
   };
   const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
   await handler({ auth: { userId: f.candidate.user }, params: { id: String(f.order._id) }, dbModels: f.models }, res);
   assert.equal(res.code, 403);
+});
+
+test("independent drivers can reroute only their own assigned delivery through the response endpoint", async () => {
+  const f = dispatchFixture({ partner: true, assigned: true });
+  f.order.deliveryStatus = "Driver Assigned";
+  f.order.status = "Driver Assigned";
+  f.order.dispatchStatus = "driver_assigned";
+  f.order.companyDriverResponses = [];
+  f.order.save = async () => f.order;
+  f.models.Driver.findOneAndUpdate = async () => f.candidate;
+  const handler = orderRouter.stack.find((entry) => entry.route?.path === "/:id/company-reroute" &&
+    entry.route.methods.put).route.stack.at(-1).handle;
+  const res = { status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+  await handler({ auth: { userId: f.candidate.user }, path: "/order/company-reroute",
+    params: { id: String(f.order._id) }, dbModels: f.models }, res);
+  assert.equal(res.code, undefined);
+  assert.equal(res.body.success, true);
+  assert.equal(f.order.driver, null);
+  assert.equal(f.order.companyDriverResponses[0].action, "reroute");
 });
 
 test("already assigned and future scheduled orders are not dispatched", async () => {

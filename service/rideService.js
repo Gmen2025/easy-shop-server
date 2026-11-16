@@ -58,7 +58,7 @@ async function driverRoutePath(models, driver, { compute = computeDrivingRoute }
 const id = (value) => String(value?._id || value || "");
 const available = (driver) => driver.approvalStatus === "approved" && !driver.isSuspended && !driver.depositBlocked &&
   (driver.isAvailable === true || driver.availabilityStatus === true);
-const modeEnabled = (driver, mode, now = new Date()) => driver.isCompanyOwned && available(driver) &&
+const modeEnabled = (driver, mode, now = new Date()) => available(driver) &&
   !driver.pendingVehicleType &&
   driver.serviceModes?.[mode] === true && ["car", "van"].includes(vehicleName(driver)) &&
   Number.isSafeInteger(driver.passengerSeats) && driver.passengerSeats > 0 &&
@@ -174,7 +174,7 @@ async function dispatchRide(models, rideId, { now = new Date(), lookup = roadLeg
     return;
   }
   const drivers = await models.Driver.find({
-    isCompanyOwned: true, approvalStatus: "approved", isSuspended: { $ne: true }, depositBlocked: { $ne: true },
+    approvalStatus: "approved", isSuspended: { $ne: true }, depositBlocked: { $ne: true },
     [`serviceModes.${ride.mode}`]: true, pendingRideOffer: null, exclusiveDelivery: null,
     profilePhotoUrl: { $ne: "" },
     rideProfilePhotoUpdatedAt: { $gt: new Date(now.getTime() - RIDE_PROFILE_PHOTO_MAX_AGE_MS) },
