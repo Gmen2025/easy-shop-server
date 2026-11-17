@@ -180,7 +180,8 @@ tariff remains international shipping; USA store-to-hub and international
 shipping charges apply for both fulfillment choices. The separate final-delivery
 fee is charged once per recipient shipment if any supplying store is delivery,
 and split only among its delivery orders. Quotes and payments snapshot these
-fees/addresses. Duties/customs remain excluded.
+fees/addresses. Duties/customs are excluded from checkout and charged later by
+the destination hub (see "Inbound international hub").
 
 Address validation accepts an omitted optional `address2` (apartment/unit), as
 well as an omitted Ethiopia postal code, as empty strings. Collection street,
@@ -752,8 +753,9 @@ feed are generated.
 
 The checkout explicitly discloses that shipping applies to pickup and delivery,
 with a separate configured final-delivery fee for delivery only;
-**customs/import duties, charges and clearance are excluded** and are the
-recipient's responsibility. Paid child cancellation/refund is available only
+**customs/import duties, charges and clearance are excluded** from checkout;
+the destination hub records them after arrival and the recipient pays them
+online before release (see "Inbound international hub"). Paid child cancellation/refund is available only
 before driver assignment/hub handling under the existing cancellation rules.
 Refunds use each child's locked ETB amount, including its allocated shipping;
 remaining shipments are not repriced after partial cancellation. Later changes,
@@ -867,7 +869,7 @@ Admin handles carrier booking and actual international/final delivery; this
 feature does not purchase labels. After all store packages reach the Ethiopia
 hub, shipment tracking advances `awaiting_hub -> at_hub -> shipped -> arrived_usa
 -> delivered`, with carrier/tracking and final delivery proof. Import duties and
-customs are excluded. Deploy backend first, configure and enable the hub/tariff,
+customs are charged by the USA hub after arrival (see below). Deploy backend first, configure and enable the hub/tariff,
 apply a current daily exchange rate, approve products and test actual payments
 and fulfillment in staging before rollout.
 
@@ -898,6 +900,56 @@ merchant and provider registry; verify real transaction concurrency, scheduler
 failure/recovery, bank receipt handling and native payments on staging; then
 enable through **Admin > FX Rate** in the Ethiopia region. No inventory migration, rate fetch, live
 activation or deployment is performed by adding this code.
+
+#### Inbound international hub, customs charges and final delivery
+
+Both export routes (USA -> Ethiopia and Ethiopia -> USA) continue into a
+destination workflow run by an **AdduGenet company-owned hub store** in the
+destination region. Routes live in `routers/international.js`
+(`/api/v1/international`) and `helpers/international-hub.js`.
+
+1. **Shipped:** when Admin marks an origin shipment `shipped`, the server
+   generates a customer tracking number (`AG-USET-...` / `AG-ETUS-...`) and
+   notifies the customer, the hub store owner and destination Admins.
+2. **Arrived:** the hub (or Admin) records `arrive` and the shipment enters
+   customs; the origin status becomes `arrived_ethiopia` / `arrived_usa`.
+3. **Charges:** the hub records customs duty, tariff, import tax/VAT,
+   clearance, storage and other itemized costs in the route currency (ETB for
+   USA -> Ethiopia, USD for Ethiopia -> USA). An empty list waives charges. The
+   customer is notified and pays online in the origin region: Telebirr or ETB
+   bank transfer for ETB, card (`STRIPE_*_ETHIOPIA_USD` merchant) or USD bank
+   transfer for USD. Bank transfers enter `bank_review` until Admin confirms or
+   rejects them. Charges lock once a payment starts.
+4. **Collected from customs / release:** after `clear`, the hub can release
+   (`ready`) only once charges are paid or waived. Delivery packages become
+   ready for dispatch; pickup packages become ready for collection.
+5. **Dispatch and delivery:** the hub assigns an approved destination-region
+   driver. The driver confirms pickup from the hub and delivery with a proof
+   note. Pickup packages are completed with the hub `handover` action and the
+   existing customer pickup confirmation. The checkout shipment then becomes
+   `delivered`, and every step notifies the customer.
+
+Endpoints, all with a JWT and `x-database-name` for the region shown:
+
+| Who / region | Endpoint |
+| --- | --- |
+| Admin or hub, destination | `GET hub/access`, `GET hub/config`, `GET hub/shipments[?include=all]`, `GET hub/drivers` |
+| Admin, destination | `PUT hub/config {storeId}`, `GET hub/stores` |
+| Admin or hub, destination | `POST hub/shipments/:groupId/:shipmentId/:action` (`arrive`, `charges`, `clear`, `ready`, `dispatch`, `handover`) |
+| Driver, destination | `GET driver/deliveries`, `POST driver/deliveries/:groupId/:shipmentId/(pickup\|deliver)` |
+| Customer, origin | `POST checkouts/:groupId/shipments/:shipmentId/charges/(pay\|confirm)` |
+| Admin, origin | `POST checkouts/:groupId/shipments/:shipmentId/charges/(bank-confirm\|bank-reject)` |
+
+Setup: in each destination region, Admin selects an approved company-owned
+store as the hub (`PUT international/hub/config`). Hub and driver requests are
+made in the destination region, while the server reads and writes the
+checkout in the paired origin database. Override the pairing with
+`INTL_ETHIOPIA_DB` (default `E_Shopping`) and `INTL_USA_DB` (default
+`E_ShopUSA`). Origin `delivered` is blocked until destination charges are paid
+or waived. Shipments created before this feature keep the earlier
+Admin-only flow. Deploy the backend before the mobile app and website. Test
+Telebirr, Stripe and bank charge payments, cross-region notifications and
+driver flows in staging before rollout.
 
 #### Shared catalog and store-specific inventory
 

@@ -589,6 +589,39 @@ add("post", "/checkouts/{id}/deliveries/{orderId}/manual-refund", "Record an alr
   description: "Bank checkout only; order must belong to checkout, be cancelled and have refundStatus=pending. Records refundStatus=refunded and refundId=reference. Does not move money.",
 });
 
+const intl = (extra = {}) => ({ prefix: "/api/v1/international", ...extra });
+const hubScope = "Bearer authentication required. Called in the destination region (x-database-name: E_Shopping for USA→Ethiopia, E_ShopUSA for Ethiopia→USA); reads/writes the origin region checkout. Admin or owner of the configured AdduGenet inbound hub store.";
+const shipmentParams = { paramSchemas: { shipmentId: { type: "string", minLength: 1, maxLength: 100 } }, paramDescriptions: { shipmentId: "Recipient shipment id from the checkout." } };
+const chargeItem = object({ type: { type: "string", enum: ["customs_duty", "tariff", "tax", "clearance", "storage", "other"] }, amount: money, label: { type: "string", maxLength: 80 } }, ["type", "amount"]);
+const anyObject = { type: "object", additionalProperties: true };
+add("get", "/hub/config", "Read the inbound hub store for this destination region", anyObject, intl({ description: "Returns { config, direction, origin, destination, currency }." }));
+add("put", "/hub/config", "Choose the AdduGenet inbound hub store", anyObject, intl({ ...admin, body: object({ storeId: objectId }, ["storeId"]),
+  description: "Store must be approved and isCompanyOwned in this region." }));
+add("get", "/hub/stores", "List eligible AdduGenet company-owned stores", array(anyObject), intl({ ...admin }));
+add("get", "/hub/access", "Check whether the signed-in user can manage the inbound hub", object({ allowed: boolean, role: text }), intl({ scope: hubScope }));
+add("get", "/hub/shipments", "List inbound international shipments", array(anyObject), intl({ scope: hubScope, forbidden: "Inbound hub access required.",
+  query: [query("include", { type: "string", enum: ["active", "all"] }, "all includes delivered shipments.")] }));
+add("get", "/hub/drivers", "List approved destination drivers for dispatch", array(anyObject), intl({ scope: hubScope, forbidden: "Inbound hub access required." }));
+add("post", "/hub/shipments/{groupId}/{shipmentId}/{action}", "Run an inbound hub action", ref("CommerceSuccess"), intl({ scope: hubScope, ...shipmentParams,
+  paramSchemas: { ...shipmentParams.paramSchemas, action: { type: "string", enum: ["arrive", "charges", "clear", "ready", "dispatch", "handover"] } },
+  forbidden: "Inbound hub access required.", notFound: "International shipment not found.",
+  body: object({ note: string300, charges: array(chargeItem, { maxItems: 12 }), driverId: objectId, orderId: objectId }), bodyRequired: false,
+  description: "arrive (shipped → arrived, in_customs); charges (record customs/duty/tariff/other; empty list waives; locked once payment starts); clear (collected from customs); ready (requires settled charges; ready for delivery and/or pickup); dispatch {driverId}; handover {note, orderId?} for collection packages. The customer is notified at every step." }));
+add("get", "/driver/deliveries", "List international final deliveries assigned to the driver", array(anyObject), intl({ scope: "Bearer authentication; approved, non-suspended driver in the destination region.", forbidden: "Approved driver required." }));
+add("post", "/driver/deliveries/{groupId}/{shipmentId}/{action}", "Confirm hub pickup or final delivery", ref("CommerceSuccess"), intl({
+  scope: "Bearer authentication; the assigned driver.", ...shipmentParams, forbidden: "Assigned driver required.",
+  paramSchemas: { ...shipmentParams.paramSchemas, action: { type: "string", enum: ["pickup", "deliver"] } },
+  body: object({ note: string300 }), bodyRequired: false, description: "deliver requires a proof note and completes the shipment when all collection packages are also confirmed." }));
+const chargeScope = { ...checkoutOwner, ...shipmentParams, notFound: "International shipment not found." };
+add("post", "/checkouts/{groupId}/shipments/{shipmentId}/charges/pay", "Pay customs, duty and related charges", anyObject, intl({ ...chargeScope,
+  body: object({ method: { type: "string", enum: ["bank", "telebirr", "card"] }, clientType: { type: "string", enum: ["web", "mobile"] }, bankAccountId: objectId, sender: string300, reference: string300 }, ["method"]),
+  description: "Called in the origin region. USA→Ethiopia charges are ETB (bank or Telebirr); Ethiopia→USA charges are USD (bank or card). Card returns clientSecret/publishableKey (one idempotent intent per charge revision); Telebirr returns paymentUrl (one merchant order); bank moves to bank_review." }));
+add("post", "/checkouts/{groupId}/shipments/{shipmentId}/charges/confirm", "Confirm card or Telebirr charge payment", anyObject, intl({ ...chargeScope,
+  description: "Verifies the provider payment amount/currency and marks the charges paid." }));
+add("post", "/checkouts/{groupId}/shipments/{shipmentId}/charges/bank-confirm", "Admin confirms a customs-charge bank transfer", anyObject, intl({ ...admin, ...shipmentParams }));
+add("post", "/checkouts/{groupId}/shipments/{shipmentId}/charges/bank-reject", "Admin rejects a customs-charge bank transfer", anyObject, intl({ ...admin, ...shipmentParams,
+  body: object({ noFundsReceived: { type: "boolean", enum: [true] } }, ["noFundsReceived"]) }));
+
 const exchangeDescription = "Region selects independent settings: Ethiopia USD purchasing versus USA ETB product-export checkout. A rate is active only when enabled, positive and applied within the last 24 hours (not in the future). Applying a rate does not implicitly enable the service. Snapshotted rate revisions are checked again before payment reservation.";
 add("get", "", "Read region exchange-rate state", {
   anyOf: [ref("CommerceExchangePublic"), ref("CommerceExchangeState")],

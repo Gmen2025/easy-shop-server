@@ -27,7 +27,7 @@ test("every mounted literal router endpoint has a Swagger operation", () => {
     cloudinary: ["cloudinary", ""], database: ["database"], notifications: ["notifications", "users"],
     settings: ["settings"], stores: ["stores"], storeOwner: ["stores"], drivers: ["drivers"],
     "service-requests": ["service-requests"], rides: ["rides"], "exchange-rate": ["exchange-rate"],
-    "store-inventory": ["stores"], "multi-delivery": ["stores"],
+    "store-inventory": ["stores"], "multi-delivery": ["stores"], international: ["international"],
   };
   const missing = [];
   let checked = 0;

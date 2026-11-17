@@ -68,6 +68,8 @@ const siteSettingSchema = new mongoose.Schema(
     rideConfig: { type: mongoose.Schema.Types.Mixed, default: undefined },
     exchangeConfig: { type: mongoose.Schema.Types.Mixed, default: undefined },
     internationalShippingConfig: { type: mongoose.Schema.Types.Mixed, default: undefined },
+    // Destination-region AdduGenet store that receives inbound international shipments.
+    inboundHubConfig: { type: mongoose.Schema.Types.Mixed, default: undefined },
     // Store/warehouse address used as the origin point for Google-based delivery
     // distance calculations (admin-configurable).
     deliveryOrigin: {

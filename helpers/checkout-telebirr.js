@@ -18,14 +18,14 @@ function requireConfigured() {
   if (!available()) throw Object.assign(new Error("Telebirr gateway is not configured for verified payments. Contact Admin or choose bank transfer."), { status: 503 });
 }
 
-async function query(group) {
+async function queryOrder(merchantOrderId, expectedAmount) {
   requireConfigured();
   const { token } = await tokenService.applyFabricToken();
   if (!token) throw conflict("Unable to authenticate Telebirr. Check this checkout again; do not pay twice.");
   const request = {
     timestamp: tools.createTimeStamp(), nonce_str: tools.createNonceStr(),
     method: "payment.queryorder", version: "1.0",
-    biz_content: { appid: config.merchantAppId, merch_code: config.merchantCode, merch_order_id: group.telebirrMerchantOrderId },
+    biz_content: { appid: config.merchantAppId, merch_code: config.merchantCode, merch_order_id: merchantOrderId },
   };
   request.sign = tools.signRequestObject(request);
   request.sign_type = "SHA256WithRSA";
@@ -34,15 +34,30 @@ async function query(group) {
     timeout: 15000,
   });
   if (data?.result !== "SUCCESS" || String(data.code) !== "0" ||
-      data.biz_content?.merch_order_id !== group.telebirrMerchantOrderId) {
+      data.biz_content?.merch_order_id !== merchantOrderId) {
     throw conflict("Telebirr could not verify this payment. Stock remains held; retry status or contact support.");
   }
   const payment = data.biz_content;
   if (payment.trans_currency !== "ETB" || !Number.isFinite(Number(payment.total_amount)) ||
-      cents(Number(payment.total_amount)) !== cents(fx.paymentTotal(group))) {
+      cents(Number(payment.total_amount)) !== cents(expectedAmount)) {
     throw conflict("Telebirr payment amount or currency does not match the saved checkout. Contact support.");
   }
   return payment;
+}
+async function query(group) {
+  return queryOrder(group.telebirrMerchantOrderId, fx.paymentTotal(group));
+}
+// Creates a gateway order for an already-persisted merchant order ID; callers must persist the ID first.
+async function createPayment({ title, amount, clientType, merchantOrderId, timeoutMinutes }) {
+  let result;
+  await orderService.createOrder({ body: {
+    title, amount: Number(amount).toFixed(2), clientType, merchantOrderId, timeoutExpress: `${timeoutMinutes}m`,
+  } }, {
+    json(data) { result = data; },
+    status() { return { json(data) { throw conflict(data.error || "Telebirr initiation failed. Check status before retrying."); } }; },
+  });
+  if (!result?.prepay_id || !/^https:\/\//.test(result.paymentUrl || "")) throw conflict("Telebirr did not return a valid payment link. Check payment status; do not pay again.");
+  return result;
 }
 
 async function start(models, group, clientType) {
@@ -57,15 +72,8 @@ async function start(models, group, clientType) {
   }, { telebirrMerchantOrderId: `AG${group._id}` }, { new: true });
   if (!claimed) throw conflict("Telebirr payment already started or the hold expired. Reload this checkout.");
   const remainingMinutes = Math.max(1, Math.floor((claimed.expiresAt.getTime() - Date.now()) / 60000));
-  let result;
-  await orderService.createOrder({ body: {
-    title: `Checkout ${claimed._id}`, amount: fx.paymentTotal(claimed).toFixed(2),
-    clientType, merchantOrderId: claimed.telebirrMerchantOrderId, timeoutExpress: `${remainingMinutes}m`,
-  } }, {
-    json(data) { result = data; },
-    status() { return { json(data) { throw conflict(data.error || "Telebirr initiation failed. Check status before retrying."); } }; },
-  });
-  if (!result?.prepay_id || !/^https:\/\//.test(result.paymentUrl || "")) throw conflict("Telebirr did not return a valid payment link. Check payment status; do not pay again.");
+  const result = await createPayment({ title: `Checkout ${claimed._id}`, amount: fx.paymentTotal(claimed),
+    clientType, merchantOrderId: claimed.telebirrMerchantOrderId, timeoutMinutes: remainingMinutes });
   const updated = await models.CheckoutGroup.findOneAndUpdate({
     _id: claimed._id, status: "awaiting_payment", telebirrMerchantOrderId: claimed.telebirrMerchantOrderId,
   }, { telebirrPrepayId: result.prepay_id, telebirrPaymentUrl: result.paymentUrl }, { new: true });
@@ -79,4 +87,4 @@ function paid(payment) {
 function closed(payment) {
   return ["PAY_FAILED", "ORDER_CLOSED"].includes(payment.order_status || payment.trade_status);
 }
-module.exports = { available, requireConfigured, start, query, paid, closed };
+module.exports = { available, requireConfigured, start, query, queryOrder, createPayment, paid, closed };

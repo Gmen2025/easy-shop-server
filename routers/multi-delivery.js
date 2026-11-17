@@ -32,6 +32,11 @@ async function ownedGroup(req) {
 function serial(group) {
   const result = group.toObject({ virtuals: true });
   delete result.paymentIntentId;
+  if (Array.isArray(result.international?.shipments)) {
+    const { publicDestination } = require("../helpers/international-hub");
+    result.international.shipments = result.international.shipments.map((shipment) =>
+      shipment.destination ? { ...shipment, destination: publicDestination(shipment.destination) } : shipment);
+  }
   return result;
 }
 
@@ -128,7 +133,7 @@ router.post("/checkouts/:id/fulfillment", endpoint(async (req, res) => {
 }));
 router.post("/checkouts/:id/orders/:orderId/pickup-confirmation", endpoint(async (req, res) => {
   validId(req.params.id); validId(req.params.orderId);
-  res.json(await require("../helpers/customer-pickup").confirmPickup(req.dbModels, req.params.id, req.params.orderId, req.auth, req.body));
+  res.json(await require("../helpers/customer-pickup").confirmPickup(req.dbModels, req.params.id, req.params.orderId, req.auth, req.body, { resolveModels: require("../helpers/db-manager").getModelsForDb }));
 }));
 router.post("/service-checkouts/:serviceId", endpoint(async (req, res) => {
   validId(req.params.serviceId);
@@ -229,7 +234,7 @@ router.post("/checkouts/:id/bank-reject", endpoint(async (req, res) => {
 }));
 router.post("/checkouts/:id/shipments/:shipmentId", endpoint(async (req, res) => {
   admin(req); await ownedGroup(req);
-  res.json(serial(await international.updateShipment(req.dbModels, req.params.id, req.params.shipmentId, req.body, req.auth.userId)));
+  res.json(serial(await international.updateShipment(req.dbModels, req.params.id, req.params.shipmentId, req.body, req.auth.userId, { resolveModels: require("../helpers/db-manager").getModelsForDb })));
 }));
 router.post("/checkouts/:id/deliveries/:orderId/manual-refund", endpoint(async (req, res) => {
   admin(req);

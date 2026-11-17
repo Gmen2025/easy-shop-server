@@ -551,9 +551,13 @@ test("reverse export policy/rate changes and disabled methods fail before reserv
   await activate(f.models, f.group._id, { bankVerified: true });
   await assert.rejects(shipping.updateShipment(f.models, f.group._id, address.id, { status: "at_hub" }, userId), /Ethiopia hub/);
   f.orders.forEach((order) => { order.deliveryStatus = "Delivered"; });
-  for (const status of ["at_hub", "shipped", "arrived_usa", "delivered"]) {
+  for (const status of ["at_hub", "shipped", "arrived_usa"]) {
     await shipping.updateShipment(f.models, f.group._id, address.id, { status, carrier: "Carrier", trackingNumber: "TRACK", note: "Received by recipient" }, userId);
   }
+  assert.match(f.group.international.shipments[0].trackingCode, /^AG-ETUS-[0-9A-F]{10}$/);
+  await assert.rejects(shipping.updateShipment(f.models, f.group._id, address.id, { status: "delivered", note: "Received by recipient" }, userId), /paid or waived/);
+  f.group.international.shipments[0].destination.charges = { status: "waived", items: [], total: 0, currency: "usd" };
+  await shipping.updateShipment(f.models, f.group._id, address.id, { status: "delivered", note: "Received by recipient" }, userId);
   assert.equal(f.group.international.shipments[0].status, "delivered");
   assert.ok(f.orders.every((order) => order.internationalShipping.status === "delivered"));
 });
@@ -801,7 +805,11 @@ test("Admin international bank verification/rejection and shipment tracking enfo
   await shipping.updateShipment(next.models, next.group._id, address.id, { status: "shipped", carrier: "Carrier", trackingNumber: "TRACK" }, userId);
   await shipping.updateShipment(next.models, next.group._id, address.id, { status: "arrived_ethiopia" }, userId);
   await assert.rejects(shipping.updateShipment(next.models, next.group._id, address.id, { status: "delivered" }, userId), /proof/);
+  await assert.rejects(shipping.updateShipment(next.models, next.group._id, address.id, { status: "delivered", note: "Recipient signed" }, userId), /paid or waived/);
+  next.group.international.shipments[0].destination.charges = { status: "paid", items: [], total: 5, currency: "etb" };
   await shipping.updateShipment(next.models, next.group._id, address.id, { status: "delivered", note: "Recipient signed" }, userId);
+  assert.equal(next.group.international.shipments[0].destination.stage, "delivered");
+  assert.ok(next.orders.every((order) => order.internationalShipping.trackingCode === next.group.international.shipments[0].trackingCode));
   assert.equal(next.group.international.shipments[0].history.length, 4);
   assert.ok(next.orders.every((order) => order.internationalShipping.status === "delivered" && order.internationalShipping.trackingNumber === "TRACK"));
   assert.equal(orders.length, 2);

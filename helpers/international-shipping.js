@@ -169,11 +169,15 @@ async function lockConfig(models, group, session) {
     { $inc: { reservationVersion: 1 } }, { session });
   if (result.modifiedCount !== 1) throw conflict("International shipping configuration changed. Request a new quote.");
 }
-async function updateShipment(models, groupId, shipmentId, body, user) {
-  return models.Order.db.transaction(async (session) => {
+async function updateShipment(models, groupId, shipmentId, body, user, options = {}) {
+  const hub = require("./international-hub");
+  let ctx;
+  let pending = [];
+  const result = await models.Order.db.transaction(async (session) => {
     const group = await models.CheckoutGroup.findById(groupId).session(session);
     if (!group?.international || group.status !== "placed" || group.paymentStatus !== "completed") throw conflict("Verify the international checkout payment before managing shipments.");
-    const shipmentRoute = route(group.international.direction);
+    const direction = group.international.direction || "usa-to-ethiopia";
+    const shipmentRoute = route(direction);
     const shipment = group.international.shipments.find((entry) => entry.id === shipmentId);
     if (!shipment) throw conflict("Shipment not found.");
     const next = shipmentRoute.stages.indexOf(body.status);
@@ -187,21 +191,50 @@ async function updateShipment(models, groupId, shipmentId, body, user) {
     const text = (value) => typeof value === "string" && value.trim().length <= 300 ? value.trim() : "";
     if (body.status === "shipped" && (!text(body.carrier) || !text(body.trackingNumber))) throw conflict("Enter a carrier and tracking number before exporting.");
     if (body.status === "delivered" && !text(body.note)) throw conflict("Enter proof of final delivery / recipient confirmation.");
+    if (body.status === "delivered" && shipment.destination && !hub.chargesSettled(shipment.destination)) {
+      throw conflict(`Customs, duty and related ${shipmentRoute.destination} charges must be paid or waived before final delivery.`);
+    }
     if (body.status === "delivered" && active.some((order) => order.fulfillmentMethod === "pickup" &&
         !(order.pickupConfirmation?.customerAt && order.pickupConfirmation?.operatorAt))) {
       throw conflict("Both customer and store/Admin must confirm collected packages before final shipment completion.");
     }
-    Object.assign(shipment, { status: body.status, ...(body.status === "shipped" ? { carrier: text(body.carrier), trackingNumber: text(body.trackingNumber) } : {}) });
-    shipment.history.push({ status: body.status, at: new Date(), note: text(body.note), user });
+    ctx = hub.originContext(models, direction, options);
+    const notify = hub.notices(group, shipment, shipmentRoute);
+    const code = () => shipment.trackingCode ? ` Tracking number: ${shipment.trackingCode}.` : "";
+    if (body.status === shipmentRoute.stages[3]) {
+      hub.markArrived(shipment, shipmentRoute, user, text(body.note), ctx.destinationDb);
+      notify.customer(`Arrived in ${shipmentRoute.destination}`, `Your shipment arrived in ${shipmentRoute.destination} and is being collected from customs.${code()}`);
+      notify.hub("Inbound shipment arrived", `Shipment ${shipment.trackingCode || shipment.id} arrived in ${shipmentRoute.destination}. Collect it from customs and record any charges.`);
+    } else {
+      Object.assign(shipment, { status: body.status, ...(body.status === "shipped" ? { carrier: text(body.carrier), trackingNumber: text(body.trackingNumber) } : {}) });
+      shipment.history.push({ status: body.status, at: new Date(), note: text(body.note), user });
+    }
+    if (body.status === "at_hub") {
+      notify.customer(`Received at ${shipmentRoute.origin} hub`, `All packages for your international shipment reached the ${shipmentRoute.origin} hub and are being prepared for export.`);
+    } else if (body.status === "shipped") {
+      const hubSetting = ctx.destination ? await hub.hubConfig(ctx.destination) : null;
+      hub.startDestination(shipment, shipmentRoute, ctx.destinationDb, hubSetting);
+      notify.customer(`Shipped to ${shipmentRoute.destination}`, `Your shipment is on its way to ${shipmentRoute.destination}.${code()} Carrier: ${shipment.carrier}, carrier tracking: ${shipment.trackingNumber}.`);
+      notify.hub("Inbound shipment sent", `Shipment ${shipment.trackingCode} was sent from ${shipmentRoute.origin} via ${shipment.carrier} (${shipment.trackingNumber}).`);
+      notify.destinationAdmins("Inbound shipment sent", `Shipment ${shipment.trackingCode} is in transit to ${shipmentRoute.destination}.`);
+    } else if (body.status === "delivered") {
+      if (shipment.destination) {
+        shipment.destination.deliveredAt = new Date();
+        shipment.destination.stage = "delivered";
+        shipment.destination.history = [...(shipment.destination.history || []), { stage: "delivered", at: new Date(), note: text(body.note), user: String(user || "") }];
+      }
+      notify.customer("Shipment delivered", `Your international shipment was completed.${code()}`);
+    }
     group.markModified("international");
     await group.save({ session });
     for (const order of orders) {
-      order.internationalShipping = { ...order.internationalShipping, status: shipment.status,
-        carrier: shipment.carrier, trackingNumber: shipment.trackingNumber, history: shipment.history };
-      order.markModified("internationalShipping");
+      hub.syncOrder(order, shipment);
       await order.save({ session });
     }
+    pending = notify.list;
     return group;
   });
+  await hub.deliver(ctx, pending);
+  return result;
 }
 module.exports = { KEY, ETHIOPIA_USA_KEY, CUSTOMS_NOTICE, STAGES, route, directionForDatabase, validateConfig, config, tariff, splitFee, recalculate, createQuote, lockConfig, updateShipment };

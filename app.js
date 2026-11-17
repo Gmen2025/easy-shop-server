@@ -189,6 +189,7 @@ app.use(`${api}/settings`, settingsRouter);
 app.use(`${api}/stores`, storesRouter);
 app.use(`${api}/stores`, storeOwnerRouter);
 app.use(`${api}/drivers`, driversRouter);
+app.use(`${api}/international`, require('./routers/international'));
 app.use(`${api}/service-requests`, serviceRequestsRouter);
 app.use(`${api}/rides`, ridesRouter);
 app.use(`${api}/reviews`, require('./routers/reviews'));
