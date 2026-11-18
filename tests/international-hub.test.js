@@ -113,6 +113,19 @@ test("hub receives, charges, releases, dispatches and completes a mixed delivery
   assert.ok(titles(driverUser).includes("International delivery assigned"));
 });
 
+test("legacy shipments marked arrived before hub tracking can still be received by the hub", async () => {
+  const f = regions();
+  f.shipment.status = "arrived_ethiopia";
+  f.shipment.trackingCode = "";
+  const [view] = await hub.listInbound(f.ctx, owner);
+  assert.deepEqual(view.actions, ["arrive"]);
+  await hub.hubAction(f.ctx, owner, groupId, "home", "arrive", {});
+  assert.equal(f.shipment.status, "arrived_ethiopia");
+  assert.equal(f.shipment.destination.stage, "in_customs");
+  assert.match(f.shipment.trackingCode, /^AG-USET-[0-9A-F]{10}$/);
+  await assert.rejects(hub.hubAction(f.ctx, owner, groupId, "home", "arrive", {}), /Only shipped packages/);
+});
+
 test("zero charges are waived and bank rejection reopens payment", async () => {
   const f = regions({ stage: "in_customs" });
   f.shipment.status = "arrived_ethiopia";

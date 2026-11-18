@@ -16,6 +16,71 @@ const MAINTENANCE_SETTING_KEY = 'maintenance-mode';
 const BANK_ACCOUNT_SETTING_KEY = 'bank-account-info';
 const DELIVERY_SETTING_KEY = 'delivery-config';
 
+/**
+ * @swagger
+ * /api/v1/settings/service-availability:
+ *   get:
+ *     summary: Get ride, services and Financial Health availability switches
+ *     description: Public, uncached. testingAccess reflects whether the optional bearer token belongs to an admin or an approved tester email.
+ *     tags: [Settings]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: Current availability switches
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [rides, services, financialHealth, testingAccess]
+ *               properties:
+ *                 rides:
+ *                   type: boolean
+ *                 services:
+ *                   type: boolean
+ *                 financialHealth:
+ *                   type: boolean
+ *                 testingAccess:
+ *                   type: boolean
+ *                 updatedAt:
+ *                   type: string
+ *                   format: date-time
+ *                   nullable: true
+ *       503:
+ *         description: Unable to load service availability
+ *   put:
+ *     summary: Update ride/service switches or Financial Health availability
+ *     description: Admin only. Send boolean rides and/or services switches; financialHealth must be updated alone in its own request.
+ *     tags: [Settings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             minProperties: 1
+ *             additionalProperties: false
+ *             properties:
+ *               rides:
+ *                 type: boolean
+ *               services:
+ *                 type: boolean
+ *               financialHealth:
+ *                 type: boolean
+ *                 description: Must be the only key when present
+ *     responses:
+ *       200:
+ *         description: Persisted switches with rides, services, financialHealth and testingAccess fields
+ *       400:
+ *         description: Non-boolean switches, unknown keys or financialHealth combined with other switches
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Admin access required
+ *       503:
+ *         description: Unable to save service availability
+ */
 router.get('/service-availability', async (req, res) => {
   res.set('Cache-Control', 'private, no-store');
   res.vary('Authorization');
@@ -55,6 +120,67 @@ async function requireCurrentAdmin(req) {
   if (!admin) throw Object.assign(new Error('Admin access required.'), { status: 403 });
 }
 
+/**
+ * @swagger
+ * /api/v1/settings/testing-access:
+ *   get:
+ *     summary: List approved tester emails
+ *     description: Admin only. Returns the normalized, deduplicated tester email list that unlocks regional testing features.
+ *     tags: [Settings]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Tester email list
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               required: [emails]
+ *               properties:
+ *                 emails:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                     format: email
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Admin access required
+ *       503:
+ *         description: Unable to load tester access
+ *   put:
+ *     summary: Replace the approved tester email list
+ *     description: Admin only. The body must contain only the emails array; addresses are trimmed, lower-cased and deduplicated.
+ *     tags: [Settings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [emails]
+ *             additionalProperties: false
+ *             properties:
+ *               emails:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                   format: email
+ *     responses:
+ *       200:
+ *         description: Persisted tester email list
+ *       400:
+ *         description: Body contains keys other than emails or invalid addresses
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Admin access required
+ *       503:
+ *         description: Unable to save tester access
+ */
 router.get('/testing-access', async (req, res) => {
   res.set('Cache-Control', 'private, no-store');
   try {

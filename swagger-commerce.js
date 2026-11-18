@@ -529,6 +529,22 @@ add("get", "/checkouts", "List recent nonquote checkouts", array(ref("CommerceCh
 add("get", "/checkouts/{id}", "Read checkout and child orders", ref("CommerceCheckoutDetail"), {
   ...checkoutOwner, description: "Includes childOrders with orderItems and product name/image populated; paymentIntentId is removed from the checkout.",
 });
+add("post", "/checkouts/{id}/fulfillment", "Choose pickup or delivery per supplying store", ref("CommerceCheckout"), {
+  scope: "Bearer authentication required. Quote owner only; other users' quotes conflict.",
+  body: object({ selections: array(object({
+    storeId: objectId, method: { type: "string", enum: ["delivery", "pickup"] },
+  }, ["storeId", "method"]), { minItems: 1 }) }, ["selections"]),
+  description: "Unexpired product quotes only, before payment. selections must name every supplying store exactly once. Store pickup uses the store's collection address and removes that delivery's vehicle fee; international pickup uses the admin-configured destination collection address. Remaining deliveries are re-routed and re-priced (vehicle delivery must be enabled) and quote totals, fee allocations and any exchange amounts are recalculated.",
+});
+add("post", "/checkouts/{id}/orders/{orderId}/pickup-confirmation", "Confirm a pickup order collection", ref("CommerceOrder"), {
+  scope: "Bearer authentication required. party=customer requires the purchasing customer; party=operator requires the supplying store owner or an admin (international pickups: hub/admin).",
+  forbidden: "Only the purchasing customer (customer) or assigned store owner / Admin (operator) can confirm.",
+  body: object({
+    party: { type: "string", enum: ["customer", "operator"] },
+    note: { ...nonempty300, description: "Who collected the package / ID checked." },
+  }, ["party", "note"]),
+  description: "Placed checkouts and pickup orders only; noncash payment must be completed first. International pickups also require the shipment to be arrived/released for collection. Each party confirms once (repeats are idempotent). When both parties have confirmed, store pickups release reservations and complete the order (cash is marked paid); international pickups record collection and complete the shipment when every package is finished.",
+});
 add("post", "/checkouts/{id}/prepare", "Reserve quote stock and choose payment method", ref("CommerceCheckout"), {
   scope: "Bearer authentication required. Customer must own the checkout; although the initial lookup permits admin access, prepare also queries by the authenticated user id and does not allow an admin to prepare another customer's checkout.",
   notFound: "Checkout not found at initial owner/admin lookup.",

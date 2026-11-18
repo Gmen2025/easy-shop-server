@@ -23,6 +23,9 @@ function fixture({ configured = true, store, stores, hub = "", compute } = {}) {
     "../helpers/financial-health": {},
     "../helpers/social-login-settings": { PROVIDERS: [] },
     "../helpers/payment-settings": { METHODS: [] },
+    "../helpers/service-availability": { FEATURES: [] },
+    "../helpers/testing-access": {},
+    "../helpers/maintenance": {},
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../routers/settings.js"), "utf8"), {
     module: { exports: {} }, require: (name) => {

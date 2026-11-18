@@ -128,6 +128,7 @@ function startDestination(shipment, route, destinationDb, hub) {
 }
 function markArrived(shipment, route, by, note, database) {
   shipment.status = route.stages[3];
+  shipment.trackingCode = shipment.trackingCode || trackingCode(route);
   shipment.history.push({ status: shipment.status, at: new Date(), note, user: by });
   shipment.destination = shipment.destination || { database, stage: "in_transit", charges: null, driver: null, history: [] };
   shipment.destination.arrivedAt = new Date();
@@ -155,7 +156,9 @@ function releaseAllowsCollection(shipment) {
 function nextActions(shipment, active, role) {
   const destination = shipment.destination;
   if (shipment.status === "shipped") return ["arrive"];
-  if (!destination || shipment.status === "delivered") return [];
+  if (shipment.status === "delivered") return [];
+  // Shipments marked arrived before hub tracking existed have no destination record; the hub receives them first.
+  if (!destination) return ["arrive"];
   const actions = [];
   const locked = destination.charges && (destination.charges.method || destination.charges.status === "paid");
   if (["in_customs", "cleared"].includes(destination.stage) && !locked) actions.push("charges");
@@ -274,7 +277,8 @@ function hubAction(ctx, auth, groupId, shipmentId, action, body = {}) {
     (state) => handlers[action](ctx, auth, state, body || {}));
 }
 function arrive(ctx, auth, { shipment, notify, actor }, body) {
-  if (shipment.status !== "shipped") throw conflict(`Only shipped packages can be received in ${ctx.route.destination}.`);
+  const legacyArrival = shipment.status === ctx.route.stages[3] && !shipment.destination;
+  if (shipment.status !== "shipped" && !legacyArrival) throw conflict(`Only shipped packages can be received in ${ctx.route.destination}.`);
   markArrived(shipment, ctx.route, auth.userId, text(body.note) || `Received by the ${ctx.route.destination} hub.`, ctx.destinationDb);
   notify.customer(`Arrived in ${ctx.route.destination}`, `Shipment ${shipment.trackingCode || shipment.id} arrived in ${ctx.route.destination} and is going through customs. We will notify you of any customs, duty or tariff charges.`);
   if (actor.role === "admin") notify.hub(`Inbound shipment arrived`, `Shipment ${shipment.trackingCode || shipment.id} was marked arrived in ${ctx.route.destination}. Collect it from customs.`);

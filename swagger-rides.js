@@ -344,6 +344,25 @@ add("/me/start-trip", "post", "ridesDriverStartTrip", "Record the active passeng
 add("/me/driver", "get", "ridesDriverDashboard", "Get company driver ride dashboard",
   `${driverScope}Returns selected driver fields, full active trip (or null), unexpired current offer (or null), assigned/onboard riders with customerName, and the last 20 completed/terminated payment summaries sorted by update time. Reading expires a stale pending offer and attempts redispatch. The riders/payment arrays are projections, not full public ride objects.`,
   ref("RideDriverDashboard"), { errors: driverErrors });
+const customerProfile = object({
+  name: text, profilePhotoUrl: text, joinedAt: { ...date, nullable: true },
+  rating: { type: "object", nullable: true, description: "Null when ride reviews are disabled.",
+    properties: { average: { type: "number" }, count: { type: "integer" } }, required: ["average", "count"] },
+  reviews: array(object({ rating: { type: "number" }, comment: text, dateCreated: date })),
+  prompted: bool,
+}, ["name", "profilePhotoUrl", "reviews", "prompted"]);
+add("/me/customer-profile", "get", "ridesCustomerProfileGet", "Get the rider's ride profile and photo prompt state",
+  "Authenticated rider. Returns the rider's name, ride profile photo URL, join date, rating summary and latest reviews (empty and null rating when ride reviews are disabled). prompted reports whether the photo prompt was already shown or answered.",
+  customerProfile, { errors: { 404: error("Customer account not found.") } });
+add("/me/customer-profile", "put", "ridesCustomerProfilePut", "Save or skip the rider's ride profile photo",
+  "Authenticated rider. Send profilePhotoUrl (HTTPS res.cloudinary.com /<cloud>/image/upload/<resource> URL) to save a photo, or skip:true alone to dismiss the prompt without a photo; the two fields are mutually exclusive. Always marks the prompt as answered.",
+  customerProfile, {
+    body: { type: "object", additionalProperties: false, properties: {
+      profilePhotoUrl: { type: "string", format: "uri", example: "https://res.cloudinary.com/example/image/upload/rider.jpg" },
+      skip: { type: "boolean", enum: [true] },
+    }, oneOf: [{ required: ["profilePhotoUrl"] }, { required: ["skip"] }] },
+    errors: { 404: error("Customer account not found.") },
+  });
 add("/me/profile-photo", "put", "ridesDriverPhoto", "Save a ride driver profile photo URL",
   `${driverScope}JSON URL only; this endpoint does not upload a file. URL must use HTTPS, host res.cloudinary.com and path /<cloud>/image/upload/<resource>. Saves a fresh rideProfilePhotoUpdatedAt. A current ride photo is required when enabling/accepting passenger service and expires after 90 days.`,
   object({ profilePhotoUrl: text, rideProfilePhotoUpdatedAt: date, rideProfilePhotoRequired: { type: "boolean", enum: [false] } },
