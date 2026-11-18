@@ -463,6 +463,7 @@ router.get(`/:id/tracking`, async (req, res) => {
   res.send({
     success: true,
     orderId: String(order._id),
+    checkoutGroup: order.checkoutGroup ? String(order.checkoutGroup) : null,
     status: order.status,
     deliveryStatus: order.deliveryStatus,
     internationalShipping: order.internationalShipping,
