@@ -129,6 +129,8 @@ async function createQuote(models, user, database, body, dependencies) {
   const direction = directionForDatabase(database);
   const shipmentRoute = route(direction);
   if (String(body.paymentCurrency).toLowerCase() !== shipmentRoute.currency) throw conflict(`International ${shipmentRoute.origin} products must be paid in ${shipmentRoute.currency.toUpperCase()}.`);
+  const service = direction === "ethiopia-to-usa" ? "ethiopiaUsdExport" : "usaEtbExport";
+  await fx.requireService(models, service);
   const { addressInput, countryCode, normalizeAllocations, geocodeAddress, createQuote: domesticQuote } = require("./multi-delivery");
   const policy = await config(models, null, direction);
   const rate = await fx.requireCurrent(models, database, null, new Date(), shipmentRoute.exchangeKey);
@@ -158,6 +160,7 @@ async function createQuote(models, user, database, body, dependencies) {
   const current = await fx.requireCurrent(models, database, null, new Date(), shipmentRoute.exchangeKey);
   if (current.revision !== rate.revision) throw conflict("The exchange rate changed while calculating shipping. Request a new quote.");
   if ((await config(models, null, direction)).revision !== policy.revision) throw conflict("Shipping settings changed while calculating the quote. Request a new quote.");
+  await fx.requireService(models, service);
   await group.save();
   return group;
 }

@@ -415,6 +415,50 @@ function reverseExportFixture() {
   return { ...data, shippingConfig };
 }
 
+test("each product service independently blocks new quotes and reservations but not prepared payments", async () => {
+  const cases = [
+    { make: usdFixture, name: "ethiopiaUsdDelivery", database: "E_Shopping", currency: "usd", destination: "Ethiopia" },
+    { make: reverseExportFixture, name: "ethiopiaUsdExport", database: "E_Shopping", currency: "usd", destination: "USA" },
+    { make: exportFixture, name: "usaEtbExport", database: "E_ShopUSA", currency: "etb", destination: "Ethiopia" },
+  ];
+  for (const { make, name, database, currency, destination } of cases) {
+    const f = make();
+    f.exchangeConfig.services = { [name]: false };
+    await assert.rejects(createQuote(f.models, userId, database, { paymentCurrency: currency, destinationCountry: destination }), /turned off by Admin/);
+    await assert.rejects(prepare(f.models, f.group._id, userId, database, { ...f.body, method: "bank", bankAccountId: id(40) }), /turned off by Admin/);
+    assert.equal(f.orders.length, 0);
+    f.exchangeConfig.services[name] = true;
+    await prepare(f.models, f.group._id, userId, database, { ...f.body, method: "bank", bankAccountId: id(40) });
+    f.exchangeConfig.services[name] = false;
+    assert.equal((await prepare(f.models, f.group._id, userId, database, { method: "bank" })).status, "awaiting_payment");
+    const confirmed = await activate(f.models, f.group._id, { bankReceipt: { sender: "Customer", reference: "ref" } });
+    assert.equal(confirmed.status, f.group.international ? "bank_review" : "placed");
+    if (f.group.international) {
+      assert.equal((await activate(f.models, f.group._id, { bankVerified: true })).paymentStatus, "completed");
+    }
+  }
+  const domestic = usdFixture();
+  domestic.exchangeConfig.services = { ethiopiaUsdExport: false };
+  await prepare(domestic.models, domestic.group._id, userId, "E_Shopping", { ...domestic.body, method: "bank", bankAccountId: id(40) });
+  const exportOrder = reverseExportFixture();
+  exportOrder.exchangeConfig.services = { ethiopiaUsdDelivery: false };
+  await prepare(exportOrder.models, exportOrder.group._id, userId, "E_Shopping", { ...exportOrder.body, method: "bank", bankAccountId: id(40) });
+  const quotedService = serviceFixture();
+  quotedService.exchangeConfig.services = { ethiopiaUsdDelivery: false, ethiopiaUsdExport: false };
+  await prepare(quotedService.models, quotedService.group._id, userId, "E_Shopping", { method: "bank", bankAccountId: id(40) });
+});
+
+test("a service disabled during reservation fails its transactional lock before reserving stock", async () => {
+  const f = usdFixture();
+  const update = f.models.SiteSetting.updateOne;
+  f.models.SiteSetting.updateOne = async (filter, ...rest) =>
+    filter["exchangeConfig.services.ethiopiaUsdDelivery"] ? { modifiedCount: 0 } : update(filter, ...rest);
+  await assert.rejects(prepare(f.models, f.group._id, userId, "E_Shopping",
+    { ...f.body, method: "bank", bankAccountId: id(40) }), /changed/);
+  assert.equal(f.orders.length, 0);
+  assert.ok(f.stocks.every((stock) => stock.reserved === 0));
+});
+
 test("Ethiopia USD exports quote USA recipients but route native drivers only to an Ethiopian hub; domestic USD remains local", async () => {
   const f = reverseExportFixture();
   f.models.Store.find = () => query(f.group.deliveries.map((delivery) => delivery.store));

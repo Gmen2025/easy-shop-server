@@ -13,15 +13,26 @@ const endpoint = (action) => async (req, res) => {
 const admin = (req) => { if (!req.auth.isAdmin) throw Object.assign(new Error("Admin access required."), { status: 403 }); };
 router.get("/", endpoint(async (req, res) => {
   const state = fx.state(await fx.current(req.dbModels, null, req.exchangeKey), new Date(), req.exchangeKey);
+  state.services = fx.serviceStates(state, req.exchangeKey);
   const stripe = require("./stripe");
   state.cardAvailable = req.exchangeKey === fx.KEY && Boolean(stripe.getStripe("ETHIOPIA_USD").stripe &&
     stripe.getPublishableKey("ETHIOPIA_USD"));
   state.telebirrAvailable = require("../helpers/checkout-telebirr").available();
   if (req.auth.isAdmin) res.json({ ...state, providers: Object.keys(fx.providers()) });
   else {
-    const { active, enabled, birrPerUsd, appliedAt, expiresAt, revision, source, message, cardAvailable, telebirrAvailable } = state;
-    res.json({ active, enabled: Boolean(enabled), birrPerUsd, appliedAt, expiresAt, revision, source, message, cardAvailable, telebirrAvailable });
+    const { active, enabled, birrPerUsd, appliedAt, expiresAt, revision, source, message, cardAvailable, telebirrAvailable, services } = state;
+    res.json({ active, enabled: Boolean(enabled), birrPerUsd, appliedAt, expiresAt, revision, source, message, cardAvailable, telebirrAvailable, services });
   }
+}));
+router.put("/services/:service", endpoint(async (req, res) => {
+  admin(req);
+  const name = req.params.service;
+  if (!fx.serviceNames(req.exchangeKey).includes(name) || typeof req.body?.enabled !== "boolean") {
+    throw Object.assign(new Error("Choose a valid service and explicit availability for this shopping region."), { status: 409 });
+  }
+  await req.dbModels.SiteSetting.updateOne({ key: req.exchangeKey },
+    { $set: { [`exchangeConfig.services.${name}`]: req.body.enabled, updatedBy: req.auth.userId } }, { upsert: true });
+  res.json({ services: fx.serviceStates(await fx.current(req.dbModels, null, req.exchangeKey), req.exchangeKey) });
 }));
 router.put("/", endpoint(async (req, res) => {
   admin(req);

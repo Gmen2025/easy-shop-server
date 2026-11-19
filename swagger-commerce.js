@@ -262,6 +262,7 @@ const schemas = {
   CommerceExchangePublic: object({
     active: boolean, enabled: boolean, birrPerUsd: number, appliedAt: date, expiresAt: nullableDate,
     revision: whole, source: text, message: text, cardAvailable: boolean,
+    services: object({ ethiopiaUsdDelivery: boolean, ethiopiaUsdExport: boolean, usaEtbExport: boolean }),
   }, ["active", "enabled", "message", "cardAvailable"]),
   CommerceExchangeState: {
     ...object({
@@ -273,6 +274,7 @@ const schemas = {
         changed: boolean, user: { ...objectId, nullable: true },
       })),
       providers: array(text), cardAvailable: boolean,
+      services: object({ ethiopiaUsdDelivery: boolean, ethiopiaUsdExport: boolean, usaEtbExport: boolean }),
     }, ["active", "expiresAt", "message"]),
     description: "Full configuration state for admin GET and mutation results. providers and cardAvailable are added only by GET; unsaved settings can omit configuration fields. History retains the last 30 applied rates.",
   },
@@ -650,6 +652,15 @@ add("put", "", "Update exchange service enablement and auto-refresh", ref("Comme
   ...admin, exchange: true,
   body: object({ enabled: boolean, autoRefresh: boolean, provider: text }, ["enabled", "autoRefresh"]),
   description: `${exchangeDescription} autoRefresh=true requires a configured provider name. Saves flags/provider and increments revision transactionally, preserving the rate/history; does not fetch or apply a new rate.`,
+});
+add("put", "/services/{service}", "Enable or disable a product checkout service", object({ services: object({
+  ethiopiaUsdDelivery: boolean, ethiopiaUsdExport: boolean, usaEtbExport: boolean,
+}) }), {
+  ...admin, exchange: true,
+  paramSchemas: { service: { type: "string", enum: ["ethiopiaUsdDelivery", "ethiopiaUsdExport", "usaEtbExport"] } },
+  paramDescriptions: { service: "Service belonging to the selected shopping region." },
+  body: object({ enabled: boolean }, ["enabled"]),
+  description: "Independent regional service switch. Blocks new product quotes and reservations only; prepared payments, refunds and shipment processing continue. The shared exchange rate and export shipping configuration remain separate prerequisites. Missing switches default to on.",
 });
 add("post", "/apply", "Apply a manual birr-per-dollar rate", ref("CommerceExchangeState"), {
   ...admin, exchange: true,

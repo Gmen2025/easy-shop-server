@@ -943,6 +943,15 @@ Endpoints, all with a JWT and `x-database-name` for the region shown:
 | Customer, origin | `POST checkouts/:groupId/shipments/:shipmentId/charges/(pay\|confirm)` |
 | Admin, origin | `POST checkouts/:groupId/shipments/:shipmentId/charges/(bank-confirm\|bank-reject)` |
 
+Admin can independently control product checkout services with
+`PUT /api/v1/exchange-rate/services/:service` and `{ "enabled": true|false }`.
+In Ethiopia the keys are `ethiopiaUsdDelivery` and `ethiopiaUsdExport`; in the
+USA the key is `usaEtbExport`. Unset switches default on to preserve existing
+behavior. Turning one off blocks new quotes and payment preparation, not
+prepared payments, refunds or shipment operations. Enabled services still
+require an active regional exchange policy and, for exports, shipping settings.
+The Ethiopia USD quoted-service checkout is unaffected by these product switches.
+
 Setup: in each destination region, Admin selects an approved company-owned
 store as the hub (`PUT international/hub/config`). Hub and driver requests are
 made in the destination region, while the server reads and writes the

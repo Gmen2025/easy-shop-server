@@ -4,6 +4,35 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const STALE_MESSAGE = "USD purchasing is temporarily inactive because the current exchange rate has not been updated within 24 hours. Please wait for an updated rate; USD purchasing will become active again after it is applied.";
 const fail = (message) => Object.assign(new Error(message), { status: 409 });
 const isEthiopia = (database) => !/usa/i.test(database);
+const SERVICES = {
+  ethiopiaUsdDelivery: { key: KEY, label: "USD payment for Ethiopia delivery" },
+  ethiopiaUsdExport: { key: KEY, label: "USD payment for Ethiopia-to-USA shipping" },
+  usaEtbExport: { key: EXPORT_KEY, label: "Birr payment for USA-to-Ethiopia shipping" },
+};
+function serviceNames(key) {
+  return Object.keys(SERVICES).filter((name) => SERVICES[name].key === key);
+}
+function serviceStates(config, key) {
+  return Object.fromEntries(serviceNames(key).map((name) => [name, config.services?.[name] !== false]));
+}
+function serviceForGroup(group, database) {
+  if (group.kind === "service") return null;
+  if (group.international) return group.international.direction === "ethiopia-to-usa" ? "ethiopiaUsdExport" : "usaEtbExport";
+  return isEthiopia(database) && group.currency === "usd" && group.exchangeRate ? "ethiopiaUsdDelivery" : null;
+}
+async function requireService(models, name, session) {
+  const service = SERVICES[name];
+  if (!service) throw fail("Unknown cross-currency checkout service.");
+  if ((await current(models, session, service.key)).services?.[name] === false) {
+    throw fail(`${service.label} is temporarily turned off by Admin.`);
+  }
+}
+async function lockService(models, name, session) {
+  await requireService(models, name, session);
+  const result = await models.SiteSetting.updateOne({ key: SERVICES[name].key, [`exchangeConfig.services.${name}`]: { $ne: false } },
+    { $inc: { reservationVersion: 1 } }, { session });
+  if (result.modifiedCount !== 1) throw fail(`${SERVICES[name].label} changed. Refresh checkout and try again.`);
+}
 const providers = () => {
   const entries = JSON.parse(process.env.EXCHANGE_RATE_PROVIDERS_JSON || "{}");
   if (!entries || Array.isArray(entries) || typeof entries !== "object") throw new Error("Invalid EXCHANGE_RATE_PROVIDERS_JSON.");
@@ -120,4 +149,5 @@ async function refresh(models, options = {}) {
   }
 }
 module.exports = { KEY, EXPORT_KEY, DAY_MS, STALE_MESSAGE, isEthiopia, providers, rateValue, state, current, requireCurrent,
+  SERVICES, serviceNames, serviceStates, serviceForGroup, requireService, lockService,
   lockRate, dollars, birr, allocatePayment, allocateDollars, paymentTotal, paymentForOrder, apply, refresh };

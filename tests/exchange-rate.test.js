@@ -39,6 +39,42 @@ test("exchange policy exposes Telebirr gateway readiness for Ethiopia ETB and US
   t.mock.method(gateway, "available", () => false);
   assert.equal((await request("get", "/", models, {}, false, "E_ShopUSA")).body.telebirrAvailable, false);
 });
+test("regional service switches are independent, admin-only and retain existing rate settings", async () => {
+  const docs = new Map([[fx.KEY, { ...initial(), services: {} }], [fx.EXPORT_KEY, { ...initial(), services: {} }]]);
+  const models = { SiteSetting: {
+    findOne: ({ key }) => ({ lean: async () => ({ exchangeConfig: structuredClone(docs.get(key)) }) }),
+    updateOne: async (filter, update) => {
+      const config = docs.get(filter.key);
+      for (const [path, value] of Object.entries(update.$set)) {
+        if (path.startsWith("exchangeConfig.services.")) config.services[path.split(".")[2]] = value;
+      }
+      return { modifiedCount: 1 };
+    },
+  } };
+  const handler = router.stack.find((entry) => entry.route?.path === "/services/:service").route.stack[0].handle;
+  const set = async (database, service, enabled, isAdmin = true) => {
+    const res = { code: 200, status(code) { this.code = code; return this; }, json(body) { this.body = body; } };
+    await handler({ dbModels: models, dbName: database, auth: { userId: "user", isAdmin }, params: { service }, body: { enabled } }, res);
+    return res;
+  };
+  assert.equal((await set("E_Shopping", "ethiopiaUsdDelivery", false, false)).code, 403);
+  assert.equal((await set("E_Shopping", "usaEtbExport", false)).code, 409);
+  assert.equal((await set("E_Shopping", "ethiopiaUsdDelivery", "false")).code, 409);
+  const result = await set("E_Shopping", "ethiopiaUsdDelivery", false);
+  assert.deepEqual(result.body.services, { ethiopiaUsdDelivery: false, ethiopiaUsdExport: true });
+  assert.equal(docs.get(fx.KEY).revision, 1);
+  assert.equal(+docs.get(fx.KEY).appliedAt, +now);
+  assert.equal((await set("E_ShopUSA", "usaEtbExport", false)).body.services.usaEtbExport, false);
+  assert.equal((await set("E_Shopping", "ethiopiaUsdDelivery", true)).body.services.ethiopiaUsdDelivery, true);
+});
+test("rate updates and policy saves preserve independent service settings", async () => {
+  const { models, saved } = fixture({ ...initial(), services: { ethiopiaUsdDelivery: false, ethiopiaUsdExport: true } });
+  await fx.apply(models, 151, { now });
+  await request("put", "/", models, { enabled: true, autoRefresh: false, provider: "" });
+  const result = await request("get", "/", models, {}, false);
+  assert.deepEqual(result.body.services, { ethiopiaUsdDelivery: false, ethiopiaUsdExport: true });
+  assert.equal(saved.exchangeConfig.birrPerUsd, 151);
+});
 test("USA manual and automatic unchanged applies record independent export updates; toggles never extend freshness", async (t) => {
   const original = process.env.EXCHANGE_RATE_PROVIDERS_JSON;
   t.after(() => { if (original === undefined) delete process.env.EXCHANGE_RATE_PROVIDERS_JSON; else process.env.EXCHANGE_RATE_PROVIDERS_JSON = original; });

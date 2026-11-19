@@ -321,6 +321,7 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
   const nativeCurrency = /usa/i.test(databaseName) ? "usd" : "etb";
   const currency = String(body.paymentCurrency || nativeCurrency).toLowerCase();
   if (![nativeCurrency, ...(fx.isEthiopia(databaseName) ? ["usd"] : [])].includes(currency)) throw conflict("Choose ETB or an enabled USD payment for the selected region.");
+  if (currency === "usd" && fx.isEthiopia(databaseName)) await fx.requireService(models, "ethiopiaUsdDelivery");
   const exchangeRate = currency === "usd" && fx.isEthiopia(databaseName) ? await fx.requireCurrent(models, databaseName) : null;
   if (!await inventoryEnabled(models)) throw conflict("Admin must activate per-store inventory first.");
   const config = (await models.SiteSetting.findOne({ key: VEHICLE_CONFIG_KEY }).lean())?.vehicleDeliveryConfig;
@@ -367,6 +368,7 @@ async function createQuote(models, user, databaseName, body, { geocode = geocode
   if (exchangeRate && (await fx.requireCurrent(models, databaseName)).revision !== exchangeRate.revision) {
     throw conflict("The exchange rate changed while calculating routes. Calculate a new USD quote.");
   }
+  if (exchangeRate) await fx.requireService(models, "ethiopiaUsdDelivery");
   const fields = { user, deliveries, cart: body.cart.map((entry) => ({
     ...normalizeLines([entry])[0], key: entry.key, storefrontId: entry.storefrontId || null,
   })), ...deliveryPlan, ...totals, storeRoutes,
@@ -482,6 +484,8 @@ async function prepare(models, groupId, user, databaseName, body) {
       if (body.method === "cash") throw conflict("Converted checkout supports card or bank transfer where eligible, not cash.");
       await fx.lockRate(models, group.exchangeRate, databaseName, session);
     }
+    const service = fx.serviceForGroup(group, databaseName);
+    if (service) await fx.lockService(models, service, session);
     if (body.method === "card") {
       stripeClient(databaseName, group);
       if (group.exchangeRate) group.stripePublishableKey = usdPublishableKey();
