@@ -163,13 +163,30 @@ function packageShipmentId(group, order) {
 function shipmentPackages(group, shipment, orders) {
   return orders.filter((order) => packageShipmentId(group, order) === shipment.id);
 }
-function packageIssue(group, shipment, orders, active) {
+function missingPackages(group, shipment, orders) {
   const expected = group.deliveries?.filter((delivery) => delivery.address?.id === shipment.id).length;
-  if (!orders.length || (expected > 0 && orders.length !== expected)) {
+  return !orders.length || (expected > 0 && orders.length !== expected);
+}
+function packageIssue(group, shipment, orders, active) {
+  if (missingPackages(group, shipment, orders)) {
     return "Shipment package records are missing or incomplete. Ask an admin to reconcile the original checkout before proceeding.";
   }
   if (!active.length) return "All packages in this shipment were cancelled.";
   return "";
+}
+function reconciliationCandidates(group, shipment, members, registered) {
+  const deliveries = (group.deliveries || []).filter((delivery) => delivery.address?.id === shipment.id);
+  if (!deliveries.length || members.length >= deliveries.length) return [];
+  const memberIds = new Set(members.map(id));
+  const registeredIds = new Set((group.orders || []).map(id));
+  return registered.filter((order) => {
+    const shippingId = order.internationalShipping?.shipmentId;
+    return registeredIds.has(id(order)) && !memberIds.has(id(order)) &&
+      id(order.user) === id(group.user) && (!order.checkoutGroup || id(order.checkoutGroup) === id(group)) &&
+      (!shippingId || shippingId === shipment.id) &&
+      (!order.cartDeliveryAddressId || order.cartDeliveryAddressId === shipment.id) &&
+      (!order.cartDeliveryKey || deliveries.some((delivery) => delivery.key === order.cartDeliveryKey));
+  });
 }
 function customsCollected(destination, order) {
   if (!destination) return false;
@@ -194,7 +211,7 @@ function nextActions(shipment, active, role, issue) {
   if (RELEASED.includes(destination.stage) && active.some((order) => order.fulfillmentMethod === "pickup" && !order.pickupConfirmation?.operatorAt)) actions.push("handover");
   return role === "driver" ? [] : actions;
 }
-function shipmentView(group, shipment, orders, { customer, role } = {}) {
+function shipmentView(group, shipment, orders, { customer, role, registered = [] } = {}) {
   const route = shipping.route(directionOf(group));
   const members = shipmentPackages(group, shipment, orders);
   const active = members.filter((order) => order.fulfillmentStatus !== "cancelled");
@@ -211,6 +228,14 @@ function shipmentView(group, shipment, orders, { customer, role } = {}) {
       customsCollected: order.fulfillmentStatus !== "cancelled" && customsCollected(shipment.destination, order),
       items: (order.orderItems || []).map((line) => ({ name: line.product?.name || "Product", quantity: line.quantity, image: line.product?.image || "" })),
       pickupConfirmation: { customerAt: order.pickupConfirmation?.customerAt || null, operatorAt: order.pickupConfirmation?.operatorAt || null } })),
+    reconciliationRequired: role === "admin" && shipment.status !== "delivered" && missingPackages(group, shipment, members) &&
+      ["in_customs", "cleared"].includes(shipment.destination?.stage),
+    reconciliationCandidates: role === "admin" && issue && ["in_customs", "cleared"].includes(shipment.destination?.stage)
+      ? reconciliationCandidates(group, shipment, members, registered).map((order) => ({
+        orderId: id(order), fulfillmentMethod: order.fulfillmentMethod || "delivery",
+        address: [order.shippingAddress1, order.city, order.country].filter(Boolean).join(", "),
+        items: (order.orderItems || []).map((line) => ({ name: line.product?.name || "Product", quantity: line.quantity })),
+      })) : [],
     actions: nextActions(shipment, active, role, issue),
   };
 }
@@ -294,16 +319,41 @@ async function views(ctx, groups, include, role) {
   const orders = groups.length ? await ctx.source.Order.find({ checkoutGroup: { $in: groups.map((group) => group._id) } })
     .populate({ path: "orderItems", populate: { path: "product", select: "name image" } }).lean() : [];
   const customers = groups.length ? await ctx.source.User.find({ _id: { $in: groups.map((group) => group.user) } }).select("name phone email").lean() : [];
+  const registered = role === "admin" && groups.length ? await ctx.source.Order.find({ _id: { $in: groups.flatMap((group) => group.orders || []) } })
+    .populate({ path: "orderItems", populate: { path: "product", select: "name image" } }).lean() : [];
   return groups.flatMap((group) => group.international.shipments.filter(include).map((shipment) => shipmentView(group,
     shipment, orders.filter((order) => id(order.checkoutGroup) === id(group)),
-    { customer: customers.find((user) => id(user) === id(group.user)), role })));
+    { customer: customers.find((user) => id(user) === id(group.user)), role, registered })));
 }
 
 function hubAction(ctx, auth, groupId, shipmentId, action, body = {}) {
-  const handlers = { arrive, charges: assessCharges, clear, ready, dispatch, handover };
+  const handlers = { arrive, charges: assessCharges, clear, ready, dispatch, handover, reconcile: reconcilePackages };
   if (!handlers[action]) throw conflict("Unsupported inbound shipment action.");
   return mutate(ctx, groupId, shipmentId, (shipment) => authorizeHub(ctx, auth, shipment),
     (state) => handlers[action](ctx, auth, state, body || {}));
+}
+async function reconcilePackages(ctx, auth, { group, shipment, orders, actor, session }, body) {
+  if (actor.role !== "admin") throw failure(403, "Only Admin can reconcile shipment package records.");
+  if (!["in_customs", "cleared"].includes(shipment.destination?.stage)) throw conflict("Reconcile packages only while the shipment is at customs or cleared.");
+  if (!missingPackages(group, shipment, orders)) throw conflict("This shipment has no missing package records to reconcile.");
+  const note = text(body.note);
+  if (!note) throw conflict("Enter how you verified the package records.");
+  const selected = body.orderIds;
+  if (!Array.isArray(selected) || !selected.length || selected.some((orderId) => typeof orderId !== "string") ||
+      new Set(selected).size !== selected.length) throw conflict("Select one or more distinct package records.");
+  const registered = await ctx.source.Order.find({ _id: { $in: group.orders || [] } }).session(session);
+  const candidates = reconciliationCandidates(group, shipment, orders, registered);
+  const expected = group.deliveries.filter((delivery) => delivery.address?.id === shipment.id).length;
+  if (selected.length > expected - orders.length || selected.some((orderId) => !candidates.some((order) => id(order) === orderId))) {
+    throw conflict("Selected packages are not eligible for this shipment. Refresh and verify the original checkout.");
+  }
+  for (const orderId of selected) {
+    const order = candidates.find((candidate) => id(candidate) === orderId);
+    order.checkoutGroup = group._id;
+    orders.push(order);
+  }
+  shipment.destination.history = [...(shipment.destination.history || []), { stage: shipment.destination.stage, at: new Date(),
+    user: id(auth.userId), database: ctx.destinationDb, note: `Admin reconciled package records ${selected.join(", ")}. ${note}` }];
 }
 function arrive(ctx, auth, { shipment, notify, actor }, body) {
   const legacyArrival = shipment.status === ctx.route.stages[3] && !shipment.destination;

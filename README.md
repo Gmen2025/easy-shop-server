@@ -937,7 +937,7 @@ Endpoints, all with a JWT and `x-database-name` for the region shown:
 | Who / region | Endpoint |
 | --- | --- |
 | Admin or hub, destination | `GET hub/access`, `GET hub/config`, `GET hub/shipments[?include=all]`, `GET hub/drivers` |
-| Admin, destination | `PUT hub/config {storeId}`, `GET hub/stores` |
+| Admin, destination | `PUT hub/config {storeId}`, `GET hub/stores`, `POST hub/shipments/:groupId/:shipmentId/reconcile {orderIds,note}` |
 | Admin or hub, destination | `POST hub/shipments/:groupId/:shipmentId/:action` (`arrive`, `charges`, `clear`, `ready`, `dispatch`, `handover`) |
 | Driver, destination | `GET driver/deliveries`, `POST driver/deliveries/:groupId/:shipmentId/(pickup\|deliver)` |
 | Customer, origin | `POST checkouts/:groupId/shipments/:shipmentId/charges/(pay\|confirm)` |
@@ -949,7 +949,12 @@ made in the destination region, while the server reads and writes the
 checkout in the paired origin database. Override the pairing with
 `INTL_ETHIOPIA_DB` (default `E_Shopping`) and `INTL_USA_DB` (default
 `E_ShopUSA`). Origin `delivered` is blocked until destination charges are paid
-or waived. Shipments created before this feature keep the earlier
+or waived. At customs or after clearance, an Admin can verify and link eligible
+orders already registered in the original checkout using the hub reconciliation
+control. The action records an audit note and does not collect packages or waive
+charges. If the original order records are missing, restore them from a verified
+backup and investigate the checkout; reconciliation cannot recreate them.
+Shipments created before this feature keep the earlier
 Admin-only flow. Deploy the backend before the mobile app and website. Test
 Telebirr, Stripe and bank charge payments, cross-region notifications and
 driver flows in staging before rollout.

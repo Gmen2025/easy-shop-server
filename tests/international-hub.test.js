@@ -19,7 +19,7 @@ function q(value) {
 }
 function regions({ direction = "usa-to-ethiopia", charges = null, stage = null } = {}) {
   const orders = ["delivery", "pickup"].map((method, index) => ({
-    _id: id(50 + index), checkoutGroup: groupId, fulfillmentMethod: method, fulfillmentStatus: "completed", orderItems: [],
+    _id: id(50 + index), user: customerId, checkoutGroup: groupId, fulfillmentMethod: method, fulfillmentStatus: "completed", orderItems: [],
     internationalShipping: { shipmentId: "home" }, markModified() {}, async save() {},
   }));
   const shipment = { id: "home", status: "shipped", trackingCode: "AG-USET-ABCDEF0123", carrier: "DHL", trackingNumber: "T1",
@@ -32,7 +32,8 @@ function regions({ direction = "usa-to-ethiopia", charges = null, stage = null }
   const source = {
     CheckoutGroup: { findById: () => q(group), find: () => q([group]) },
     Order: { find: (filter) => q(orders.filter((order) =>
-      (filter.checkoutGroup.$in || [filter.checkoutGroup]).includes(order.checkoutGroup) &&
+      (filter._id ? filter._id.$in.includes(order._id) :
+        (filter.checkoutGroup.$in || [filter.checkoutGroup]).includes(order.checkoutGroup)) &&
       (!filter["internationalShipping.shipmentId"] || filter["internationalShipping.shipmentId"] === order.internationalShipping?.shipmentId))),
     db: { transaction: async (work) => work({}) } },
     User: { find: () => q([{ _id: customerId, name: "Customer" }]) },
@@ -180,6 +181,66 @@ test("a paid legacy checkout recovers its registered package links without guess
   assert.deepEqual((await view()).packages, []);
   assert.match((await view()).packageIssue, /reconcile/);
   await assert.rejects(hub.hubAction(f.ctx, owner, groupId, "home", "ready"), /reconcile/);
+});
+
+test("admin reconciles verified registered packages without bypassing customs or charges", async () => {
+  const f = regions({ stage: "in_customs" });
+  f.shipment.status = "arrived_ethiopia";
+  f.group.international.shipments.push({ id: "work", status: "shipped" });
+  f.orders[0].checkoutGroup = null;
+  f.orders[0].internationalShipping = {};
+  f.orders[1].internationalShipping = { shipmentId: "work" };
+  const view = async (auth) => (await hub.listInbound(f.ctx, auth))[0];
+  assert.equal((await view(admin)).packages.length, 0);
+  assert.equal((await view(admin)).reconciliationRequired, true);
+  assert.deepEqual((await view(admin)).reconciliationCandidates.map((order) => order.orderId), [id(50)]);
+  assert.deepEqual((await view(owner)).reconciliationCandidates, []);
+  const action = (auth, body) => hub.hubAction(f.ctx, auth, groupId, "home", "reconcile", body);
+  await assert.rejects(action(owner, { orderIds: [id(50)], note: "Verified" }), /Only Admin/);
+  await assert.rejects(action(admin, { orderIds: [id(51)], note: "Verified" }), /not eligible/);
+  await assert.rejects(action(admin, { orderIds: [id(50)], note: "" }), /verified/);
+  await action(admin, { orderIds: [id(50)], note: "Matched original receipt" });
+  assert.equal(f.orders[0].checkoutGroup, groupId);
+  assert.equal(f.orders[0].internationalShipping.shipmentId, "home");
+  assert.match(f.shipment.destination.history.at(-1).note, /Matched original receipt/);
+  assert.match((await view(admin)).packageIssue, /incomplete/);
+  await assert.rejects(hub.hubAction(f.ctx, admin, groupId, "home", "clear", { orderIds: [id(50)] }), /incomplete/);
+
+  f.orders[1].internationalShipping = {};
+  await action(admin, { orderIds: [id(51)], note: "Matched original receipt" });
+  assert.equal((await view(admin)).packageIssue, "");
+  assert.equal((await view(admin)).reconciliationRequired, false);
+  assert.equal((await view(admin)).packages.length, 2);
+  await hub.hubAction(f.ctx, owner, groupId, "home", "clear", { orderIds: [id(50), id(51)] });
+  await assert.rejects(hub.hubAction(f.ctx, owner, groupId, "home", "ready"), /Record the customs/);
+});
+
+test("reconciliation refuses missing, wrong-customer and conflicting package records", async () => {
+  const f = regions({ stage: "in_customs" });
+  f.shipment.status = "arrived_ethiopia";
+  f.group.international.shipments.push({ id: "work", status: "shipped" });
+  f.orders[0].checkoutGroup = null;
+  f.orders[0].user = id(999);
+  f.orders[1].checkoutGroup = null;
+  f.orders[1].cartDeliveryAddressId = "work";
+  const [view] = await hub.listInbound(f.ctx, admin);
+  assert.deepEqual(view.reconciliationCandidates, []);
+  await assert.rejects(hub.hubAction(f.ctx, admin, groupId, "home", "reconcile",
+    { orderIds: [id(50)], note: "Verified" }), /not eligible/);
+  f.orders.length = 0;
+  assert.deepEqual((await hub.listInbound(f.ctx, admin))[0].reconciliationCandidates, []);
+  await assert.rejects(hub.hubAction(f.ctx, admin, groupId, "home", "reconcile",
+    { orderIds: [id(50)], note: "Verified" }), /not eligible/);
+});
+
+test("reconciliation cannot link more packages than the checkout expects", async () => {
+  const f = regions({ stage: "in_customs" });
+  f.shipment.status = "arrived_ethiopia";
+  f.group.deliveries.pop();
+  for (const order of f.orders) order.checkoutGroup = null;
+  await assert.rejects(hub.hubAction(f.ctx, admin, groupId, "home", "reconcile",
+    { orderIds: [id(50), id(51)], note: "Verified" }), /not eligible/);
+  assert.ok(f.orders.every((order) => !order.checkoutGroup));
 });
 
 test("zero charges are waived and bank rejection reopens payment", async () => {
