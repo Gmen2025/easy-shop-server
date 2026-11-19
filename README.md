@@ -920,8 +920,11 @@ destination region. Routes live in `routers/international.js`
    bank transfer for ETB, card (`STRIPE_*_ETHIOPIA_USD` merchant) or USD bank
    transfer for USD. Bank transfers enter `bank_review` until Admin confirms or
    rejects them. Charges lock once a payment starts.
-4. **Collected from customs / release:** after `clear`, the hub can release
-   (`ready`) only once charges are paid or waived. Delivery packages become
+4. **Collected from customs / release:** the hub can record one or more
+   packages per `clear` request (`{orderIds}`); omitting `orderIds` records all
+   pending packages for older clients. The shipment stays at customs until all
+   active packages are recorded. The hub can release (`ready`) only once all
+   active packages are collected and charges are paid or waived. Delivery packages become
    ready for dispatch; pickup packages become ready for collection.
 5. **Dispatch and delivery:** the hub assigns an approved destination-region
    driver. The driver confirms pickup from the hub and delivery with a proof

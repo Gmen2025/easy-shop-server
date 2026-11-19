@@ -26,11 +26,15 @@ function regions({ direction = "usa-to-ethiopia", charges = null, stage = null }
     recipient: { address1: "Bole Road", city: "Addis Ababa" }, history: [] };
   if (stage) shipment.destination = { stage, history: [], charges, hubStoreId };
   const group = { _id: groupId, user: customerId, status: "placed", paymentStatus: "completed",
+    orders: orders.map((order) => order._id), deliveries: orders.map(() => ({ address: { id: "home" } })),
     international: { direction, tariff: { ethiopiaPickup: { address1: "Hub office", city: "Addis Ababa" } }, shipments: [shipment] },
     markModified() {}, async save() {} };
   const source = {
     CheckoutGroup: { findById: () => q(group), find: () => q([group]) },
-    Order: { find: () => q(orders), db: { transaction: async (work) => work({}) } },
+    Order: { find: (filter) => q(orders.filter((order) =>
+      (filter.checkoutGroup.$in || [filter.checkoutGroup]).includes(order.checkoutGroup) &&
+      (!filter["internationalShipping.shipmentId"] || filter["internationalShipping.shipmentId"] === order.internationalShipping?.shipmentId))),
+    db: { transaction: async (work) => work({}) } },
     User: { find: () => q([{ _id: customerId, name: "Customer" }]) },
     SiteSetting: { findOne: (filter) => q(filter.key === "bank-account-info" ?
       { bankAccounts: [{ _id: id(60), bankName: "CBE", accountNumber: "100", currency: direction === "usa-to-ethiopia" ? "ETB" : "USD" }] } : null) },
@@ -124,6 +128,58 @@ test("legacy shipments marked arrived before hub tracking can still be received 
   assert.equal(f.shipment.destination.stage, "in_customs");
   assert.match(f.shipment.trackingCode, /^AG-USET-[0-9A-F]{10}$/);
   await assert.rejects(hub.hubAction(f.ctx, owner, groupId, "home", "arrive", {}), /Only shipped packages/);
+});
+
+test("ETB-paid shipment accepts multi-package customs collection but releases only when every active package is collected", async () => {
+  const f = regions({ stage: "in_customs", charges: { status: "paid", currency: "etb" } });
+  f.shipment.status = "arrived_ethiopia";
+  f.orders.push({ ...f.orders[0], _id: id(52), fulfillmentStatus: "cancelled" },
+    { ...f.orders[0], _id: id(53) });
+  f.group.orders.push(id(52), id(53));
+  f.group.deliveries.push({ address: { id: "home" } }, { address: { id: "home" } });
+  const action = (name, body) => hub.hubAction(f.ctx, owner, groupId, "home", name, body);
+  const view = async () => (await hub.listInbound(f.ctx, owner))[0];
+
+  for (const orderIds of [[], [id(50), id(50)], [id(50), id(52)], [id(50), id(99)]]) {
+    await assert.rejects(action("clear", { orderIds }), /distinct packages/);
+  }
+  await action("clear", { orderIds: [id(50), id(51)] });
+  assert.equal(f.shipment.destination.stage, "in_customs");
+  assert.deepEqual((await view()).packages.filter((pkg) => pkg.customsCollected).map((pkg) => pkg.orderId), [id(50), id(51)]);
+  assert.equal((await view()).actions.includes("ready"), false);
+  await assert.rejects(action("ready", {}), /Collect the shipment/);
+  await assert.rejects(action("clear", { orderIds: [id(50)] }), /distinct packages/);
+
+  await action("clear", { orderIds: [id(53)] });
+  assert.equal(f.shipment.destination.stage, "cleared");
+  assert.ok((await view()).actions.includes("ready"));
+  await action("ready", {});
+  assert.equal(f.shipment.destination.stage, "ready");
+});
+
+test("a paid legacy checkout recovers its registered package links without guessing across recipients", async () => {
+  const f = regions({ stage: "cleared", charges: { status: "paid", currency: "etb" } });
+  f.shipment.status = "arrived_ethiopia";
+  for (const order of f.orders) order.internationalShipping = { direction: "usa-to-ethiopia" };
+  const [delivery, pickup] = f.orders;
+  const view = async () => (await hub.listInbound(f.ctx, owner))[0];
+  assert.deepEqual((await view()).packages.map((pkg) => pkg.orderId), [delivery._id, pickup._id]);
+  assert.ok((await view()).packages.every((pkg) => pkg.customsCollected));
+  await hub.hubAction(f.ctx, owner, groupId, "home", "ready");
+  assert.ok(f.orders.every((order) => order.internationalShipping.shipmentId === "home"));
+
+  f.shipment.destination.stage = "cleared";
+  f.group.international.shipments.push({ id: "work", status: "shipped" });
+  pickup.internationalShipping = {};
+  assert.deepEqual((await view()).packages.map((pkg) => pkg.orderId), [delivery._id]);
+  assert.match((await view()).packageIssue, /reconcile/);
+  assert.ok(!(await view()).actions.includes("ready"));
+  await assert.rejects(hub.hubAction(f.ctx, owner, groupId, "home", "ready"), /reconcile/);
+
+  f.orders.length = 0;
+  assert.deepEqual((await view()).packages, []);
+  assert.match((await view()).packageIssue, /reconcile/);
+  await assert.rejects(hub.hubAction(f.ctx, owner, groupId, "home", "ready"), /reconcile/);
 });
 
 test("zero charges are waived and bank rejection reopens payment", async () => {

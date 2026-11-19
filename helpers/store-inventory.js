@@ -293,6 +293,14 @@ async function updateManagedOrder(models, orderId, fields, { deleting = false } 
       if (!group || !group.orders?.some((orderId) => String(orderId) === String(order._id))) {
         throw conflict("Checkout payment record is inconsistent. Contact support.");
       }
+      if (group.international) {
+        const shipmentId = require("./international-hub").packageShipmentId(group, order);
+        const shipment = group.international.shipments?.find((entry) => entry.id === shipmentId);
+        const inFlight = ["shipped", "arrived_ethiopia", "arrived_usa"].includes(shipment?.status);
+        if (inFlight || (completedDelivery && shipment?.status !== "delivered")) {
+          throw conflict("Keep this package record until final international delivery or collection is complete.");
+        }
+      }
       group.orders = group.orders.filter((orderId) => String(orderId) !== String(order._id));
       await group.save({ session });
     }

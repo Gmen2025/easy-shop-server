@@ -109,7 +109,7 @@ function publicDestination(destination) {
       pickedUpAt: driver.pickedUpAt || null, deliveredAt: driver.deliveredAt || null, proof: driver.proof || "" } : null };
 }
 function syncOrder(order, shipment) {
-  order.internationalShipping = { ...order.internationalShipping, status: shipment.status, carrier: shipment.carrier,
+  order.internationalShipping = { ...order.internationalShipping, shipmentId: shipment.id, status: shipment.status, carrier: shipment.carrier,
     trackingNumber: shipment.trackingNumber, trackingCode: shipment.trackingCode, history: shipment.history,
     destination: publicDestination(shipment.destination) };
   order.markModified?.("internationalShipping");
@@ -153,7 +153,32 @@ function releaseAllowsCollection(shipment) {
   return !shipment.destination || RELEASED.includes(shipment.destination.stage) && Boolean(shipment.destination.readyFor?.pickup);
 }
 
-function nextActions(shipment, active, role) {
+function packageShipmentId(group, order) {
+  if (order.internationalShipping?.shipmentId) return order.internationalShipping.shipmentId;
+  // Recover a missing link only for a registered checkout order with an unambiguous recipient.
+  if (!group.orders?.some((key) => id(key) === id(order))) return null;
+  const shipments = group.international?.shipments;
+  return order.cartDeliveryAddressId || (shipments?.length === 1 ? shipments[0].id : null);
+}
+function shipmentPackages(group, shipment, orders) {
+  return orders.filter((order) => packageShipmentId(group, order) === shipment.id);
+}
+function packageIssue(group, shipment, orders, active) {
+  const expected = group.deliveries?.filter((delivery) => delivery.address?.id === shipment.id).length;
+  if (!orders.length || (expected > 0 && orders.length !== expected)) {
+    return "Shipment package records are missing or incomplete. Ask an admin to reconcile the original checkout before proceeding.";
+  }
+  if (!active.length) return "All packages in this shipment were cancelled.";
+  return "";
+}
+function customsCollected(destination, order) {
+  if (!destination) return false;
+  if (Array.isArray(destination.customsCollectedOrderIds)) return destination.customsCollectedOrderIds.includes(id(order));
+  // Shipments cleared before package selection was introduced were cleared as a whole.
+  return destination.stage === "cleared" || RELEASED.includes(destination.stage);
+}
+
+function nextActions(shipment, active, role, issue) {
   const destination = shipment.destination;
   if (shipment.status === "shipped") return ["arrive"];
   if (shipment.status === "delivered") return [];
@@ -162,28 +187,31 @@ function nextActions(shipment, active, role) {
   const actions = [];
   const locked = destination.charges && (destination.charges.method || destination.charges.status === "paid");
   if (["in_customs", "cleared"].includes(destination.stage) && !locked) actions.push("charges");
-  if (destination.stage === "in_customs") actions.push("clear");
-  if (destination.stage === "cleared" && chargesSettled(destination)) actions.push("ready");
+  if (destination.stage === "in_customs" && !issue) actions.push("clear");
+  if (destination.stage === "cleared" && !issue && chargesSettled(destination) &&
+      active.every((order) => customsCollected(destination, order))) actions.push("ready");
   if (RELEASED.includes(destination.stage) && destination.readyFor?.delivery && !destination.driver?.pickedUpAt) actions.push("dispatch");
   if (RELEASED.includes(destination.stage) && active.some((order) => order.fulfillmentMethod === "pickup" && !order.pickupConfirmation?.operatorAt)) actions.push("handover");
   return role === "driver" ? [] : actions;
 }
 function shipmentView(group, shipment, orders, { customer, role } = {}) {
   const route = shipping.route(directionOf(group));
-  const members = orders.filter((order) => order.internationalShipping?.shipmentId === shipment.id);
+  const members = shipmentPackages(group, shipment, orders);
   const active = members.filter((order) => order.fulfillmentStatus !== "cancelled");
+  const issue = shipment.status === "delivered" ? "" : packageIssue(group, shipment, members, active);
   return {
     groupId: id(group), shipmentId: shipment.id, direction: directionOf(group), origin: route.origin, destinationCountry: route.destination,
     status: shipment.status, trackingCode: shipment.trackingCode || "", carrier: shipment.carrier || "", trackingNumber: shipment.trackingNumber || "",
     recipient: shipment.recipient, billableKg: shipment.billableKg, currency: route.currency,
     customer: customer ? { name: customer.name || "", phone: customer.phone || "", email: customer.email || "" } : null,
     collectionAddress: group.international.tariff?.[route.pickupField] || null,
-    destination: publicDestination(shipment.destination), history: shipment.history || [],
+    destination: publicDestination(shipment.destination), history: shipment.history || [], packageIssue: issue,
     packages: members.map((order) => ({ orderId: id(order), fulfillmentMethod: order.fulfillmentMethod || "delivery",
       cancelled: order.fulfillmentStatus === "cancelled",
+      customsCollected: order.fulfillmentStatus !== "cancelled" && customsCollected(shipment.destination, order),
       items: (order.orderItems || []).map((line) => ({ name: line.product?.name || "Product", quantity: line.quantity, image: line.product?.image || "" })),
       pickupConfirmation: { customerAt: order.pickupConfirmation?.customerAt || null, operatorAt: order.pickupConfirmation?.operatorAt || null } })),
-    actions: nextActions(shipment, active, role),
+    actions: nextActions(shipment, active, role, issue),
   };
 }
 
@@ -234,7 +262,8 @@ async function mutate(ctx, groupId, shipmentId, authorize, work) {
       throw failure(404, "International shipment not found.");
     }
     const actor = await authorize(shipment, group);
-    const orders = await ctx.source.Order.find({ checkoutGroup: group._id, "internationalShipping.shipmentId": shipmentId }).session(session);
+    const candidates = await ctx.source.Order.find({ checkoutGroup: group._id }).session(session);
+    const orders = shipmentPackages(group, shipment, candidates);
     const active = orders.filter((order) => order.fulfillmentStatus !== "cancelled");
     const notify = notices(group, shipment, ctx.route);
     const value = await work({ group, shipment, orders, active, actor, notify, session });
@@ -298,18 +327,36 @@ function assessCharges(ctx, auth, { shipment, notify }, body) {
     notify.customer("Customs & duty charges due", `Shipment ${shipment.trackingCode || shipment.id}: ${chargeSummary(destination.charges)}. Total ${money(input.total, ctx.route.currency)}. Pay online from your checkout to release your package.`);
   } else notify.customer("No customs charges due", `Shipment ${shipment.trackingCode || shipment.id} has no customs, duty or tariff charges to pay.`);
 }
-function clear(ctx, auth, { shipment, notify }, body) {
+function clear(ctx, auth, { group, shipment, orders, active, notify }, body) {
   if (shipment.destination?.stage !== "in_customs") throw conflict("Only shipments at customs can be marked collected from customs.");
-  shipment.destination.clearedAt = new Date();
-  stageEvent(shipment, "cleared", auth.userId, text(body.note) || "Collected from customs by the hub.", ctx.destinationDb);
+  const issue = packageIssue(group, shipment, orders, active);
+  if (issue) throw conflict(issue);
+  const destination = shipment.destination;
+  const note = text(body.note);
+  const pending = active.filter((order) => !customsCollected(destination, order)).map(id);
+  const selected = body.orderIds === undefined ? pending : body.orderIds;
+  if (!Array.isArray(selected) || !selected.length || new Set(selected).size !== selected.length ||
+      selected.some((orderId) => !pending.includes(orderId))) {
+    throw conflict("Select one or more distinct packages still awaiting customs collection in this shipment.");
+  }
+  destination.customsCollectedOrderIds = [...(destination.customsCollectedOrderIds || []), ...selected];
+  if (!active.every((order) => customsCollected(destination, order))) {
+    stageEvent(shipment, "in_customs", auth.userId,
+      `Collected ${selected.length} of ${pending.length} pending packages from customs.${note ? ` ${note}` : ""}`, ctx.destinationDb);
+    return;
+  }
+  destination.clearedAt = new Date();
+  stageEvent(shipment, "cleared", auth.userId, note || "Collected from customs by the hub.", ctx.destinationDb);
   notify.customer("Cleared customs", `Shipment ${shipment.trackingCode || shipment.id} was collected from customs by the AdduGenet ${ctx.route.destination} hub.`);
 }
-function ready(ctx, auth, { group, shipment, active, notify }, body) {
+function ready(ctx, auth, { group, shipment, orders, active, notify }, body) {
   const destination = shipment.destination;
   if (destination?.stage !== "cleared") throw conflict("Collect the shipment from customs before releasing it.");
   if (!destination.charges) throw conflict("Record the customs, duty and tariff charges (or no charges) before releasing the shipment.");
   if (!chargesSettled(destination)) throw conflict("The customer must pay the customs and related charges before the shipment is released.");
-  if (!active.length) throw conflict("This shipment has no active packages.");
+  const issue = packageIssue(group, shipment, orders, active);
+  if (issue) throw conflict(issue);
+  if (!active.every((order) => customsCollected(destination, order))) throw conflict("Collect all active packages from customs before releasing the shipment.");
   destination.readyFor = { delivery: active.some((order) => order.fulfillmentMethod !== "pickup"), pickup: active.some((order) => order.fulfillmentMethod === "pickup") };
   destination.readyAt = new Date();
   stageEvent(shipment, "ready", auth.userId, text(body.note), ctx.destinationDb);
@@ -541,5 +588,5 @@ async function reviewBankCharges(models, database, auth, groupId, shipmentId, de
 }
 module.exports = { HUB_KEY, CHARGE_TYPES, STAGES, RELEASED, SETTLED, regionDatabases, sourceDatabase, destinationDatabase, inboundDirection,
   hubContext, originContext, hubConfig, hubStores, saveHubConfig, authorizeHub, chargeInput, chargesSettled, publicDestination, syncOrder,
-  startDestination, markArrived, completeIfFinished, releaseAllowsCollection, notices, deliver, listInbound, hubAction, driverDeliveries,
+  startDestination, markArrived, completeIfFinished, releaseAllowsCollection, packageShipmentId, notices, deliver, listInbound, hubAction, driverDeliveries,
   driverAction, payCharges, confirmCharges, reviewBankCharges };

@@ -621,8 +621,9 @@ add("get", "/hub/drivers", "List approved destination drivers for dispatch", arr
 add("post", "/hub/shipments/{groupId}/{shipmentId}/{action}", "Run an inbound hub action", ref("CommerceSuccess"), intl({ scope: hubScope, ...shipmentParams,
   paramSchemas: { ...shipmentParams.paramSchemas, action: { type: "string", enum: ["arrive", "charges", "clear", "ready", "dispatch", "handover"] } },
   forbidden: "Inbound hub access required.", notFound: "International shipment not found.",
-  body: object({ note: string300, charges: array(chargeItem, { maxItems: 12 }), driverId: objectId, orderId: objectId }), bodyRequired: false,
-  description: "arrive (shipped → arrived, in_customs); charges (record customs/duty/tariff/other; empty list waives; locked once payment starts); clear (collected from customs); ready (requires settled charges; ready for delivery and/or pickup); dispatch {driverId}; handover {note, orderId?} for collection packages. The customer is notified at every step." }));
+  body: object({ note: string300, charges: array(chargeItem, { maxItems: 12 }), driverId: objectId, orderId: objectId,
+    orderIds: array(objectId, { minItems: 1, uniqueItems: true }) }), bodyRequired: false,
+  description: "arrive (shipped → arrived, in_customs); charges (record customs/duty/tariff/other; empty list waives; locked once payment starts); clear {orderIds?} (record selected packages collected from customs; omit orderIds to record all pending packages); ready (requires all active packages collected and charges settled); dispatch {driverId}; handover {note, orderId?} for collection packages." }));
 add("get", "/driver/deliveries", "List international final deliveries assigned to the driver", array(anyObject), intl({ scope: "Bearer authentication; approved, non-suspended driver in the destination region.", forbidden: "Approved driver required." }));
 add("post", "/driver/deliveries/{groupId}/{shipmentId}/{action}", "Confirm hub pickup or final delivery", ref("CommerceSuccess"), intl({
   scope: "Bearer authentication; the assigned driver.", ...shipmentParams, forbidden: "Assigned driver required.",

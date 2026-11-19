@@ -79,6 +79,21 @@ function fixture() {
   return { stores, stocks, order, models };
 }
 
+test("origin delivery does not allow deleting a package before final international delivery", async () => {
+  const { models, order } = fixture();
+  const shipment = { id: "home", status: "arrived_ethiopia" };
+  const group = { _id: id(30), orders: [order._id], international: { shipments: [shipment] }, async save() {} };
+  Object.assign(order, { checkoutGroup: group._id, fulfillmentStatus: "completed",
+    deliveryStatus: "Delivered", internationalShipping: { shipmentId: "home" }, reservedItems: [] });
+  models.CheckoutGroup = { findById: () => query(group) };
+  await assert.rejects(updateManagedOrder(models, order._id, {}, { deleting: true }), /final international delivery/);
+  assert.equal(order.deleted, undefined);
+  assert.deepEqual(group.orders, [order._id]);
+  shipment.status = "delivered";
+  await updateManagedOrder(models, order._id, {}, { deleting: true });
+  assert.equal(order.deleted, true);
+});
+
 test("cart normalization combines duplicates and rejects invalid quantities, prices and IDs", () => {
   assert.deepEqual(normalizeLines([line, line]), [{ ...line, quantity: 4 }]);
   for (const invalid of [{ ...line, quantity: -1 }, { ...line, price: 10.001 }, { ...line, product: "invalid" }]) {
