@@ -927,7 +927,9 @@ destination region. Routes live in `routers/international.js`
    active packages are collected and charges are paid or waived. Delivery packages become
    ready for dispatch; pickup packages become ready for collection.
 5. **Dispatch and delivery:** the hub assigns an approved destination-region
-   driver. The driver confirms pickup from the hub and delivery with a proof
+   driver. The live route uses the driver's GPS to the assigned hub, then to
+   the recipient after pickup; it uses Google Routes for road distance and ETA.
+   The driver confirms pickup from the hub and delivery with a proof
    note. Pickup packages are completed with the hub `handover` action and the
    existing customer pickup confirmation. The checkout shipment then becomes
    `delivered`, and every step notifies the customer.
@@ -939,7 +941,7 @@ Endpoints, all with a JWT and `x-database-name` for the region shown:
 | Admin or hub, destination | `GET hub/access`, `GET hub/config`, `GET hub/shipments[?include=all]`, `GET hub/drivers` |
 | Admin, destination | `PUT hub/config {storeId}`, `GET hub/stores`, `POST hub/shipments/:groupId/:shipmentId/reconcile {orderIds,note}` |
 | Admin or hub, destination | `POST hub/shipments/:groupId/:shipmentId/:action` (`arrive`, `charges`, `clear`, `ready`, `dispatch`, `handover`) |
-| Driver, destination | `GET driver/deliveries`, `POST driver/deliveries/:groupId/:shipmentId/(pickup\|deliver)` |
+| Driver, destination | `GET driver/deliveries`, `POST driver/deliveries/:groupId/:shipmentId/(pickup\|deliver)`, `POST driver/deliveries/:groupId/:shipmentId/route {origin:{latitude,longitude}}` |
 | Customer, origin | `POST checkouts/:groupId/shipments/:shipmentId/charges/(pay\|confirm)` |
 | Admin, origin | `POST checkouts/:groupId/shipments/:shipmentId/charges/(bank-confirm\|bank-reject)` |
 
@@ -967,6 +969,14 @@ Shipments created before this feature keep the earlier
 Admin-only flow. Deploy the backend before the mobile app and website. Test
 Telebirr, Stripe and bank charge payments, cross-region notifications and
 driver flows in staging before rollout.
+
+International live routes require `GOOGLE_ROUTES_API_KEY` with Routes API
+enabled. The assigned hub store needs a valid location; if the saved hub
+address has no matching store pin, the server verifies that address with
+`GOOGLE_MAPS_API_KEY` and Geocoding API. The destination is selected on the
+server for the assigned driver; route requests are limited to one every
+10 seconds per driver and destination region. Missing or unverified locations
+and provider errors are reported rather than replaced by straight lines.
 
 #### Shared catalog and store-specific inventory
 

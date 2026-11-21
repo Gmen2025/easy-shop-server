@@ -5,6 +5,8 @@ const { cents } = require("./vehicle-delivery");
 const fx = require("./exchange-rate");
 const shipping = require("./international-shipping");
 const { sendPushToUser } = require("./push-notify");
+const { getCoordinates } = require("./fulfillment-routing");
+const { computeDrivingRoute } = require("./google-route");
 
 const HUB_KEY = "international-inbound-hub";
 const CHARGE_TYPES = {
@@ -422,6 +424,7 @@ async function dispatch(ctx, auth, { shipment, notify }, body) {
   const driver = await ctx.destination.Driver.findOne({ _id: body.driverId, approvalStatus: "approved", isSuspended: { $ne: true } }).lean();
   if (!driver?.user) throw conflict(`Choose an approved, active driver in ${ctx.route.destination}.`);
   const config = await hubConfig(ctx.destination);
+  destination.hubStoreId = destination.hubStoreId || config?.storeId || null;
   destination.hubStoreName = destination.hubStoreName || config?.storeName || "";
   destination.hubStoreAddress = destination.hubStoreAddress || config?.storeAddress || "";
   destination.driver = { driverId: id(driver), userId: id(driver.user), name: driver.name || "", phone: driver.phone || "",
@@ -458,6 +461,58 @@ async function driverDeliveries(ctx, auth) {
     ...view, actions: view.destination.driver.pickedUpAt ? ["deliver"] : ["pickup"],
     pickupFrom: { name: view.destination.hubStoreName, address: view.destination.hubStoreAddress } }));
 }
+
+const routeRequests = new Map();
+async function driverRoute(ctx, auth, groupId, shipmentId, origin, { compute = computeDrivingRoute, geocode, now = Date.now } = {}) {
+  const driver = await currentDriver(ctx, auth);
+  if (!mongoose.isValidObjectId(groupId) || typeof shipmentId !== "string" || !shipmentId) throw failure(400, "Invalid shipment identifier.");
+  const from = getCoordinates(origin);
+  if (!from || from[0] === 0 && from[1] === 0) throw failure(400, "Valid live GPS coordinates are required.");
+  const group = await ctx.source.CheckoutGroup.findById(groupId).lean();
+  const shipment = group?.international?.shipments?.find((entry) => entry.id === shipmentId);
+  const destination = shipment?.destination;
+  if (!shipment || group.status !== "placed" || group.paymentStatus !== "completed" ||
+      directionOf(group) !== ctx.direction || shipment.status === "delivered" ||
+      destination?.driver?.driverId !== id(driver) || destination.driver.deliveredAt ||
+      !["dispatched", "out_for_delivery"].includes(destination.stage)) {
+    throw failure(404, "Active international delivery assigned to you was not found.");
+  }
+  const stage = destination.driver.pickedUpAt ? "delivery" : "pickup";
+  const time = now();
+  for (const [key, expiry] of routeRequests) if (expiry <= time) routeRequests.delete(key);
+  const key = `${ctx.destinationDb}:${id(driver)}`;
+  if (routeRequests.has(key)) {
+    const error = failure(429, "Please wait before requesting another driving route.");
+    error.retryAfter = Math.max(1, Math.ceil((routeRequests.get(key) - time) / 1000));
+    throw error;
+  }
+  routeRequests.set(key, time + 10000);
+  const usable = (location) => {
+    const point = getCoordinates(location);
+    return point && (point[0] !== 0 || point[1] !== 0) ? point : null;
+  };
+  let target;
+  let address;
+  if (stage === "pickup") {
+    const savedAddress = destination.hubStoreAddress;
+    if (!savedAddress) throw failure(422, "The hub pickup address is missing. Ask the hub to update this shipment.");
+    const store = mongoose.isValidObjectId(destination.hubStoreId)
+      ? await ctx.destination.Store.findById(destination.hubStoreId).lean() : null;
+    if ([store?.address, store?.city].filter(Boolean).join(", ") === savedAddress) target = usable(store?.location);
+    address = { address1: savedAddress, country: ctx.route.destination };
+  } else {
+    target = usable(shipment.recipient?.location);
+    address = shipment.recipient;
+  }
+  if (!target && address?.address1) {
+    const lookup = geocode || require("./multi-delivery").geocodeAddress;
+    target = usable(await lookup(address));
+  }
+  if (!target) throw failure(422, `This shipment has no valid ${stage === "pickup" ? "hub" : "recipient"} location. Ask the hub to verify the address.`);
+  const route = await compute(from, target);
+  return { ...route, stage, destination: { longitude: target[0], latitude: target[1] } };
+}
+
 async function driverAction(ctx, auth, groupId, shipmentId, action, body = {}) {
   if (!["pickup", "deliver"].includes(action)) throw conflict("Unsupported driver action.");
   const driver = await currentDriver(ctx, auth);
@@ -639,4 +694,4 @@ async function reviewBankCharges(models, database, auth, groupId, shipmentId, de
 module.exports = { HUB_KEY, CHARGE_TYPES, STAGES, RELEASED, SETTLED, regionDatabases, sourceDatabase, destinationDatabase, inboundDirection,
   hubContext, originContext, hubConfig, hubStores, saveHubConfig, authorizeHub, chargeInput, chargesSettled, publicDestination, syncOrder,
   startDestination, markArrived, completeIfFinished, releaseAllowsCollection, packageShipmentId, notices, deliver, listInbound, hubAction, driverDeliveries,
-  driverAction, payCharges, confirmCharges, reviewBankCharges };
+  driverAction, driverRoute, payCharges, confirmCharges, reviewBankCharges };

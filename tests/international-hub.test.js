@@ -118,6 +118,59 @@ test("hub receives, charges, releases, dispatches and completes a mixed delivery
   assert.ok(titles(driverUser).includes("International delivery assigned"));
 });
 
+test("driver routes use the authorized shipment's current stop and live origin in either direction", async () => {
+  for (const direction of ["usa-to-ethiopia", "ethiopia-to-usa"]) {
+    const f = regions({ direction });
+    f.shipment.destination = { stage: "dispatched", hubStoreId, hubStoreAddress: "Bole",
+      driver: { driverId, pickedUpAt: null } };
+    f.shipment.recipient.location = { coordinates: [38.8, 8.98] };
+    f.destination.Store.findById = () => q({ address: "Bole", location: { coordinates: [38.7, 9.02] } });
+    let time = 100000;
+    const compute = async (origin, destination) => {
+      assert.deepEqual(origin, [38.6, 9.1]);
+      return { coordinates: [{ latitude: origin[1], longitude: origin[0] }, { latitude: destination[1], longitude: destination[0] }],
+        distance: 4, duration: 10 };
+    };
+    const request = (auth = { userId: driverUser }, options = {}) => hub.driverRoute(f.ctx, auth, groupId, "home",
+      { longitude: 38.6, latitude: 9.1 }, { compute, now: () => time, ...options });
+    const pickup = await request();
+    assert.equal(pickup.stage, "pickup");
+    assert.deepEqual(pickup.destination, { longitude: 38.7, latitude: 9.02 });
+    await assert.rejects(request(), (error) => error.status === 429 && error.retryAfter === 10);
+    f.shipment.destination.stage = "out_for_delivery";
+    f.shipment.destination.driver.pickedUpAt = new Date();
+    time += 11000;
+    const delivery = await request();
+    assert.equal(delivery.stage, "delivery");
+    assert.deepEqual(delivery.destination, { longitude: 38.8, latitude: 8.98 });
+    time += 11000;
+    f.shipment.destination.driver.driverId = id(31);
+    await assert.rejects(request(), (error) => error.status === 404);
+    f.shipment.destination.driver.driverId = driverId;
+    await assert.rejects(hub.driverRoute(f.ctx, { userId: driverUser }, groupId, "home",
+      { longitude: 999, latitude: 9 }, { compute }), (error) => error.status === 400);
+    f.shipment.destination.driver.deliveredAt = new Date();
+    await assert.rejects(request(), (error) => error.status === 404);
+  }
+});
+
+test("international pickup route geocodes the saved hub address rather than a changed store pin", async () => {
+  const f = regions();
+  f.shipment.destination = { stage: "dispatched", hubStoreId, hubStoreAddress: "Original hub",
+    driver: { driverId } };
+  f.destination.Store.findById = () => q({ address: "New hub", location: { coordinates: [39, 9] } });
+  const result = await hub.driverRoute(f.ctx, { userId: driverUser }, groupId, "home", { longitude: 38, latitude: 9 }, {
+    now: () => 200000,
+    geocode: async (address) => {
+      assert.equal(address.address1, "Original hub");
+      assert.equal(address.country, "Ethiopia");
+      return { coordinates: [38.5, 9.5] };
+    },
+    compute: async (origin, destination) => ({ origin, destination }),
+  });
+  assert.deepEqual(result.destination, { longitude: 38.5, latitude: 9.5 });
+});
+
 test("legacy shipments marked arrived before hub tracking can still be received by the hub", async () => {
   const f = regions();
   f.shipment.status = "arrived_ethiopia";

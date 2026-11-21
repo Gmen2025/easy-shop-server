@@ -2,14 +2,15 @@ const router = require("express").Router();
 const hub = require("../helpers/international-hub");
 const { getModelsForDb } = require("../helpers/db-manager");
 
-function endpoint(action) {
+function endpoint(action, fallbackMessage = "International shipment request failed. Reload and try again; do not pay twice.") {
   return async (req, res) => {
     try {
       if (!req.auth?.userId) return res.status(401).json({ message: "Sign in to manage international shipments." });
       await action(req, res);
     } catch (error) {
       console.error("International shipment request failed:", error.message);
-      res.status(error.status || 500).json({ message: error.status ? error.message : "International shipment request failed. Reload and try again; do not pay twice." });
+      if (error.retryAfter) res.set("Retry-After", String(error.retryAfter));
+      res.status(error.status || 500).json({ message: error.status ? error.message : fallbackMessage });
     }
   };
 }
@@ -61,6 +62,9 @@ router.post("/hub/shipments/:groupId/:shipmentId/:action", endpoint(async (req, 
 router.get("/driver/deliveries", endpoint(async (req, res) => {
   res.json(await hub.driverDeliveries(destination(req), auth(req)));
 }));
+router.post("/driver/deliveries/:groupId/:shipmentId/route", endpoint(async (req, res) => {
+  res.json(await hub.driverRoute(destination(req), auth(req), req.params.groupId, req.params.shipmentId, req.body?.origin));
+}, "Unable to calculate driving directions. Check server Routes API authorization, billing, and connectivity."));
 router.post("/driver/deliveries/:groupId/:shipmentId/:action", endpoint(async (req, res) => {
   await hub.driverAction(destination(req), auth(req), req.params.groupId, req.params.shipmentId, req.params.action, req.body);
   res.json({ success: true });

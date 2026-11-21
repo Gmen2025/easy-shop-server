@@ -627,6 +627,11 @@ add("post", "/hub/shipments/{groupId}/{shipmentId}/{action}", "Run an inbound hu
     orderIds: array(objectId, { minItems: 1, uniqueItems: true }) }), bodyRequired: false,
   description: "arrive (shipped → arrived, in_customs); charges (record customs/duty/tariff/other; empty list waives; locked once payment starts); clear {orderIds?} (record selected packages collected from customs; omit orderIds to record all pending packages); ready (requires all active packages collected and charges settled); dispatch {driverId}; handover {note, orderId?} for collection packages; reconcile {orderIds, note} (destination Admin only; link verified, eligible orders registered in the checkout, without recording customs collection)." }));
 add("get", "/driver/deliveries", "List international final deliveries assigned to the driver", array(anyObject), intl({ scope: "Bearer authentication; approved, non-suspended driver in the destination region.", forbidden: "Approved driver required." }));
+add("post", "/driver/deliveries/{groupId}/{shipmentId}/route", "Calculate the driver's current international delivery leg", anyObject, intl({
+  scope: "Bearer authentication; the approved, non-suspended assigned driver.", ...shipmentParams,
+  forbidden: "Approved driver required.", notFound: "Active assigned shipment not found.",
+  body: object({ origin: object({ latitude: { type: "number" }, longitude: { type: "number" } }, ["latitude", "longitude"]) }, ["origin"]),
+  description: "Uses live driver coordinates and the server-selected hub before pickup or recipient after pickup. Returns stage, destination, driving coordinates, distance in km and duration in minutes. Requests are limited to one every 10 seconds per driver and destination region." }));
 add("post", "/driver/deliveries/{groupId}/{shipmentId}/{action}", "Confirm hub pickup or final delivery", ref("CommerceSuccess"), intl({
   scope: "Bearer authentication; the assigned driver.", ...shipmentParams, forbidden: "Assigned driver required.",
   paramSchemas: { ...shipmentParams.paramSchemas, action: { type: "string", enum: ["pickup", "deliver"] } },
