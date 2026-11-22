@@ -45,6 +45,22 @@ function response() {
   };
 }
 
+test("customer order history only allows the owner or an admin", async () => {
+  const owner = "customer-1";
+  let filter;
+  const models = { Order: { find: (value) => { filter = value; return query([]); } } };
+  const get = handler(orderRouter, "/get/userorders/:userid", "get");
+  const denied = response();
+  await get({ auth: { userId: "other" }, params: { userid: owner }, dbModels: models }, denied);
+  assert.equal(denied.statusCode, 403);
+  for (const auth of [{ userId: owner }, { userId: "admin", isAdmin: true }]) {
+    const res = response();
+    await get({ auth, params: { userid: owner }, dbModels: models }, res);
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(filter, { $or: [{ user: owner }, { customer: owner }] });
+  }
+});
+
 test("AdminStore product queue includes every unanswered product on its active assigned orders", async () => {
   const storeId = "company";
   const nearbyPartner = {

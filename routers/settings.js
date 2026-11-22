@@ -11,6 +11,7 @@ const { readFinancialHealthSetting, updateFinancialHealthSetting } = require('..
 const { FEATURES, readServiceAvailability, updateServiceAvailability } = require('../helpers/service-availability');
 const { readTestingEmails, updateTestingEmails, requestUserId, canTest } = require('../helpers/testing-access');
 const { readMaintenance } = require('../helpers/maintenance');
+const { readUsaRegion, updateUsaRegion } = require('../helpers/usa-region');
 
 const MAINTENANCE_SETTING_KEY = 'maintenance-mode';
 const BANK_ACCOUNT_SETTING_KEY = 'bank-account-info';
@@ -119,6 +120,68 @@ async function requireCurrentAdmin(req) {
   const admin = await req.dbModels.User.findOne({ _id: req.auth.userId, isAdmin: true }).select('_id').lean();
   if (!admin) throw Object.assign(new Error('Admin access required.'), { status: 403 });
 }
+
+/**
+ * @swagger
+ * /api/v1/settings/usa-availability:
+ *   get:
+ *     summary: Get USA storefront availability
+ *     tags: [Settings]
+ *     security: []
+ *     responses:
+ *       200:
+ *         description: USA availability
+ *       503:
+ *         description: Availability could not be verified
+ *   put:
+ *     summary: Set USA storefront availability
+ *     tags: [Settings]
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [enabled]
+ *             properties:
+ *               enabled:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Saved availability
+ *       400:
+ *         description: Invalid availability
+ *       401:
+ *         description: Authentication required
+ *       403:
+ *         description: Admin access required
+ *       503:
+ *         description: Availability could not be saved
+ */
+router.get('/usa-availability', async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  try { res.json({ enabled: await readUsaRegion() }); }
+  catch (error) {
+    console.error('Failed to read USA availability:', error.message);
+    res.status(503).json({ message: 'Unable to load USA availability.' });
+  }
+});
+
+router.put('/usa-availability', async (req, res) => {
+  res.set('Cache-Control', 'private, no-store');
+  try {
+    await requireCurrentAdmin(req);
+    if (!req.body || typeof req.body.enabled !== 'boolean' || Object.keys(req.body).some((key) => key !== 'enabled')) {
+      return res.status(400).json({ message: 'enabled must be a boolean.' });
+    }
+    return res.json({ enabled: await updateUsaRegion(req.body.enabled, req.auth.userId) });
+  } catch (error) {
+    console.error('Failed to update USA availability:', error.message);
+    return res.status(error.status || 503).json({ message: error.status ? error.message : 'Unable to save USA availability.' });
+  }
+});
 
 /**
  * @swagger
@@ -409,6 +472,7 @@ router.get('/maintenance', async (req, res) => {
   res.vary('Authorization');
   try {
     return res.status(200).json({ ...await readMaintenance(req.dbModels),
+      ...(/usa/i.test(req.dbName || '') ? { usaRegionEnabled: await readUsaRegion() } : {}),
       testingAccess: await canTest(req.dbModels, requestUserId(req)) });
   } catch (error) {
     console.error('Failed to read maintenance setting:', error.message);

@@ -116,6 +116,15 @@ set deployment.
 
 ## Regional ride and service availability
 
+The shared USA storefront switch is managed at `/api/v1/settings/usa-availability`
+using public GET or admin PUT with `{ "enabled": true|false }`. It defaults
+ON and is stored in the `E_ShopUSA` database. OFF blocks USA catalog browsing and
+new shopping for everyone except regional Admin and approved verified testers;
+existing authenticated orders, payments and delivery operations remain available.
+The setting also applies to the legacy USA database alias; tester membership is
+checked in the selected database. Ethiopia remains unaffected. Mobile and website
+must deploy the matching clients to show the restricted storefront experience.
+
 Uncached `GET /api/v1/settings/service-availability` returns
 `{ rides: boolean, services: boolean, financialHealth: boolean, testingAccess: boolean }`.
 Current admins can `PUT` partial ride/service switches, or `{financialHealth: boolean}`

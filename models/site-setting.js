@@ -15,6 +15,7 @@ const siteSettingSchema = new mongoose.Schema(
     },
     socialLoginEnabled: { type: Boolean, default: false },
     financialHealthEnabled: { type: Boolean, default: false },
+    usaRegionEnabled: { type: Boolean, default: true },
     testingEmails: { type: [String], default: undefined },
     serviceAvailability: {
       rides: { type: Boolean, default: undefined },

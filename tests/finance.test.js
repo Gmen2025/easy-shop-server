@@ -8,7 +8,7 @@ const { serviceRequestSchema } = require("../models/service-request");
 
 function query(value) {
   const chain = {
-    session() { return chain; }, sort() { return chain; }, select() { return chain; },
+    session() { return chain; }, sort() { return chain; }, select() { return chain; }, limit() { return chain; },
     lean() { return chain; }, populate() { return chain; },
     then(resolve, reject) { return Promise.resolve(value).then(resolve, reject); },
   };
@@ -298,6 +298,52 @@ test("income endpoints reject other accounts and unauthenticated callers", async
   req.auth = {};
   await action(req, res);
   assert.equal(res.statusCode, 401);
+});
+
+test("driver and store income returns active regional bank details and configured deposit methods", async (t) => {
+  const wallet = require("../helpers/participant-wallet");
+  const stripe = require("../routers/stripe");
+  const telebirr = require("../helpers/checkout-telebirr");
+  t.mock.method(finance, "reconcileFinance", async () => {});
+  t.mock.method(finance, "participantFinance", async () => ({ entries: [], payouts: [] }));
+  t.mock.method(wallet, "config", async () => true);
+  t.mock.method(stripe, "getStripe", () => ({ stripe: {} }));
+  t.mock.method(telebirr, "available", () => true);
+  const previous = process.env.WALLET_PAYMENT_RETURN_URL;
+  process.env.WALLET_PAYMENT_RETURN_URL = "https://example.test/income";
+  t.after(() => {
+    if (previous === undefined) delete process.env.WALLET_PAYMENT_RETURN_URL;
+    else process.env.WALLET_PAYMENT_RETURN_URL = previous;
+  });
+  const banks = [
+    { _id: "etb", bankName: "ETB bank", accountNumber: "123", currency: "ETB", isActive: true },
+    { _id: "usd", bankName: "USD bank", accountNumber: "456", currency: "USD", isActive: true },
+    { _id: "inactive", bankName: "Old bank", accountNumber: "789", currency: "ETB", isActive: false },
+  ];
+  const action = route("/accounts/:kind/:accountId", "get");
+  for (const kind of ["driver", "store"]) {
+    const participant = { _id: "account", owner: "user", user: "user", walletBalance: 0,
+      depositPolicy: { enabled: true, lowBalance: 50, minimumBalance: 0 } };
+    const participantModel = { findOne: () => query(participant), findById: () => query(participant), find: () => query([]) };
+    const models = {
+      Store: participantModel, Driver: participantModel,
+      SiteSetting: { findOne: ({ key }) => query(key === "bank-account-info" ? { bankAccounts: banks } :
+        { paymentMethods: { bank: true, card: true, telebirr: true } }) },
+      ParticipantWalletTransaction: { find: () => query([]) },
+      DriverWalletTransaction: { find: () => query([]) },
+      Product: { find: () => query([]) }, StoreInventory: { find: () => query([]) },
+    };
+    for (const [dbName, currency, bankId, card, tele] of [
+      ["E_Shopping", "ETB", "etb", false, true], ["E_ShopUSA", "USD", "usd", true, false],
+    ]) {
+      const res = response();
+      await action({ params: { kind, accountId: "me" }, auth: { userId: "user" }, dbName, dbModels: models }, res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.body.wallet.currency, currency);
+      assert.deepEqual(res.body.wallet.bankAccounts.map((bank) => bank._id), [bankId]);
+      assert.deepEqual(res.body.wallet.methods, { bank: true, card, telebirr: tele });
+    }
+  }
 });
 
 test("weekly batch cannot mark payouts automatically paid without a provider", async () => {

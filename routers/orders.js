@@ -2114,6 +2114,9 @@ router.get(`/get/count`, async (req, res) => {
  */
 //User orders history
 router.get(`/get/userorders/:userid`, async (req, res) => {
+  if (!req.auth?.isAdmin && String(req.auth?.userId || "") !== String(req.params.userid)) {
+    return res.status(403).json({ success: false, message: "You can only view your own orders." });
+  }
   const { Order } = req.dbModels;
   const userOrderList = await Order.find({
     $or: [{ user: req.params.userid }, { customer: req.params.userid }],
