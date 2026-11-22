@@ -351,6 +351,7 @@ Authenticated endpoints under `/api/v1/notifications`:
   `createdAt`. Pass `?before=<nextCursor>` for older entries. `unreadCount` covers
   the entire inbox, not just the current page.
 - `PUT /inbox/:notificationId/read`: idempotently mark an owned entry read.
+- `DELETE /inbox/:notificationId`: delete an owned entry and return its ID and read status.
 - `PUT /inbox/read-all`: mark the signed-in user's existing unread entries read.
 
 Inbox endpoints use the JWT `userId` and selected database; even admins cannot

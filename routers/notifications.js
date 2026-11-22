@@ -281,6 +281,47 @@ router.put('/inbox/:notificationId/read', async (req, res, next) => {
 
 /**
  * @swagger
+ * /api/v1/notifications/inbox/{notificationId}:
+ *   delete:
+ *     summary: Delete one notification from the authenticated user's inbox
+ *     tags: [Notifications]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: notificationId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Deleted notification ID and read status
+ *       400:
+ *         description: Invalid notification ID
+ *       401:
+ *         description: Authentication required
+ *       404:
+ *         description: Notification not found
+ *       500:
+ *         description: Notification model or storage is not available
+ */
+router.delete('/inbox/:notificationId', async (req, res, next) => {
+  try {
+    if (!mongoose.isObjectIdOrHexString(req.params.notificationId)) {
+      return res.status(400).json({ message: 'Invalid notification ID' });
+    }
+    const item = await req.dbModels.Notification.findOneAndDelete({
+      _id: req.params.notificationId, user: req.auth.userId,
+    });
+    if (!item) return res.status(404).json({ message: 'Notification not found' });
+    return res.json({ id: String(item._id), isRead: item.isRead });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * @swagger
  * /api/v1/notifications/drivers/{driverId}/push-token:
  *   put:
  *     summary: Register an Expo push token for a driver

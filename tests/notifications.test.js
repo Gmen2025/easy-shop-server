@@ -162,6 +162,31 @@ test('read actions are idempotent and owner-scoped, including for admins', async
   assert.deepEqual(readAllFilter, { user: userId, isRead: false });
 });
 
+test('deleting notifications requires authentication and only removes the owner\'s entry', async (t) => {
+  const { Notification } = fixture();
+  const entries = [
+    { _id: notificationId, user: userId, isRead: false },
+    { _id: otherUserId, user: otherUserId, isRead: true },
+  ];
+  Notification.findOneAndDelete = async (filter) => {
+    const index = entries.findIndex((entry) => entry._id === filter._id && entry.user === filter.user);
+    return index < 0 ? null : entries.splice(index, 1)[0];
+  };
+  const call = await serve(t, { Notification }, { userId, isAdmin: true });
+  assert.equal((await call(`/inbox/${notificationId}`, 'DELETE', null, false)).status, 401);
+  assert.equal((await call('/inbox/bad-id', 'DELETE')).status, 400);
+  assert.equal((await call(`/inbox/${otherUserId}`, 'DELETE')).status, 404);
+  assert.deepEqual((await call(`/inbox/${notificationId}`, 'DELETE')).body, { id: notificationId, isRead: false });
+  assert.equal((await call(`/inbox/${notificationId}`, 'DELETE')).status, 404);
+  assert.equal(entries.length, 1);
+  entries.push({ _id: notificationId, user: userId, isRead: true });
+  assert.deepEqual((await call(`/inbox/${notificationId}`, 'DELETE')).body, { id: notificationId, isRead: true });
+  Notification.findOneAndDelete = async () => { throw new Error('Inbox storage unavailable'); };
+  const failure = await call(`/inbox/${notificationId}`, 'DELETE');
+  assert.equal(failure.status, 500);
+  assert.equal(failure.body.message, 'Inbox storage unavailable');
+});
+
 test('admin send-user, send-many, broadcast and self-send reach inboxes without any Expo tokens', async (t) => {
   const { User, Notification, saved } = fixture();
   const call = await serve(t, { User, Notification }, { userId, isAdmin: true });
