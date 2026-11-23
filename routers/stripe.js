@@ -219,7 +219,7 @@ router.post('/create-payment-intent', async (req, res) => {
 
     console.log(`[Stripe] DB=${req.dbName} using key=${resolvedKeyName}`);
 
-    const { amount, currency, orderId } = req.body;
+    const { amount, currency, orderId, cardOnly } = req.body;
 
     if (!amount || amount <= 0 || !currency) {
       return res.status(400).json({
@@ -232,14 +232,15 @@ router.post('/create-payment-intent', async (req, res) => {
       amount,
       currency,
       metadata: { orderId },
-      automatic_payment_methods: {
-        enabled: true,
-      },
+      ...(cardOnly === true
+        ? { payment_method_types: ['card'] }
+        : { automatic_payment_methods: { enabled: true } }),
     });
 
     res.json({
       client_secret: paymentIntent.client_secret,
       payment_intent_id: paymentIntent.id,
+      payment_method_types: paymentIntent.payment_method_types,
       stripe_mode: paymentIntent.livemode ? 'live' : 'test',
       stripe_key_source: resolvedKeyName,
     });

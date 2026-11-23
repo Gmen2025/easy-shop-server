@@ -45,3 +45,30 @@ test("Ethiopia USD keeps its dedicated merchant in test and live modes", (t) => 
   assert.equal(stripe.getStripe("ETHIOPIA_USD").stripe, null);
   assert.equal(stripe.getPublishableKey("ETHIOPIA_USD"), null);
 });
+
+test("embedded card requests create card-only intents without changing existing clients", async (t) => {
+  environment(t, { STRIPE_MODE: "test", STRIPE_SECRET_KEY: "sk_test_embedded_fixture" });
+  const client = stripe.getStripe("E_ShopUSA").stripe;
+  const original = client.paymentIntents.create;
+  const requests = [];
+  client.paymentIntents.create = async (params) => {
+    requests.push(params);
+    return { id: "pi_test", client_secret: "pi_test_secret", livemode: false,
+      payment_method_types: params.payment_method_types || ["card", "other"] };
+  };
+  t.after(() => { client.paymentIntents.create = original; });
+  const handler = stripe.stack.find((layer) => layer.route?.path === "/create-payment-intent").route.stack[0].handle;
+  const call = async (cardOnly) => {
+    let result;
+    await handler({ dbName: "E_ShopUSA", body: { amount: 1000, currency: "usd", orderId: "order", cardOnly } },
+      { json: (body) => { result = body; }, status: () => { throw new Error("Unexpected error response"); } });
+    return result;
+  };
+  const card = await call(true);
+  assert.deepEqual(requests[0].payment_method_types, ["card"]);
+  assert.equal(requests[0].automatic_payment_methods, undefined);
+  assert.deepEqual(card.payment_method_types, ["card"]);
+  await call(undefined);
+  assert.equal(requests[1].automatic_payment_methods.enabled, true);
+  assert.equal(requests[1].payment_method_types, undefined);
+});
