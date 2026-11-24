@@ -204,13 +204,16 @@ router.get("/accounts/:kind/:accountId", handle(async (req, res) => {
     req.dbModels.SiteSetting.findOne({ key: "bank-account-info" }).lean(),
   ]);
   const walletCurrency = wallet.currencyFor(req.dbName);
+  const cardUnavailableReason = wallet.cardDepositUnavailableReason(walletCurrency, paymentSettings.methods.card,
+    walletCurrency === "USD" && Boolean(require("./stripe").getStripe(req.dbName).stripe), process.env.WALLET_PAYMENT_RETURN_URL);
   res.json({ ...data, entries: data.entries.slice(0, 100), payouts: data.payouts.slice(0, 100), periods,
     wallet: { enabled: walletEnabled, currency: walletCurrency, balance: wallet.balanceMinor(participant) / 100,
       state: wallet.state(participant, walletEnabled), transactions, legacyTransactions,
       bankAccounts: (bankInfo?.bankAccounts || []).filter((entry) => entry.isActive !== false && (entry.currency || walletCurrency) === walletCurrency),
       methods: { bank: paymentSettings.methods.bank,
-        card: walletCurrency === "USD" && paymentSettings.methods.card && Boolean(require("./stripe").getStripe(req.dbName).stripe) && /^https:\/\//.test(process.env.WALLET_PAYMENT_RETURN_URL || ""),
-        telebirr: walletCurrency === "ETB" && paymentSettings.methods.telebirr && require("../helpers/checkout-telebirr").available() } },
+        card: !cardUnavailableReason,
+        telebirr: walletCurrency === "ETB" && paymentSettings.methods.telebirr && require("../helpers/checkout-telebirr").available() },
+      cardUnavailableReason },
     account: publicAccount(participant, req.params.kind), products, inventory, locations,
     automaticPaymentsAvailable: false, schedule: "Weekly requests on Monday (UTC). All payments require an admin-confirmed manual transfer." });
 }));

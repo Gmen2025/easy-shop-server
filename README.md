@@ -83,6 +83,9 @@ USD card deposits use Stripe hosted Checkout with regional credentials matching
 account/profile URL. ETB deposits use the configured Telebirr H5 gateway;
 mock signing/payments and insecure TLS are not accepted. Existing regional
 bank/card/Telebirr availability switches apply to new deposits/payments.
+The Income response includes `wallet.cardUnavailableReason` when a card
+deposit is unavailable, including the missing USA payment switch, Stripe
+credentials or HTTPS return URL. It is null when card deposits are available.
 `POST .../wallet/deposits/:id/start` resumes a saved gateway attempt;
 `POST .../wallet/deposits/:id/verify` performs authenticated server-side queries.
 Redirects/client claims never credit funds. The existing finance scheduler also

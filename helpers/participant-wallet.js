@@ -204,6 +204,13 @@ function stripe(database) {
   if (!result.stripe) throw fail("USD card deposits require Stripe credentials matching STRIPE_MODE.", 503);
   return result.stripe;
 }
+function cardDepositUnavailableReason(currency, enabled, stripeConfigured, paymentReturnUrl) {
+  if (currency !== "USD") return "Card deposits are available for USD wallets only.";
+  if (!enabled) return "Card payments are disabled in the regional Admin payment settings.";
+  if (!stripeConfigured) return "Admin must configure USD Stripe credentials matching STRIPE_MODE.";
+  if (!/^https:\/\//.test(paymentReturnUrl || "")) return "Admin must configure an HTTPS wallet payment return URL.";
+  return null;
+}
 function returnUrl() {
   const value = process.env.WALLET_PAYMENT_RETURN_URL;
   if (!value || !/^https:\/\//.test(value)) throw fail("Admin must configure an HTTPS wallet payment return URL.", 503);
@@ -317,4 +324,4 @@ async function verifyLegacy(models, transactionId, database, action, actor, conf
   });
 }
 module.exports = { KEY, fail, minor, policy, state, config, lockConfig, currencyFor, balanceMinor, accountModel,
-  setConfig, setPolicy, feeMinor, settleEntries, deposit, start, verify, charge, verifyLegacy };
+  setConfig, setPolicy, feeMinor, settleEntries, deposit, start, verify, charge, verifyLegacy, cardDepositUnavailableReason };

@@ -342,7 +342,15 @@ test("driver and store income returns active regional bank details and configure
       assert.equal(res.body.wallet.currency, currency);
       assert.deepEqual(res.body.wallet.bankAccounts.map((bank) => bank._id), [bankId]);
       assert.deepEqual(res.body.wallet.methods, { bank: true, card, telebirr: tele });
+      if (card) assert.equal(res.body.wallet.cardUnavailableReason, null);
+      else assert.match(res.body.wallet.cardUnavailableReason, /USD wallets only/);
     }
+    process.env.WALLET_PAYMENT_RETURN_URL = "";
+    const unavailable = response();
+    await action({ params: { kind, accountId: "me" }, auth: { userId: "user" }, dbName: "E_ShopUSA", dbModels: models }, unavailable);
+    assert.equal(unavailable.body.wallet.methods.card, false);
+    assert.match(unavailable.body.wallet.cardUnavailableReason, /HTTPS/);
+    process.env.WALLET_PAYMENT_RETURN_URL = "https://example.test/income";
   }
 });
 

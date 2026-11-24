@@ -213,22 +213,37 @@ test("already-credited legacy receipts cannot fund a second deposit", async () =
   assert.equal(f.accounts()[0].walletBalance, 100);
   assert.equal(f.entries()[0].status, "pending");
 });
-test("USD card deposits verify the saved session amount, currency and tenant before credit, even after disabling deposits", async () => {
-  const f = fixture();
-  const entry = await f.wallet.deposit(f.models, "store", "store1", "E_ShopUSA", { amount: 20, method: "card", currency: "USD", requestKey: "card-request1" });
-  const started = await f.wallet.start(f.models, entry, "E_ShopUSA");
-  assert.equal(f.cardCreates(), 1);
-  assert.equal(started.gatewayId, "cs_saved");
-  assert.equal(f.accounts()[1].walletBalance, 100);
-  f.checkout().amount_total = 2001;
-  await assert.rejects(f.wallet.verify(f.models, entry._id, "store", "store1", "E_ShopUSA", {}, {}), /does not match/);
-  f.checkout().amount_total = 2000;
-  f.checkout().metadata.database = "another-tenant";
-  await assert.rejects(f.wallet.verify(f.models, entry._id, "store", "store1", "E_ShopUSA", {}, {}), /does not match/);
-  f.checkout().metadata.database = "E_ShopUSA";
-  await f.wallet.setConfig(f.models, false, "admin");
-  await f.wallet.verify(f.models, entry._id, "store", "store1", "E_ShopUSA", {}, {});
-  assert.equal(f.accounts()[1].walletBalance, 120);
+test("card deposit availability identifies each configuration requirement", () => {
+  const { wallet } = fixture();
+  const reason = wallet.cardDepositUnavailableReason;
+  assert.match(reason("ETB", true, true, "https://example.com"), /USD wallets only/);
+  assert.match(reason("USD", false, true, "https://example.com"), /disabled/);
+  assert.match(reason("USD", true, false, "https://example.com"), /Stripe credentials/);
+  assert.match(reason("USD", true, true, "http://example.com"), /HTTPS/);
+  assert.equal(reason("USD", true, true, "https://example.com"), null);
+});
+test("store and driver USD card deposits verify the saved session before credit, even after disabling deposits", async () => {
+  for (const [kind, id, index] of [["store", "store1", 1], ["driver", "driver1", 0]]) {
+    const f = fixture();
+    const entry = await f.wallet.deposit(f.models, kind, id, "E_ShopUSA", { amount: 20, method: "card", currency: "USD", requestKey: "card-request1" });
+    const started = await f.wallet.start(f.models, entry, "E_ShopUSA");
+    assert.equal(f.cardCreates(), 1);
+    assert.equal(started.gatewayId, "cs_saved");
+    assert.equal(f.accounts()[index].walletBalance, 100);
+    f.checkout().payment_status = "unpaid";
+    await assert.rejects(f.wallet.verify(f.models, entry._id, kind, id, "E_ShopUSA", {}, {}), /not yet confirmed/);
+    f.checkout().payment_status = "paid";
+    f.checkout().amount_total = 2001;
+    await assert.rejects(f.wallet.verify(f.models, entry._id, kind, id, "E_ShopUSA", {}, {}), /does not match/);
+    f.checkout().amount_total = 2000;
+    f.checkout().metadata.database = "another-tenant";
+    await assert.rejects(f.wallet.verify(f.models, entry._id, kind, id, "E_ShopUSA", {}, {}), /does not match/);
+    f.checkout().metadata.database = "E_ShopUSA";
+    await f.wallet.setConfig(f.models, false, "admin");
+    await f.wallet.verify(f.models, entry._id, kind, id, "E_ShopUSA", {}, {});
+    await f.wallet.verify(f.models, entry._id, kind, id, "E_ShopUSA", {}, {});
+    assert.equal(f.accounts()[index].walletBalance, 120);
+  }
 });
 test("Telebirr uses one persisted merchant order and server queries, not redirects; pending payments hold the credit", async () => {
   const f = fixture();
