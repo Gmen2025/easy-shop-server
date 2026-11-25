@@ -9,14 +9,19 @@ payments. Existing local credentials are not automatically replaced or enabled.
 
 1. In the backend environment set `STRIPE_MODE=test`, and use Stripe sandbox
    `sk_test_*` credentials for `STRIPE_KEY_E_SHOPUSA` (or its existing USA alias).
+   Alternatively, `STRIPE_SECRET_KEY_TEST` and `STRIPE_PUBLISHABLE_KEY_TEST`
+   provide the USA sandbox keys without replacing the corresponding live keys;
+   they are considered only when `STRIPE_MODE=test`.
    No live key is used as a fallback in test mode. Omitted `STRIPE_MODE` retains
    live-only behavior; invalid modes and mismatched keys block payment.
-2. Set the matching sandbox `pk_test_*` in website
-   `VITE_STRIPE_PUBLISHABLE_KEY` and mobile
-   `EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY`. Never put secret keys in clients.
+2. Set the matching USA publishable key on the backend. Website and native
+   card forms load the current key from authenticated `GET /stripe/config`;
+   hosted wallet deposits use the backend's selected secret key. Reload the
+   card form after changing mode. Never put secret keys in clients.
    Ethiopia products/services charged in USD require the dedicated
    `STRIPE_SECRET_KEY_ETHIOPIA_USD` and `STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD`,
-   both matching `STRIPE_MODE`; configure a current Admin FX quote as well.
+   or the corresponding `_TEST` variables for test mode. Both keys must match
+   `STRIPE_MODE` and the same merchant; configure a current Admin FX quote.
 3. Configure Telebirr with the **sandbox credentials and exact API/checkout
    URLs supplied by Telebirr**: `TELEBIRR_BASE_URL`, `TELEBIRR_WEB_BASE_URL`,
    `TELEBIRR_APP_ID`, `TELEBIRR_FABRIC_APP_ID`, `TELEBIRR_MERCHANT_APP_ID`,

@@ -34,6 +34,24 @@ test("default live behavior is preserved and invalid modes fail closed", (t) => 
   assert.equal(stripe.getStripe("E_ShopUSA").keyInvalidReason, "invalid_mode");
 });
 
+test("test-suffixed USA keys work only in test mode without replacing live credentials", (t) => {
+  environment(t, { STRIPE_MODE: "test", STRIPE_KEY_E_SHOPUSA: "sk_live_fixture",
+    STRIPE_SECRET_KEY_TEST: "sk_test_fixture", STRIPE_PUBLISHABLE_KEY: "pk_live_fixture",
+    STRIPE_PUBLISHABLE_KEY_TEST: "pk_test_fixture" });
+  assert.equal(stripe.getStripe("E_ShopUSA").resolvedKeyName, "STRIPE_SECRET_KEY_TEST");
+  assert.ok(stripe.getStripe("E_ShopUSA").stripe);
+  assert.equal(stripe.getPublishableKey("E_ShopUSA"), "pk_test_fixture");
+  assert.equal(stripe.getStripe("ETHIOPIA_USD").stripe, null);
+  assert.equal(stripe.getPublishableKey("ETHIOPIA_USD"), null);
+  process.env.STRIPE_MODE = "live";
+  assert.equal(stripe.getStripe("E_ShopUSA").resolvedKeyName, "STRIPE_KEY_E_SHOPUSA");
+  assert.equal(stripe.getPublishableKey("E_ShopUSA"), "pk_live_fixture");
+  delete process.env.STRIPE_KEY_E_SHOPUSA;
+  delete process.env.STRIPE_PUBLISHABLE_KEY;
+  assert.equal(stripe.getStripe("E_ShopUSA").stripe, null);
+  assert.equal(stripe.getPublishableKey("E_ShopUSA"), null);
+});
+
 test("Ethiopia USD keeps its dedicated merchant in test and live modes", (t) => {
   environment(t, { STRIPE_MODE: "test", STRIPE_SECRET_KEY: "sk_test_usa_fixture" });
   assert.equal(stripe.getStripe("ETHIOPIA_USD").stripe, null);
@@ -44,6 +62,50 @@ test("Ethiopia USD keeps its dedicated merchant in test and live modes", (t) => 
   process.env.STRIPE_MODE = "live";
   assert.equal(stripe.getStripe("ETHIOPIA_USD").stripe, null);
   assert.equal(stripe.getPublishableKey("ETHIOPIA_USD"), null);
+});
+
+test("card configuration returns only a matching mode and publishable key, with no fallback to live", (t) => {
+  environment(t, { STRIPE_MODE: "test", STRIPE_SECRET_KEY_TEST: "sk_test_fixture",
+    STRIPE_PUBLISHABLE_KEY_TEST: "pk_test_fixture", STRIPE_KEY_E_SHOPUSA: "sk_live_fixture",
+    STRIPE_PUBLISHABLE_KEY: "pk_live_fixture" });
+  const handler = stripe.stack.find((layer) => layer.route?.path === "/config").route.stack[0].handle;
+  const response = () => ({ statusCode: 200, status(value) { this.statusCode = value; return this; },
+    set(name, value) { this[name] = value; return this; }, json(value) { this.body = value; return this; } });
+  let res = response();
+  handler({ dbName: "E_ShopUSA" }, res);
+  assert.deepEqual(res.body, { mode: "test", publishableKey: "pk_test_fixture" });
+  assert.equal(res["Cache-Control"], "no-store");
+  process.env.STRIPE_MODE = "live";
+  res = response();
+  handler({ dbName: "E_ShopUSA" }, res);
+  assert.deepEqual(res.body, { mode: "live", publishableKey: "pk_live_fixture" });
+  delete process.env.STRIPE_PUBLISHABLE_KEY;
+  res = response();
+  handler({ dbName: "E_ShopUSA" }, res);
+  assert.equal(res.statusCode, 503);
+});
+
+test("card mode is available independently of regional keys and rejects invalid settings", (t) => {
+  environment(t, { STRIPE_MODE: "test" });
+  const handler = stripe.stack.find((layer) => layer.route?.path === "/mode").route.stack[0].handle;
+  const response = () => ({ statusCode: 200, status(value) { this.statusCode = value; return this; },
+    set(name, value) { this[name] = value; return this; }, json(value) { this.body = value; return this; } });
+  let res = response();
+  handler({}, res);
+  assert.deepEqual(res.body, { mode: "test" });
+  assert.equal(res["Cache-Control"], "no-store");
+  process.env.STRIPE_MODE = "invalid";
+  res = response();
+  handler({}, res);
+  assert.equal(res.statusCode, 503);
+});
+
+test("dedicated Ethiopia test keys do not use USA credentials", (t) => {
+  environment(t, { STRIPE_MODE: "test", STRIPE_SECRET_KEY_TEST: "sk_test_usa",
+    STRIPE_SECRET_KEY_ETHIOPIA_USD: "sk_live_ethio", STRIPE_SECRET_KEY_ETHIOPIA_USD_TEST: "sk_test_ethio",
+    STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD: "pk_live_ethio", STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD_TEST: "pk_test_ethio" });
+  assert.equal(stripe.getStripe("ETHIOPIA_USD").resolvedKeyName, "STRIPE_SECRET_KEY_ETHIOPIA_USD_TEST");
+  assert.equal(stripe.getPublishableKey("ETHIOPIA_USD"), "pk_test_ethio");
 });
 
 test("embedded card requests create card-only intents without changing existing clients", async (t) => {

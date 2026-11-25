@@ -554,7 +554,9 @@ function stripeFor(database, route, deps) {
   const stripeRouter = require("../routers/stripe");
   const configuration = stripeRouter.getStripe(keyName);
   if (!configuration.stripe) throw conflict("Card payment is not configured for this region. Choose bank transfer or contact support.");
-  return { stripe: configuration.stripe, publishableKey: keyName === "ETHIOPIA_USD" ? stripeRouter.getPublishableKey(keyName) : null };
+  const publishableKey = stripeRouter.getPublishableKey(keyName);
+  if (!publishableKey) throw conflict("Card payment is not configured for this region. Choose bank transfer or contact support.");
+  return { stripe: configuration.stripe, publishableKey };
 }
 function customerMutate(models, database, auth, groupId, shipmentId, { admin = false, resolveModels } = {}, work) {
   if (!mongoose.isValidObjectId(groupId)) throw conflict("Invalid identifier.");

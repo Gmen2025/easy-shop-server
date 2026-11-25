@@ -17,7 +17,9 @@ function normalizeDbEnvSuffix(dbName) {
 }
 
 function getStripeKeyCandidates(dbName) {
-  if (dbName === 'ETHIOPIA_USD') return ['STRIPE_SECRET_KEY_ETHIOPIA_USD'];
+  if (dbName === 'ETHIOPIA_USD') return process.env.STRIPE_MODE === 'test'
+    ? ['STRIPE_SECRET_KEY_ETHIOPIA_USD_TEST', 'STRIPE_SECRET_KEY_ETHIOPIA_USD']
+    : ['STRIPE_SECRET_KEY_ETHIOPIA_USD'];
   const dbSuffix = normalizeDbEnvSuffix(dbName);
   const candidates = [];
   const aliases = new Set();
@@ -56,6 +58,7 @@ function getStripeKeyCandidates(dbName) {
       });
   }
 
+  if (process.env.STRIPE_MODE === 'test') candidates.push('STRIPE_SECRET_KEY_TEST');
   candidates.push('STRIPE_KEY');
   candidates.push('STRIPE_SECRET_KEY');
   candidates.push('STRIPE_API_KEY');
@@ -88,9 +91,12 @@ function isStripeSecretKey(apiKey) {
 
 function getPublishableKey(dbName) {
   const mode = process.env.STRIPE_MODE || 'live';
-  const name = dbName === 'ETHIOPIA_USD' ? 'STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD' : 'STRIPE_PUBLISHABLE_KEY';
-  const key = String(process.env[name] || '').trim();
-  return ['test', 'live'].includes(mode) && key.startsWith(`pk_${mode}_`) ? key : null;
+  if (!['test', 'live'].includes(mode)) return null;
+  const names = dbName === 'ETHIOPIA_USD' ?
+    (mode === 'test' ? ['STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD_TEST', 'STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD'] : ['STRIPE_PUBLISHABLE_KEY_ETHIOPIA_USD']) :
+    mode === 'test' ? ['STRIPE_PUBLISHABLE_KEY_TEST', 'STRIPE_PUBLISHABLE_KEY'] : ['STRIPE_PUBLISHABLE_KEY'];
+  return names.map((name) => String(process.env[name] || '').trim())
+    .find((key) => key.startsWith(`pk_${mode}_`)) || null;
 }
 
 function getStripe(dbName) {
@@ -142,6 +148,25 @@ function getStripe(dbName) {
     keyCandidates,
   };
 }
+
+router.get('/mode', (req, res) => {
+  const mode = process.env.STRIPE_MODE || 'live';
+  res.set('Cache-Control', 'no-store');
+  if (!['test', 'live'].includes(mode)) {
+    return res.status(503).json({ message: 'Card payment mode is invalid.' });
+  }
+  return res.json({ mode });
+});
+
+router.get('/config', (req, res) => {
+  const mode = process.env.STRIPE_MODE || 'live';
+  const publishableKey = getPublishableKey(req.dbName);
+  if (!getStripe(req.dbName).stripe || !publishableKey) {
+    return res.status(503).json({ message: 'Card payment requires matching Stripe credentials for the current payment mode.' });
+  }
+  res.set('Cache-Control', 'no-store');
+  return res.json({ mode, publishableKey });
+});
 
 /**
  * @swagger

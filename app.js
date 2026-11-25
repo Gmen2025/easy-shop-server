@@ -206,6 +206,7 @@ app.use('/', cloudinaryRouter);
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 3001;
+const HOST = process.env.HOST || '0.0.0.0';
 
 app.set('io', null);
 
@@ -222,8 +223,7 @@ function getConfiguredStripeEnvNames() {
 connectDefaultDatabase().then(() => {
   require('./service/financeScheduler').startFinanceScheduler();
   console.log('Database connection is ready...');
-   // Bind to 0.0.0.0 to accept connections from any network interface
-    const server = app.listen(PORT, '0.0.0.0', () => {
+    const server = app.listen(PORT, HOST, () => {
         const networkInterfaces = require('os').networkInterfaces();
         const addresses = [];
         
@@ -238,7 +238,7 @@ connectDefaultDatabase().then(() => {
         
         console.log(`Server is running on:`);
         console.log(`- http://localhost:${PORT}`);
-        addresses.forEach(addr => {
+        if (HOST === '0.0.0.0') addresses.forEach(addr => {
             console.log(`- http://${addr}:${PORT}`);
         });
         console.log(`API available at ${process.env.API_URL}`);
